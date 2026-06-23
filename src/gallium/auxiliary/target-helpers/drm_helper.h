@@ -137,6 +137,35 @@ DRM_DRIVER_DESCRIPTOR(nouveau, NULL, 0)
 DRM_DRIVER_DESCRIPTOR_STUB(nouveau)
 #endif
 
+/* Open NVIDIA driver via nvidia-drm KMS/DRM node + RM (/dev/nvidiactl).
+ * Kernel driver name is "nvidia-drm"; Mesa driver is nvgpu. */
+#ifdef GALLIUM_NVGPU
+#include "nvgpu/nvgpu_public.h"
+
+static struct pipe_screen *
+pipe_nvidia_drm_create_screen(int fd, const struct pipe_screen_config *config)
+{
+   struct pipe_screen *screen;
+
+   screen = nvgpu_screen_create(fd, config, NULL);
+   return screen ? debug_screen_wrap(screen) : NULL;
+}
+DEFINE_DRM_DRIVER_DESCRIPTOR(nvidia_drm_driver_descriptor, nvidia_drm, NULL, 0,
+                             pipe_nvidia_drm_create_screen)
+
+#else
+static struct pipe_screen *
+pipe_nvidia_drm_create_screen(int fd, const struct pipe_screen_config *config)
+{
+   (void)fd;
+   (void)config;
+   fprintf(stderr, "nvidia-drm: nvgpu driver not built\n");
+   return NULL;
+}
+DEFINE_DRM_DRIVER_DESCRIPTOR(nvidia_drm_driver_descriptor, nvidia_drm, NULL, 0,
+                             pipe_nvidia_drm_create_screen)
+#endif
+
 #if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
 const driOptionDescription v3d_driconf[] = {
       #include "v3d/driinfo_v3d.h"

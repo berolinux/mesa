@@ -105,6 +105,9 @@ endif
 if with_any_nouveau
   subdir('nouveau')
 endif
+if with_gallium_nvgpu or with_nvrm_vk
+  subdir('nvidia')
+endif
 if with_gfxstream_vk
   dep_virtgpu_kumquat_ffi = null_dep
   if with_virtgpu_kumquat

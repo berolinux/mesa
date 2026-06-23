@@ -101,6 +101,11 @@ if with_gallium_nouveau
 else
   driver_nouveau = declare_dependency()
 endif
+if with_gallium_nvgpu
+  subdir('drivers/nvgpu')
+else
+  driver_nvgpu = declare_dependency()
+endif
 if with_gallium_freedreno
   subdir('winsys/freedreno/drm')
   subdir('drivers/freedreno')

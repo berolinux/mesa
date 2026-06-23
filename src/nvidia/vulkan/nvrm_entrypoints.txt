@@ -1,0 +1,32 @@
+# Entrypoints implemented by the nvrm Vulkan driver.
+# Runtime dispatch uses vk_device/vk_instance common entrypoints for the rest.
+
+prefix nvrm
+
+# Instance
+CreateInstance
+DestroyInstance
+GetInstanceProcAddr
+
+# Physical device
+GetPhysicalDeviceProperties2
+GetPhysicalDeviceQueueFamilyProperties2
+GetPhysicalDeviceMemoryProperties2
+
+# Device
+CreateDevice
+DestroyDevice
+GetDeviceQueue2
+
+# Memory
+AllocateMemory
+FreeMemory
+MapMemory
+UnmapMemory
+
+# Commands
+BeginCommandBuffer
+EndCommandBuffer
+CmdPipelineBarrier2
+CmdClearColorImage
+CmdCopyBuffer2
