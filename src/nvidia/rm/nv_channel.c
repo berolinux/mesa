@@ -161,15 +161,58 @@ nv_channel_try_schedule(struct nv_channel *ch)
 #endif /* HAVE_LIBDRM_NVIDIA */
 
 /* Fallback class IDs (OGKM + 610.43.02 binary ladders; prefer refined/bound over these) */
+/* Pass8 imm counts: prefer newest common classes in 610.43.02 ladders */
 #ifndef NV_CH_FALLBACK_COPY
-#define NV_CH_FALLBACK_COPY     0x0000c8b5u  /* HOPPER_DMA_COPY_A — common in 610 RE */
+#define NV_CH_FALLBACK_COPY     0x0000c8b5u  /* C8B5 — 29/31/11 hits glcore/egl/vksc */
 #endif
 #ifndef NV_CH_FALLBACK_COMPUTE
-#define NV_CH_FALLBACK_COMPUTE  0x0000c7c0u  /* AMPERE_COMPUTE_B / Hopper-line methods */
+#define NV_CH_FALLBACK_COMPUTE  0x0000c8c0u  /* pass8: try C8C0 before C7C0 in ladders */
 #endif
 #ifndef NV_CH_FALLBACK_3D
-#define NV_CH_FALLBACK_3D       0x0000c797u  /* AMPERE_B_3D_B — common in 610 RE */
+#define NV_CH_FALLBACK_3D       0x0000c997u  /* pass8: C997 in glcore ladder */
 #endif
+
+int
+nv_channel_add_userd_slot(struct nv_channel *ch, volatile void *userd_map)
+{
+   unsigned i;
+
+   if (!ch || !userd_map)
+      return -EINVAL;
+   if (!ch->userd_slot_count && ch->userd) {
+      ch->userd_slots[0] = (volatile void *)ch->userd;
+      ch->userd_slot_count = 1;
+   }
+   for (i = 0; i < ch->userd_slot_count; i++) {
+      if (ch->userd_slots[i] == userd_map)
+         return 0; /* already registered */
+   }
+   if (ch->userd_slot_count >= NV_CHANNEL_MAX_USERD_SLOTS)
+      return -ENOSPC;
+   ch->userd_slots[ch->userd_slot_count++] = userd_map;
+   return 0;
+}
+
+int
+nv_channel_add_usermode_slot(struct nv_channel *ch, volatile void *usermode_map)
+{
+   unsigned i;
+
+   if (!ch || !usermode_map)
+      return -EINVAL;
+   if (!ch->usermode_slot_count && ch->usermode_map) {
+      ch->usermode_slots[0] = ch->usermode_map;
+      ch->usermode_slot_count = 1;
+   }
+   for (i = 0; i < ch->usermode_slot_count; i++) {
+      if (ch->usermode_slots[i] == usermode_map)
+         return 0;
+   }
+   if (ch->usermode_slot_count >= NV_CHANNEL_MAX_USERD_SLOTS)
+      return -ENOSPC;
+   ch->usermode_slots[ch->usermode_slot_count++] = usermode_map;
+   return 0;
+}
 
 uint32_t
 nv_channel_resolve_class_copy(const struct nv_channel *ch, uint32_t explicit_class)
@@ -274,6 +317,11 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       goto fail;
    ch->h_userd_mem = nv_rm_bo_handle(ch->userd_bo);
    ch->userd = nv_rm_bo_map(ch->userd_bo);
+   /* Tick87: slot 0 always primary USERD (pass8 multi-USERD loop up to 9) */
+   if (ch->userd) {
+      ch->userd_slots[0] = (volatile void *)ch->userd;
+      ch->userd_slot_count = 1;
+   }
    if (!ch->userd)
       goto fail;
    /* GPGet/GPPut/Put/Get must start at 0 or first submit races with garbage */
@@ -896,6 +944,14 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       (void)nv_rm_device_ensure_usermode(ch->rm);
       ch->usermode_map = nv_rm_device_usermode_map(ch->rm);
    }
+   if (ch->usermode_map && ch->usermode_slot_count == 0) {
+      ch->usermode_slots[0] = ch->usermode_map;
+      ch->usermode_slot_count = 1;
+   }
+   if (ch->userd && ch->userd_slot_count == 0) {
+      ch->userd_slots[0] = (volatile void *)ch->userd;
+      ch->userd_slot_count = 1;
+   }
    if (!ch->has_work_submit_token && ch->rm &&
        (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu)) {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
@@ -1043,25 +1099,44 @@ nv_channel_kickoff(struct nv_channel *ch)
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
 
    /*
-    * libdrm submit_one_multi (pass7/glcore@ac5540): entry → GPPut@+0x8c on all
-    * USERD maps (up to 9; we have one today) → (if class>C36E) sfence +
-    * doorbell@usermode+0x90 with work_submit_token.  Class gate inside multi/ex.
-    * When multi-subdevice USERDs are added to nv_channel, extend userd_maps[].
+    * libdrm submit_one_multi (pass7/8 glcore@ac5540): entry → GPPut@+0x8c on all
+    * USERD slots (up to 9) → (if class>C36E) sfence + multi-doorbell@+0x90.
+    * Tick87: pass userd_slots[] / usermode_slots[] (slot0 = primary userd/usermode).
     */
    ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL &&
                    nvidia_gpfifo_class_needs_doorbell(ch->gpfifo_class);
 
    {
-      volatile void *userd_maps[1];
-      volatile void *usermode_maps[1];
+      volatile void *userd_maps[NV_CHANNEL_MAX_USERD_SLOTS];
+      volatile void *usermode_maps[NV_CHANNEL_MAX_USERD_SLOTS];
+      unsigned nu = ch->userd_slot_count ? ch->userd_slot_count : 0;
+      unsigned nm = ch->usermode_slot_count ? ch->usermode_slot_count : 0;
+      unsigned i;
 
-      userd_maps[0] = (volatile void *)ch->userd;
-      usermode_maps[0] = ch->usermode_map;
+      if (!nu && ch->userd) {
+         userd_maps[0] = (volatile void *)ch->userd;
+         nu = 1;
+      } else {
+         for (i = 0; i < nu && i < NV_CHANNEL_MAX_USERD_SLOTS; i++)
+            userd_maps[i] = ch->userd_slots[i];
+      }
+      if (!nm && ch->usermode_map) {
+         usermode_maps[0] = ch->usermode_map;
+         nm = 1;
+      } else {
+         for (i = 0; i < nm && i < NV_CHANNEL_MAX_USERD_SLOTS; i++)
+            usermode_maps[i] = ch->usermode_slots[i]
+                                  ? ch->usermode_slots[i]
+                                  : ch->usermode_map;
+      }
+      if (!nu)
+         return -EINVAL;
+
       r = nvidia_gpfifo_submit_one_multi(ch->gpfifo_cpu, ch->gpfifo_entries,
-                                         &ch->gpfifo_put, userd_maps, 1,
+                                         &ch->gpfifo_put, userd_maps, nu,
                                          pb_addr, seg_dwords,
                                          ch->usermode_map,
-                                         usermode_maps, 1,
+                                         usermode_maps, nm ? nm : 1,
                                          ch->work_submit_token,
                                          ch->has_work_submit_token,
                                          ch->gpfifo_class,

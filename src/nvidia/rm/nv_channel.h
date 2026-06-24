@@ -84,6 +84,14 @@ struct nv_channel {
 
    /* CPU mappings */
    volatile uint32_t *userd;       /* USERD control block (GPPut/GPGet/...) */
+   /*
+    * Pass8/tick87: multi-USERD for MIG/multi-subdevice (glcore ac5526 loops 9).
+    * Slot 0 mirrors userd; additional slots registered via nv_channel_add_userd_slot.
+    * Kickoff passes all non-NULL slots to nvidia_gpfifo_submit_one_multi.
+    */
+#define NV_CHANNEL_MAX_USERD_SLOTS  9
+   volatile void *userd_slots[NV_CHANNEL_MAX_USERD_SLOTS];
+   unsigned userd_slot_count;      /* 1..9; at least 1 when userd mapped */
    volatile void *error_notifier;  /* mapped notifier memory (nvidia_notification_t) */
    uint32_t *gpfifo_cpu;           /* GPFIFO ring (pairs of dwords) */
    uint32_t *push_cpu;             /* pushbuffer backing */
@@ -97,12 +105,20 @@ struct nv_channel {
 
    /* Doorbell: pointer into device usermode region (not owned by channel) */
    volatile void *usermode_map;
+   /* Optional multi-doorbell maps (pass8: usermode_map[i]+0x90); slot 0 = usermode_map */
+   volatile void *usermode_slots[NV_CHANNEL_MAX_USERD_SLOTS];
+   unsigned usermode_slot_count;
 
    struct nv_rm_bo *userd_bo;
    struct nv_rm_bo *notifier_bo;
    struct nv_rm_bo *gpfifo_bo;
    struct nv_rm_bo *push_bo;
 };
+
+/** Register an additional USERD host mapping (slot 1..8). Slot 0 is primary userd. */
+int nv_channel_add_userd_slot(struct nv_channel *ch, volatile void *userd_map);
+/** Register an additional usermode/doorbell page (MIG multi-subdevice). */
+int nv_channel_add_usermode_slot(struct nv_channel *ch, volatile void *usermode_map);
 
 struct nv_channel *
 nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
