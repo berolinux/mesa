@@ -63,18 +63,19 @@ nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    const struct nv_device_info *info = cmd->device->info;
+   uint32_t class_3d = info ? info->class_3d : 0;
+   const uint32_t *c = pColor ? pColor->uint32 : NULL;
    (void)image;
    (void)imageLayout;
    (void)rangeCount;
    (void)pRanges;
 
-   if (!cmd->push_map || !info)
+   if (!cmd->push_map)
       return;
 
-   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_push_method(&cmd->push, 0x0000, info->class_3d);
-   if (pColor)
-      nv_push_methodN(&cmd->push, 0x0d80, pColor->uint32, 4);
+   /* Colour-only CLEAR_SURFACE via NVC597 methods (render targets must be
+    * programmed separately; this records the clear values + CLEAR_SURFACE). */
+   nv_3d_push_clear(&cmd->push, class_3d, 0x10 /* PIPE_CLEAR_COLOR0 */, c, 0.0f, 0);
 }
 
 VKAPI_ATTR void VKAPI_CALL

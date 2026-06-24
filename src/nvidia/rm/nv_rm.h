@@ -27,6 +27,8 @@ struct nv_rm_bo_req {
    bool vram;
    bool cpu_access;
    bool no_scanout;
+   /** If true, map BO into device VASpace via NVOS46 after alloc (needs VAS). */
+   bool map_gpu_va;
 };
 
 struct nv_rm_device *
@@ -34,6 +36,26 @@ nv_rm_device_open(int drm_fd, int gpu_index);
 
 void
 nv_rm_device_close(struct nv_rm_device *dev);
+
+/** FERMI_VASPACE_A handle (0 if not allocated / using default device VAS) */
+uint32_t
+nv_rm_device_vaspace_handle(struct nv_rm_device *dev);
+
+/** Usermode doorbell CPU mapping (VOLTA_USERMODE_A); NULL if unavailable */
+volatile void *
+nv_rm_device_usermode_map(struct nv_rm_device *dev);
+
+/** Ensure device has an explicit VASpace; returns 0 on success or if already ok */
+int
+nv_rm_device_ensure_vaspace(struct nv_rm_device *dev);
+
+/** Ensure usermode doorbell object is allocated and mapped */
+int
+nv_rm_device_ensure_usermode(struct nv_rm_device *dev);
+
+/** Map an existing BO into the device VASpace; updates BO gpu_offset on success */
+int
+nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo);
 
 int
 nv_rm_device_fd_ctl(struct nv_rm_device *dev);

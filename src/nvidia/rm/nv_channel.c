@@ -72,13 +72,20 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    gpfifo_bytes = gpfifo_entries * NV_GP_ENTRY_SIZE;
    push_bytes = push_dwords * 4;
 
-   /* USERD - prefer VRAM uncached; fall back to sysmem */
+   /* Ensure device VAS + usermode doorbell before channel alloc */
+   (void)nv_rm_device_ensure_vaspace(rm);
+   (void)nv_rm_device_ensure_usermode(rm);
+   ch->h_vaspace = nv_rm_device_vaspace_handle(rm);
+   ch->usermode_map = nv_rm_device_usermode_map(rm);
+
+   /* USERD - prefer VRAM uncached; fall back to sysmem; map into VAS */
    memset(&req, 0, sizeof(req));
    req.size = NV_CHANNEL_USERD_SIZE;
    req.alignment = NV_CHANNEL_USERD_SIZE;
    req.vram = info->vram_size_bytes > 0;
    req.cpu_access = true;
    req.no_scanout = true;
+   req.map_gpu_va = true;
    ch->userd_bo = nv_rm_bo_alloc(rm, &req);
    if (!ch->userd_bo && req.vram) {
       req.vram = false;
@@ -97,16 +104,18 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    req.alignment = 4096;
    req.vram = false;
    req.cpu_access = true;
+   req.map_gpu_va = true;
    ch->notifier_bo = nv_rm_bo_alloc(rm, &req);
    if (!ch->notifier_bo)
       goto fail;
    ch->h_error_notifier = nv_rm_bo_handle(ch->notifier_bo);
 
-   /* GPFIFO ring */
+   /* GPFIFO ring (must have GPU VA for gpFifoOffset) */
    req.size = gpfifo_bytes;
    req.alignment = 4096;
    req.vram = false;
    req.cpu_access = true;
+   req.map_gpu_va = true;
    ch->gpfifo_bo = nv_rm_bo_alloc(rm, &req);
    if (!ch->gpfifo_bo)
       goto fail;
@@ -120,6 +129,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    /* Pushbuffer */
    req.size = push_bytes;
    req.alignment = 4096;
+   req.map_gpu_va = true;
    ch->push_bo = nv_rm_bo_alloc(rm, &req);
    if (!ch->push_bo)
       goto fail;
@@ -133,13 +143,11 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    /* Allocate channel object */
    memset(&ch_params, 0, sizeof(ch_params));
    ch_params.hObjectError = ch->h_error_notifier;
-   /* gpFifoOffset: in modern drivers this is a GPU VA; we pass BO offset and
-    * rely on RM default VASpace when hVASpace is 0.  Refinement: allocate an
-    * explicit NV50_MEMORY_VIRTUAL VAS and map BOs into it. */
+   /* gpFifoOffset must be a GPU VA in the channel's VASpace */
    ch_params.gpFifoOffset = ch->gpfifo_gpu_addr;
    ch_params.gpFifoEntries = gpfifo_entries;
    ch_params.flags = 0;
-   ch_params.hVASpace = 0;
+   ch_params.hVASpace = ch->h_vaspace;
    ch_params.hUserdMemory[0] = ch->h_userd_mem;
    ch_params.userdOffset[0] = 0;
    ch_params.engineType = ch->engine_type;
@@ -295,11 +303,10 @@ nv_channel_kickoff(struct nv_channel *ch)
    ud->GPPut = next_put;
    __sync_synchronize();
 
-   /* Doorbell / work submit token: on Volta+ writing the token to the
-    * usermode doorbell BAR page kicks the runlist.  Without a mapped doorbell
-    * we rely on GPPut alone (sufficient on older gens / some RM configs).
-    * TODO: map doorbell via NV0080_CTRL_CMD_DMA_GET_CAPS / usermode region. */
-   (void)ch->work_submit_token;
+   /* Volta+: ring usermode doorbell with work_submit_token (nvidia-push path).
+    * Pre-Volta / missing usermode: GPPut alone is sufficient. */
+   if (ch->has_work_submit_token && ch->usermode_map)
+      nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
 
    ch->push_dw_base = ch->push_dw_used;
    return 0;

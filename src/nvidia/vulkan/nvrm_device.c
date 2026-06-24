@@ -291,35 +291,93 @@ nvrm_GetDeviceQueue2(VkDevice _device, const VkDeviceQueueInfo2 *pQueueInfo,
    *pQueue = nvrm_queue_to_handle(device->queue);
 }
 
+static VkResult
+nvrm_queue_submit(struct vk_queue *vk_queue,
+                  struct vk_queue_submit *submit)
+{
+   struct nvrm_queue *queue =
+      container_of(vk_queue, struct nvrm_queue, vk);
+   struct nv_channel *ch = queue->channel;
+   uint32_t i, j;
+
+   if (!ch || !ch->push_cpu)
+      return VK_ERROR_DEVICE_LOST;
+
+   /* Replay each command buffer's recorded push dwords into the channel
+    * pushbuffer and kick GPFIFO.  Command buffers store a linear method stream
+    * in push_map; we append and kick once per submit (or when space is tight). */
+   for (i = 0; i < submit->command_buffer_count; i++) {
+      struct nvrm_cmd_buffer *cmd =
+         container_of(submit->command_buffers[i], struct nvrm_cmd_buffer, vk);
+      uint32_t *dst;
+      uint32_t need;
+
+      if (!cmd || !cmd->push_map || cmd->push_dw_used == 0)
+         continue;
+
+      need = cmd->push_dw_used;
+      dst = nv_channel_push_begin(ch, need + 8);
+      if (!dst)
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+      for (j = 0; j < need; j++)
+         dst[j] = cmd->push_map[j];
+      ch->push_dw_used = ch->push_dw_base + need;
+
+      if (nv_channel_kickoff(ch) != 0)
+         return VK_ERROR_DEVICE_LOST;
+   }
+
+   /* Wait for GPU to drain GPFIFO when not deferred (simple host sync). */
+   if (!(submit->wait_count == 0 && submit->signal_count == 0))
+      (void)nv_channel_wait_idle(ch, 500000000ull); /* 500ms */
+
+   return VK_SUCCESS;
+}
+
 VkResult
 nvrm_queue_init(struct nvrm_device *device, struct nvrm_queue *queue)
 {
    VkResult result;
+   struct nv_channel *ch;
 
    queue->device = device;
+   queue->channel = NULL;
+   queue->h_channel = 0;
+   queue->h_gpfifo_mem = 0;
+   queue->channel_ready = false;
+
    result = vk_queue_init(&queue->vk, &device->vk, NULL, 0 /* queue_family_index */);
    if (result != VK_SUCCESS)
       return result;
 
-   queue->vk.driver_submit = NULL; /* set when channel path is ready */
-   queue->channel_ready = false;
+   /* Graphics GPFIFO channel via shared nv_channel (VASpace + doorbell included) */
+   if (device->rm) {
+      ch = nv_channel_create(device->rm, 0 /* default GRAPHICS engine */,
+                             NV_CHANNEL_DEFAULT_GPFIFO_ENTRIES,
+                             NV_CHANNEL_DEFAULT_PUSH_DWORDS);
+      if (ch) {
+         queue->channel = ch;
+         queue->h_channel = ch->h_channel;
+         queue->h_gpfifo_mem = ch->h_gpfifo_mem;
+         queue->channel_ready = true;
+         queue->vk.driver_submit = nvrm_queue_submit;
+      }
+   }
 
-   /*
-    * TODO: Allocate GPFIFO channel via RM:
-    *   - NV_CHANNELGPFIFO class matching info->class_gpfifo
-    *   - USERD, notifier, pushbuffer BOs
-    *   - Map USERD and set up doorbell
-    * Sequence from binary driver + kernel class headers.
-    */
+   /* Channel failure is non-fatal at device create time: API still loads;
+    * submits will fail with DEVICE_LOST until channel works. */
    return VK_SUCCESS;
 }
 
 void
 nvrm_queue_finish(struct nvrm_queue *queue)
 {
-   if (queue->h_channel && queue->device)
-      nv_rm_free_object(queue->device->rm,
-                        nv_rm_device_device_handle(queue->device->rm),
-                        queue->h_channel);
+   if (queue->channel) {
+      nv_channel_destroy(queue->channel);
+      queue->channel = NULL;
+      queue->h_channel = 0;
+      queue->channel_ready = false;
+   }
    vk_queue_finish(&queue->vk);
 }

@@ -14,6 +14,7 @@
 #include "nv_rm.h"
 #include "nv_channel.h"
 #include "nv_push.h"
+#include "nv_3d_methods.h"
 
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -329,38 +330,14 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
 {
    struct nv_push push;
    const struct nv_device_info *info = ctx->screen->info;
+   uint32_t class_3d = info ? info->class_3d : 0;
+   const uint32_t *color_ui = color ? color->ui : NULL;
 
    if (!nvgpu_push_start(ctx, &push, 64))
       return;
 
-   nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-   if (info)
-      nv_push_set_object(&push, info->class_3d);
-
-   /*
-    * CLEAR_SURFACE method sequence differs by 3D class generation.
-    * Record SET_OBJECT + colour/depth payload as a stand-in; real method
-    * numbers (e.g. NVC597_CLEAR_SURFACE) will replace these from class headers.
-    */
-   if (buffers & PIPE_CLEAR_COLOR) {
-      uint32_t c[4];
-      if (color)
-         memcpy(c, color->ui, sizeof(c));
-      else
-         memset(c, 0, sizeof(c));
-      nv_push_methodN(&push, 0x0d80, c, 4);
-   }
-   if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
-      union {
-         float f;
-         uint32_t u;
-      } d;
-      d.f = (float)depth;
-      nv_push_method(&push, 0x0d84, d.u);
-      nv_push_method(&push, 0x0d88, stencil);
-   }
-
-   nv_push_wfi(&push);
+   /* NVC597 CLEAR_SURFACE sequence (compatible with NVC697/NVC797 class numbers) */
+   nv_3d_push_clear(&push, class_3d, buffers, color_ui, (float)depth, stencil);
    nvgpu_push_finish(ctx, &push, true);
 }
 
@@ -373,7 +350,6 @@ nvgpu_clear(struct pipe_context *pctx, unsigned buffers,
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    (void)scissor_state;
    nvgpu_emit_clear_methods(ctx, buffers, color, depth, stencil);
-   /* TODO: kick GPFIFO to submit pushbuffer to 3D engine */
 }
 
 static void
@@ -386,25 +362,19 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    struct nv_push push;
    const struct nv_device_info *di = ctx->screen->info;
+   uint32_t class_3d = di ? di->class_3d : 0;
    unsigned i;
 
    (void)drawid_offset;
    (void)indirect;
+   (void)info; /* index_size/mode: need full vertex setup before indexed draws */
 
    for (i = 0; i < num_draws; i++) {
       if (!nvgpu_push_start(ctx, &push, 128))
          return;
 
-      nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-      if (di)
-         nv_push_set_object(&push, di->class_3d);
-
-      /* Real draw: BEGIN / SET_VERTEX_ARRAY / DRAW_* per 3D class headers */
-      nv_push_method(&push, 0x1800, draws[i].count);
-      nv_push_method(&push, 0x1804, draws[i].start);
-      nv_push_method(&push, 0x1808, info->index_size);
-      nv_push_method(&push, 0x180c, info->mode);
-
+      /* NVC597 non-indexed draw: DRAW_VERTEX_ARRAY_BEGIN_END_{A,B} */
+      nv_3d_push_draw_arrays(&push, class_3d, draws[i].start, draws[i].count);
       nvgpu_push_finish(ctx, &push, i + 1 == num_draws);
    }
 }

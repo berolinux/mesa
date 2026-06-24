@@ -28,8 +28,10 @@
 #include "wsi_common.h"
 
 #include "nv_rm.h"
+#include "nv_channel.h"
 #include "nv_device_info.h"
 #include "nv_push.h"
+#include "nv_3d_methods.h"
 
 #define NVRM_API_VERSION VK_MAKE_VERSION(1, 3, 0)
 
@@ -58,7 +60,7 @@ struct nvrm_device {
 struct nvrm_queue {
    struct vk_queue vk;
    struct nvrm_device *device;
-   /* Channel / GPFIFO state - to be filled from RM channel alloc */
+   struct nv_channel *channel;
    uint32_t h_channel;
    uint32_t h_gpfifo_mem;
    bool channel_ready;

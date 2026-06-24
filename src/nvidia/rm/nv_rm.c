@@ -14,6 +14,7 @@
 
 #if defined(HAVE_LIBDRM_NVIDIA)
 #include "nvidia.h"
+#include "nvidia_rm.h"
 #endif
 
 struct nv_rm_device {
@@ -24,6 +25,18 @@ struct nv_rm_device {
    int drm_fd;
    int gpu_index;
    bool valid;
+
+   /* Explicit VASpace (FERMI_VASPACE_A) for channel/BO GPU VAs */
+   uint32_t h_vaspace;
+   uint64_t vas_size;
+   uint64_t vas_base;
+   bool vas_ready;
+
+   /* VOLTA_USERMODE_A / HOPPER_USERMODE_A doorbell BAR mapping */
+   uint32_t h_usermode;
+   uint32_t usermode_class;
+   volatile void *usermode_map;
+   bool usermode_ready;
 };
 
 struct nv_rm_bo {
@@ -32,10 +45,12 @@ struct nv_rm_bo {
    nvidia_bo_handle nvbo;
 #endif
    uint64_t size;
-   uint64_t gpu_offset;
+   uint64_t gpu_offset;      /* GPU VA if mapped into VAS; else RM phys offset */
+   uint64_t dma_offset;      /* NVOS46 returned VA */
    uint32_t rm_handle;
    void *cpu_ptr;
    bool mapped;
+   bool gpu_va_mapped;
 };
 
 bool
@@ -128,6 +143,13 @@ nv_rm_device_open(int drm_fd, int gpu_index)
 
    nv_device_info_select_classes(&dev->info);
    dev->valid = true;
+
+   /* Best-effort: allocate private VASpace + usermode doorbell now so
+    * channels and BO GPU VAs are ready before first submit.  Failures are
+    * non-fatal; channels fall back to default device VAS / GPPut-only kick. */
+   (void)nv_rm_device_ensure_vaspace(dev);
+   (void)nv_rm_device_ensure_usermode(dev);
+
    return dev;
 #else
    (void)drm_fd;
@@ -142,10 +164,145 @@ nv_rm_device_close(struct nv_rm_device *dev)
    if (!dev)
       return;
 #if defined(HAVE_LIBDRM_NVIDIA)
-   if (dev->nvdev)
+   if (dev->nvdev) {
+      if (dev->usermode_map && dev->h_usermode) {
+         nvidia_rm_unmap_memory(dev->nvdev,
+                                nvidia_device_get_subdevice_handle(dev->nvdev),
+                                dev->h_usermode,
+                                (void *)dev->usermode_map, 0);
+         nvidia_rm_free(dev->nvdev,
+                        nvidia_device_get_subdevice_handle(dev->nvdev),
+                        dev->h_usermode);
+      }
+      if (dev->h_vaspace) {
+         nvidia_rm_free(dev->nvdev,
+                        nvidia_device_get_device_handle(dev->nvdev),
+                        dev->h_vaspace);
+      }
       nvidia_device_deinitialize(dev->nvdev);
+   }
 #endif
    free(dev);
+}
+
+uint32_t
+nv_rm_device_vaspace_handle(struct nv_rm_device *dev)
+{
+   return dev ? dev->h_vaspace : 0;
+}
+
+volatile void *
+nv_rm_device_usermode_map(struct nv_rm_device *dev)
+{
+   return dev ? dev->usermode_map : NULL;
+}
+
+int
+nv_rm_device_ensure_vaspace(struct nv_rm_device *dev)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   int ret;
+   uint32_t h_vas = 0;
+   uint64_t va_size = 0, va_base = 0;
+
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   if (dev->vas_ready && dev->h_vaspace)
+      return 0;
+
+   /* Default: let RM pick size/base (pass 0); index = create new private VAS */
+   ret = nvidia_rm_vaspace_alloc(dev->nvdev, &h_vas,
+                                 NV_VASPACE_ALLOCATION_INDEX_GPU_NEW,
+                                 NV_VASPACE_ALLOCATION_FLAGS_NONE,
+                                 0, 0, 0, &va_size, &va_base);
+   if (ret != 0) {
+      /* Fall back to device-global VAS reference if private alloc fails */
+      h_vas = 0;
+      ret = nvidia_rm_vaspace_alloc(dev->nvdev, &h_vas,
+                                    NV_VASPACE_ALLOCATION_INDEX_GPU_DEVICE,
+                                    NV_VASPACE_ALLOCATION_FLAGS_NONE,
+                                    0, 0, 0, &va_size, &va_base);
+   }
+   if (ret != 0)
+      return ret;
+
+   dev->h_vaspace = h_vas;
+   dev->vas_size = va_size;
+   dev->vas_base = va_base;
+   dev->vas_ready = true;
+   return 0;
+#else
+   (void)dev;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_device_ensure_usermode(struct nv_rm_device *dev)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   int ret;
+   uint32_t h_um = 0, h_class = 0;
+   void *map = NULL;
+
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   if (dev->usermode_ready && dev->usermode_map)
+      return 0;
+
+   ret = nvidia_rm_usermode_alloc_map(dev->nvdev, &h_um, &h_class, &map);
+   if (ret != 0)
+      return ret;
+
+   dev->h_usermode = h_um;
+   dev->usermode_class = h_class;
+   dev->usermode_map = (volatile void *)map;
+   dev->usermode_ready = true;
+   return 0;
+#else
+   (void)dev;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   struct nv_rm_device *dev;
+   uint64_t dma_off = 0;
+   int ret;
+
+   if (!bo || !bo->dev || !bo->rm_handle)
+      return -EINVAL;
+   if (bo->gpu_va_mapped)
+      return 0;
+
+   dev = bo->dev;
+   if (!dev->vas_ready || !dev->h_vaspace) {
+      ret = nv_rm_device_ensure_vaspace(dev);
+      if (ret != 0)
+         return ret;
+   }
+
+   ret = nvidia_rm_map_memory_dma(dev->nvdev,
+                                  nvidia_device_get_device_handle(dev->nvdev),
+                                  dev->h_vaspace,
+                                  bo->rm_handle,
+                                  0, bo->size,
+                                  NVOS46_FLAGS_ACCESS_READ_WRITE,
+                                  &dma_off);
+   if (ret != 0)
+      return ret;
+
+   bo->dma_offset = dma_off;
+   bo->gpu_offset = dma_off;
+   bo->gpu_va_mapped = true;
+   return 0;
+#else
+   (void)bo;
+   return -ENOSYS;
+#endif
 }
 
 int
@@ -298,6 +455,14 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
    bo->size = meta.aligned_size ? meta.aligned_size : req->size;
    bo->gpu_offset = meta.gpu_offset;
    bo->rm_handle = meta.rm_handle;
+
+   /* Map into device VASpace when requested or when VAS is ready (default path
+    * for channel push/GPFIFO memory needs real GPU VAs). */
+   if (req->map_gpu_va || dev->vas_ready) {
+      if (nv_rm_bo_map_gpu_va(bo) != 0) {
+         /* Keep BO; gpu_offset may still be usable as RM offset on some paths */
+      }
+   }
    return bo;
 #else
    (void)dev; (void)req;
@@ -311,6 +476,16 @@ nv_rm_bo_free(struct nv_rm_bo *bo)
    if (!bo)
       return;
 #if defined(HAVE_LIBDRM_NVIDIA)
+   if (bo->gpu_va_mapped && bo->dev && bo->dev->nvdev && bo->dev->h_vaspace) {
+      nvidia_rm_unmap_memory_dma(bo->dev->nvdev,
+                                 nvidia_device_get_device_handle(bo->dev->nvdev),
+                                 bo->dev->h_vaspace,
+                                 bo->rm_handle,
+                                 bo->dma_offset,
+                                 bo->size,
+                                 0);
+      bo->gpu_va_mapped = false;
+   }
    if (bo->mapped)
       nvidia_bo_cpu_unmap(bo->nvbo);
    if (bo->nvbo)

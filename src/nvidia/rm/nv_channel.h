@@ -41,6 +41,7 @@ struct nv_channel {
    uint32_t h_error_notifier;
    uint32_t h_push_mem;
    uint32_t h_gpfifo_mem;
+   uint32_t h_vaspace;             /* FERMI_VASPACE_A passed at channel alloc */
    uint32_t engine_type;
    uint32_t gpfifo_class;
    uint32_t work_submit_token;
@@ -58,6 +59,9 @@ struct nv_channel {
    uint32_t push_dw_size;
    uint32_t push_dw_used;
    uint32_t push_dw_base;          /* start of current kickoff segment */
+
+   /* Doorbell: pointer into device usermode region (not owned by channel) */
+   volatile void *usermode_map;
 
    struct nv_rm_bo *userd_bo;
    struct nv_rm_bo *notifier_bo;
