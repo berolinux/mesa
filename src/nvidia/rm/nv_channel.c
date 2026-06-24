@@ -75,6 +75,7 @@ nv_channel_try_schedule(struct nv_channel *ch)
       ch->schedule_bind_rc = sret;
       /* BIND may fail if already bound; still try schedule */
 
+      /* pass9 vdpau@3461b: paramsSize=3 (bEnable/bSkipSubmit/bSkipEnable=0 via memset) */
       memset(&sched, 0, sizeof(sched));
       sched.bEnable = NV_TRUE;
       sched.bSkipSubmit = NV_FALSE;
@@ -2301,7 +2302,7 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
    return last;
 }
 
-/* Pass8 glcore 3D class imm ladder (newest first; C997/CA97/CB97/CC97 present) */
+/* Pass8/9 glcore/egl/vksc 3D imm ladder (newest first; C897×8 glcore pass9) */
 static void
 nv_channel_g3_fill_class_ladder(struct nv_channel *ch, uint32_t prefer,
                                 uint32_t *classes, unsigned *n_io,
@@ -2311,7 +2312,8 @@ nv_channel_g3_fill_class_ladder(struct nv_channel *ch, uint32_t prefer,
    unsigned i;
    static const uint32_t ladder[] = {
       0x0000cc97u, 0x0000cb97u, 0x0000ca97u, 0x0000c997u,
-      0x0000c797u, 0x0000c697u, 0x0000c597u, 0x0000c397u,
+      0x0000c897u, 0x0000c797u, 0x0000c697u, 0x0000c597u,
+      0x0000c497u, 0x0000c397u,
    };
 
    if (!classes || !n_io || !max_n)

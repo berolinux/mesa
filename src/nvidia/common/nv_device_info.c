@@ -345,24 +345,28 @@ void
 nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
                                  uint32_t *out, unsigned *inout_n)
 {
-   /* Newest-first ladders (610.43.02 glcore/cuda class ID frequency + OGKM). */
+   /* Newest-first ladders (pass9 rodata counts + pass5–8 glcore/cuda/egl imm). */
    static const uint32_t ladder_copy[] = {
       0x0000c9b5u, 0x0000c8b5u, 0x0000c7b5u, 0x0000c6b5u, 0x0000c5b5u,
-      0x0000c3b5u, 0x0000c1b5u, 0x0000c0b5u, 0x0000b0b5u,
+      0x0000c4b5u, 0x0000c3b5u, 0x0000c1b5u, 0x0000c0b5u, 0x0000b0b5u,
    };
+   /* pass9 cuda: CCC0×22 CBC0×36 CAC0×20 C9C0 C8C0×45 … C3C0; tick85 G2 uses CCC0..C3C0 */
    static const uint32_t ladder_compute[] = {
-      0x0000cdc0u, 0x0000cbc0u, 0x0000c9c0u, 0x0000c8c0u, 0x0000c7c0u,
-      0x0000c6c0u, 0x0000c5c0u, 0x0000c4c0u, 0x0000c3c0u, 0x0000b1c0u,
+      0x0000cdc0u, 0x0000ccc0u, 0x0000cbc0u, 0x0000cac0u, 0x0000c9c0u,
+      0x0000c8c0u, 0x0000c7c0u, 0x0000c6c0u, 0x0000c5c0u, 0x0000c4c0u,
+      0x0000c3c0u, 0x0000b1c0u,
    };
+   /* pass9 egl/vksc/gl: CC97 CB97 CA97 C997 C897 C797 … C397; C597 dominant imm */
    static const uint32_t ladder_3d[] = {
-      0x0000cd97u, 0x0000cb97u, 0x0000c997u, 0x0000c897u, 0x0000c797u,
-      0x0000c697u, 0x0000c597u, 0x0000c397u, 0x0000b197u, 0x0000b097u,
+      0x0000cd97u, 0x0000cc97u, 0x0000cb97u, 0x0000ca97u, 0x0000c997u,
+      0x0000c897u, 0x0000c797u, 0x0000c697u, 0x0000c597u, 0x0000c497u,
+      0x0000c397u, 0x0000b197u, 0x0000b097u,
    };
-   /* 610 RE: C86F/C56F/C46F/C36F/C06F/B06F dominate; include C76F/C66F as alts */
+   /* pass9: eglcore has C66F+C36E; cuda/nvcuvid have C86F; try C36E before C06F */
    static const uint32_t ladder_gpfifo[] = {
       0x0000c86fu, 0x0000c76fu, 0x0000c66fu, 0x0000c56fu, 0x0000c46fu,
-      0x0000c36fu, 0x0000c06fu, 0x0000b06fu, 0x0000a26fu, 0x0000a16fu,
-      0x0000a06fu,
+      0x0000c36fu, 0x0000c36eu, 0x0000c06fu, 0x0000b06fu, 0x0000a26fu,
+      0x0000a16fu, 0x0000a06fu,
    };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;
