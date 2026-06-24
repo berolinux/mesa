@@ -633,6 +633,14 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
                                a_func, a_src, a_dst, cm,
                                depth_en, depth_wr, depth_fn, stencil_en,
                                cull, front_ccw, fill, smooth);
+   if (zsa && stencil_en) {
+      const struct pipe_stencil_state *st = &zsa->stencil[0];
+      /* pipe_stencil_state has no ref; GL/Vulkan set it via separate state */
+      nv_3d_emit_stencil_state(push, true,
+                               st->func, st->valuemask, st->writemask,
+                               0 /* stencil ref set elsewhere */,
+                               st->fail_op, st->zfail_op, st->zpass_op);
+   }
 }
 
 /* Upload FS sampler views into tex pool as pitch 2D headers (slot = view index). */
