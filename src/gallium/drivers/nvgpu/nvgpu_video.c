@@ -24,6 +24,7 @@
 #include "util/u_video.h"
 #include "vl/vl_video_buffer.h"
 #include "pipe/p_defines.h"
+#include "pipe/p_video_state.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -205,47 +206,223 @@ nvgpu_video_decode_bitstream(struct pipe_video_codec *codec,
    }
 }
 
+
+/* Extract luma/chroma GPU VA + pitch from a pipe_video_buffer target. */
 static void
-nvgpu_video_set_output_from_target(struct nvgpu_video_codec *dec,
-                                   struct pipe_video_buffer *target)
+nvgpu_video_buffer_planes(struct pipe_video_buffer *vb,
+                          uint64_t *luma_va, uint64_t *chroma_va,
+                          uint32_t *luma_pitch, uint32_t *chroma_pitch)
 {
    struct pipe_sampler_view **views;
    struct pipe_resource *luma_res = NULL, *chroma_res = NULL;
    struct nvgpu_resource *luma_nr, *chroma_nr;
-   uint64_t luma_va = 0, chroma_va = 0;
-   uint32_t luma_pitch = 0, chroma_pitch = 0;
 
-   if (!dec || !target)
+   if (luma_va) *luma_va = 0;
+   if (chroma_va) *chroma_va = 0;
+   if (luma_pitch) *luma_pitch = 0;
+   if (chroma_pitch) *chroma_pitch = 0;
+   if (!vb)
       return;
 
-   if (target->get_sampler_view_planes) {
-      views = target->get_sampler_view_planes(target);
+   if (vb->get_sampler_view_planes) {
+      views = vb->get_sampler_view_planes(vb);
       if (views && views[0] && views[0]->texture)
          luma_res = views[0]->texture;
       if (views && views[1] && views[1]->texture)
          chroma_res = views[1]->texture;
    }
-
    if (luma_res) {
       luma_nr = nvgpu_resource(luma_res);
       if (luma_nr) {
-         luma_va = luma_nr->gpu_offset;
-         luma_pitch = luma_nr->row_pitch ? luma_nr->row_pitch
-                                         : luma_res->width0;
+         if (luma_va) *luma_va = luma_nr->gpu_offset;
+         if (luma_pitch)
+            *luma_pitch = luma_nr->row_pitch ? luma_nr->row_pitch
+                                            : luma_res->width0;
       }
    }
    if (chroma_res) {
       chroma_nr = nvgpu_resource(chroma_res);
       if (chroma_nr) {
-         chroma_va = chroma_nr->gpu_offset;
-         chroma_pitch = chroma_nr->row_pitch ? chroma_nr->row_pitch
-                                             : chroma_res->width0;
+         if (chroma_va) *chroma_va = chroma_nr->gpu_offset;
+         if (chroma_pitch)
+            *chroma_pitch = chroma_nr->row_pitch ? chroma_nr->row_pitch
+                                                : chroma_res->width0;
       }
-   } else if (luma_res && luma_va) {
-      chroma_va = luma_va + (uint64_t)luma_pitch * luma_res->height0;
-      chroma_pitch = luma_pitch;
+   } else if (luma_res && luma_va && *luma_va && luma_pitch && *luma_pitch) {
+      if (chroma_va)
+         *chroma_va = *luma_va + (uint64_t)(*luma_pitch) * luma_res->height0;
+      if (chroma_pitch)
+         *chroma_pitch = *luma_pitch;
+   }
+}
+
+/**
+ * Apply pipe_h264_picture_desc SPS/PPS + DPB ref[] into session pic_setup.
+ * Returns true if picture_desc contributed fields (overrides annex-B parse).
+ */
+static bool
+nvgpu_video_apply_h264_picture_desc(struct nvgpu_video_codec *dec,
+                                    struct pipe_picture_desc *picture)
+{
+   const struct pipe_h264_picture_desc *h264;
+   const struct pipe_h264_pps *pps;
+   const struct pipe_h264_sps *sps;
+   unsigned i;
+
+   if (!dec || !picture)
+      return false;
+   if (u_reduce_video_profile(dec->base.profile) != PIPE_VIDEO_FORMAT_MPEG4_AVC)
+      return false;
+
+   h264 = (const struct pipe_h264_picture_desc *)picture;
+   pps = h264->pps;
+   sps = pps ? pps->sps : NULL;
+   if (!sps)
+      return false;
+
+   nv_nvdec_h264_apply_sps_pps(&dec->session.h264_ps,
+      sps->pic_width_in_mbs_minus1 + 1,
+      sps->pic_height_in_mbs_minus1 + 1,
+      sps->frame_mbs_only_flag,
+      sps->mb_adaptive_frame_field_flag,
+      sps->direct_8x8_inference_flag,
+      sps->chroma_format_idc,
+      sps->log2_max_frame_num_minus4,
+      sps->pic_order_cnt_type,
+      sps->log2_max_pic_order_cnt_lsb_minus4,
+      sps->delta_pic_order_always_zero_flag,
+      pps->entropy_coding_mode_flag,
+      pps->bottom_field_pic_order_in_frame_present_flag,
+      pps->num_ref_idx_l0_default_active_minus1,
+      pps->num_ref_idx_l1_default_active_minus1,
+      pps->weighted_pred_flag,
+      pps->weighted_bipred_idc,
+      (uint32_t)(int32_t)pps->pic_init_qp_minus26,
+      (uint32_t)(int32_t)pps->chroma_qp_index_offset,
+      (uint32_t)(int32_t)pps->second_chroma_qp_index_offset,
+      pps->deblocking_filter_control_present_flag,
+      pps->constrained_intra_pred_flag,
+      pps->redundant_pic_cnt_present_flag,
+      pps->transform_8x8_mode_flag);
+
+   dec->session.h264_ps.frame_num = h264->frame_num;
+   dec->session.h264_ps.field_pic_flag = h264->field_pic_flag;
+   dec->session.h264_ps.bottom_field_flag = h264->bottom_field_flag;
+   dec->session.h264_ps.ref_pic_flag = h264->is_reference ? 1 : 0;
+   if (h264->num_ref_idx_l0_active_minus1 || h264->num_ref_idx_l1_active_minus1) {
+      dec->session.h264_ps.num_ref_idx_l0_active_minus1 =
+         h264->num_ref_idx_l0_active_minus1;
+      dec->session.h264_ps.num_ref_idx_l1_active_minus1 =
+         h264->num_ref_idx_l1_active_minus1;
+      dec->session.h264_ps.l0_ref_count = h264->num_ref_idx_l0_active_minus1 + 1;
+      dec->session.h264_ps.l1_ref_count = h264->num_ref_idx_l1_active_minus1 + 1;
    }
 
+   for (i = 0; i < 16; i++) {
+      uint64_t luma = 0, chroma = 0;
+      uint32_t lp = 0, cp = 0;
+      if (h264->ref[i]) {
+         nvgpu_video_buffer_planes(h264->ref[i], &luma, &chroma, &lp, &cp);
+         if (lp)
+            dec->session.h264_ps.dpb_luma_pitch = lp;
+         if (cp)
+            dec->session.h264_ps.dpb_chroma_pitch = cp;
+      }
+      nv_nvdec_session_set_h264_dpb(&dec->session, i,
+         luma,
+         h264->bottom_is_reference[i] ? luma : 0,
+         chroma,
+         h264->bottom_is_reference[i] ? chroma : 0);
+   }
+   dec->session.h264_ps_valid = true;
+   return true;
+}
+
+static bool
+nvgpu_video_apply_h265_picture_desc(struct nvgpu_video_codec *dec,
+                                    struct pipe_picture_desc *picture)
+{
+   const struct pipe_h265_picture_desc *h265;
+   const struct pipe_h265_pps *pps;
+   const struct pipe_h265_sps *sps;
+   unsigned i;
+
+   if (!dec || !picture)
+      return false;
+   if (u_reduce_video_profile(dec->base.profile) != PIPE_VIDEO_FORMAT_HEVC)
+      return false;
+
+   h265 = (const struct pipe_h265_picture_desc *)picture;
+   pps = h265->pps;
+   sps = pps ? pps->sps : NULL;
+   if (!sps)
+      return false;
+
+   nv_nvdec_hevc_apply_sps_pps(&dec->session.hevc_ps,
+      sps->pic_width_in_luma_samples,
+      sps->pic_height_in_luma_samples,
+      sps->chroma_format_idc,
+      sps->bit_depth_luma_minus8,
+      sps->bit_depth_chroma_minus8,
+      sps->log2_min_luma_coding_block_size_minus3,
+      sps->log2_diff_max_min_luma_coding_block_size,
+      sps->log2_min_transform_block_size_minus2,
+      sps->log2_diff_max_min_transform_block_size,
+      sps->max_transform_hierarchy_depth_intra,
+      sps->max_transform_hierarchy_depth_inter,
+      sps->amp_enabled_flag,
+      sps->sample_adaptive_offset_enabled_flag,
+      sps->pcm_enabled_flag,
+      sps->pcm_loop_filter_disabled_flag,
+      sps->strong_intra_smoothing_enabled_flag,
+      sps->sps_temporal_mvp_enabled_flag,
+      sps->log2_max_pic_order_cnt_lsb_minus4,
+      sps->num_short_term_ref_pic_sets,
+      sps->num_long_term_ref_pics_sps,
+      pps->num_ref_idx_l0_default_active_minus1,
+      pps->num_ref_idx_l1_default_active_minus1,
+      (uint32_t)(int32_t)pps->init_qp_minus26,
+      pps->dependent_slice_segments_enabled_flag,
+      pps->sign_data_hiding_enabled_flag);
+
+   for (i = 0; i < 16; i++) {
+      uint64_t luma = 0, chroma = 0;
+      uint32_t lp = 0, cp = 0;
+      if (h265->ref[i]) {
+         nvgpu_video_buffer_planes(h265->ref[i], &luma, &chroma, &lp, &cp);
+         if (lp)
+            dec->session.hevc_ps.dpb_luma_pitch = lp;
+         if (cp)
+            dec->session.hevc_ps.dpb_chroma_pitch = cp;
+      }
+      nv_nvdec_session_set_hevc_dpb(&dec->session, i, luma, chroma);
+   }
+   dec->session.hevc_ps_valid = true;
+   return true;
+}
+
+static void
+nvgpu_video_apply_picture_desc(struct nvgpu_video_codec *dec,
+                               struct pipe_picture_desc *picture)
+{
+   if (!dec || !picture)
+      return;
+   if (nvgpu_video_apply_h264_picture_desc(dec, picture))
+      return;
+   (void)nvgpu_video_apply_h265_picture_desc(dec, picture);
+}
+
+static void
+nvgpu_video_set_output_from_target(struct nvgpu_video_codec *dec,
+                                   struct pipe_video_buffer *target)
+{
+   uint64_t luma_va = 0, chroma_va = 0;
+   uint32_t luma_pitch = 0, chroma_pitch = 0;
+
+   if (!dec || !target)
+      return;
+   nvgpu_video_buffer_planes(target, &luma_va, &chroma_va,
+                             &luma_pitch, &chroma_pitch);
    nv_nvdec_session_set_output(&dec->session, luma_va, chroma_va,
                                luma_pitch, chroma_pitch ? chroma_pitch
                                                         : luma_pitch);
@@ -263,7 +440,6 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
    uint32_t bs_size;
    int r = -1;
 
-   (void)picture;
    if (!dec || !dec->frame_active)
       return 0;
    ctx = dec->ctx;
@@ -280,8 +456,10 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
       bs_size = dec->bitstream_bo_size;
    memcpy(dec->bitstream_map, dec->frame_bs, bs_size);
 
+   /* Annex-B SPS/PPS first; pipe_picture_desc SPS/PPS/DPB overrides when present */
    (void)nv_nvdec_session_load_annexb_ps(&dec->session, dec->frame_bs,
                                          dec->frame_bs_used);
+   nvgpu_video_apply_picture_desc(dec, picture ? picture : dec->cur_picture);
    nvgpu_video_set_output_from_target(dec, target ? target : dec->cur_target);
 
    pic_gpu = nv_rm_bo_gpu_offset(dec->pic_setup_bo);
