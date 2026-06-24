@@ -158,6 +158,14 @@ struct nvrm_graphics_pipeline {
    bool depth_test_enable;
    bool depth_write_enable;
    uint32_t depth_compare_op;
+   bool stencil_test_enable;
+   uint32_t stencil_compare_op;
+   uint32_t stencil_fail_op;
+   uint32_t stencil_zfail_op;
+   uint32_t stencil_zpass_op;
+   uint32_t stencil_compare_mask;
+   uint32_t stencil_write_mask;
+   uint32_t stencil_reference;
    bool blend_enable;
    uint32_t cull_mode;
    bool front_ccw;
@@ -674,9 +682,18 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
          pipe->line_width = ci->pRasterizationState->lineWidth;
       }
       if (ci->pDepthStencilState) {
-         pipe->depth_test_enable = ci->pDepthStencilState->depthTestEnable;
-         pipe->depth_write_enable = ci->pDepthStencilState->depthWriteEnable;
-         pipe->depth_compare_op = ci->pDepthStencilState->depthCompareOp;
+         const VkPipelineDepthStencilStateCreateInfo *ds = ci->pDepthStencilState;
+         pipe->depth_test_enable = ds->depthTestEnable;
+         pipe->depth_write_enable = ds->depthWriteEnable;
+         pipe->depth_compare_op = ds->depthCompareOp;
+         pipe->stencil_test_enable = ds->stencilTestEnable;
+         pipe->stencil_compare_op = ds->front.compareOp;
+         pipe->stencil_fail_op = ds->front.failOp;
+         pipe->stencil_zfail_op = ds->front.depthFailOp;
+         pipe->stencil_zpass_op = ds->front.passOp;
+         pipe->stencil_compare_mask = ds->front.compareMask;
+         pipe->stencil_write_mask = ds->front.writeMask;
+         pipe->stencil_reference = ds->front.reference;
       }
       if (ci->pColorBlendState && ci->pColorBlendState->attachmentCount)
          pipe->blend_enable = ci->pColorBlendState->pAttachments[0].blendEnable;
@@ -1287,7 +1304,27 @@ nvrm_desc_write_image_slot(struct nvrm_device *device,
          (view->image->bo ? nv_rm_bo_gpu_offset(view->image->bo) : 0);
    }
    set->img[slot].has_sampler =
-      (dtype == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+      (dtype == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+       dtype == VK_DESCRIPTOR_TYPE_SAMPLER);
+   if (dtype == VK_DESCRIPTOR_TYPE_SAMPLER && info->sampler != VK_NULL_HANDLE) {
+      struct nvrm_sampler *samp = nvrm_sampler_from_handle(info->sampler);
+      if (samp) {
+         set->img[slot].addr_u = samp->addr_u;
+         set->img[slot].addr_v = samp->addr_v;
+         set->img[slot].mag_filt = samp->mag_filt;
+         set->img[slot].min_filt = samp->min_filt;
+         set->img[slot].has_sampler = true;
+      }
+   } else if (dtype == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+              info->sampler != VK_NULL_HANDLE) {
+      struct nvrm_sampler *samp = nvrm_sampler_from_handle(info->sampler);
+      if (samp) {
+         set->img[slot].addr_u = samp->addr_u;
+         set->img[slot].addr_v = samp->addr_v;
+         set->img[slot].mag_filt = samp->mag_filt;
+         set->img[slot].min_filt = samp->min_filt;
+      }
+   }
    if (slot >= set->img_count)
       set->img_count = slot + 1;
 }
@@ -1654,11 +1691,49 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
    else if (pipe->cull_mode & VK_CULL_MODE_BACK_BIT)
       cull = 2;
 
-   nv_3d_emit_blend_zsa_raster(&cmd->push, pipe->blend_enable,
-                               0, 1, 0, 0, 1, 0, 0xf,
-                               pipe->depth_test_enable, pipe->depth_write_enable,
-                               (unsigned)pipe->depth_compare_op, false,
-                               cull, pipe->front_ccw, 0, true);
+   {
+      bool depth_test = cmd->dyn_depth_valid ? cmd->dyn_depth_test_enable
+                                             : pipe->depth_test_enable;
+      bool depth_write = cmd->dyn_depth_valid ? cmd->dyn_depth_write_enable
+                                              : pipe->depth_write_enable;
+      unsigned depth_op = cmd->dyn_depth_valid ? (unsigned)cmd->dyn_depth_compare_op
+                                               : (unsigned)pipe->depth_compare_op;
+      bool stencil_en = cmd->dyn_stencil_valid ? cmd->dyn_stencil_test_enable
+                                               : pipe->stencil_test_enable;
+      if (cmd->dyn_cull_mode_valid) {
+         if (cmd->dyn_cull_mode & VK_CULL_MODE_FRONT_AND_BACK)
+            cull = 3;
+         else if (cmd->dyn_cull_mode & VK_CULL_MODE_FRONT_BIT)
+            cull = 1;
+         else if (cmd->dyn_cull_mode & VK_CULL_MODE_BACK_BIT)
+            cull = 2;
+         else
+            cull = 0;
+      }
+      bool front_ccw = cmd->dyn_front_face_valid ? cmd->dyn_front_ccw : pipe->front_ccw;
+
+      nv_3d_emit_blend_zsa_raster(&cmd->push, pipe->blend_enable,
+                                  0, 1, 0, 0, 1, 0, 0xf,
+                                  depth_test, depth_write, depth_op, stencil_en,
+                                  cull, front_ccw, 0, true);
+      if (stencil_en) {
+         unsigned cop = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_compare_op
+                                               : pipe->stencil_compare_op;
+         unsigned fop = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_fail_op
+                                               : pipe->stencil_fail_op;
+         unsigned zfop = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_zfail_op
+                                                : pipe->stencil_zfail_op;
+         unsigned zpop = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_zpass_op
+                                                : pipe->stencil_zpass_op;
+         unsigned cm = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_compare_mask
+                                              : pipe->stencil_compare_mask;
+         unsigned wm = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_write_mask
+                                              : pipe->stencil_write_mask;
+         unsigned ref = cmd->dyn_stencil_valid ? cmd->dyn_stencil_front_reference
+                                               : pipe->stencil_reference;
+         nv_3d_emit_stencil_state(&cmd->push, true, cop, cm, wm, ref, fop, zfop, zpop);
+      }
+   }
 
    nv_3d_set_primitive_topology(&cmd->push, pipe->topology_nv);
    nv_3d_set_primitive_restart(&cmd->push, pipe->prim_restart_enable ||
@@ -2771,3 +2846,145 @@ nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,
    }
    return nvrm_QueueSubmit2(queue, 1, &s2, fence);
 }
+
+/* ---- Dynamic depth/stencil/raster state (core 1.3 / EXT_extended_dynamic_state) ---- */
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthTestEnable(VkCommandBuffer commandBuffer, VkBool32 depthTestEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_test_enable = depthTestEnable;
+   cmd->dyn_depth_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_depth_state(&cmd->push, depthTestEnable,
+                             cmd->dyn_depth_write_enable,
+                             (unsigned)cmd->dyn_depth_compare_op);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthWriteEnable(VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_write_enable = depthWriteEnable;
+   cmd->dyn_depth_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_depth_state(&cmd->push, cmd->dyn_depth_test_enable,
+                             depthWriteEnable,
+                             (unsigned)cmd->dyn_depth_compare_op);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthCompareOp(VkCommandBuffer commandBuffer, VkCompareOp depthCompareOp)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_compare_op = depthCompareOp;
+   cmd->dyn_depth_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_depth_state(&cmd->push, cmd->dyn_depth_test_enable,
+                             cmd->dyn_depth_write_enable,
+                             (unsigned)depthCompareOp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetStencilTestEnable(VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_stencil_test_enable = stencilTestEnable;
+   cmd->dyn_stencil_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_stencil_state(&cmd->push, stencilTestEnable,
+                               (unsigned)cmd->dyn_stencil_front_compare_op,
+                               cmd->dyn_stencil_front_compare_mask,
+                               cmd->dyn_stencil_front_write_mask,
+                               cmd->dyn_stencil_front_reference,
+                               (unsigned)cmd->dyn_stencil_front_fail_op,
+                               (unsigned)cmd->dyn_stencil_front_zfail_op,
+                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetStencilOp(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+                     VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+                     VkCompareOp compareOp)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)faceMask; /* front only for now; back plane mirrors front */
+   cmd->dyn_stencil_front_fail_op = failOp;
+   cmd->dyn_stencil_front_zpass_op = passOp;
+   cmd->dyn_stencil_front_zfail_op = depthFailOp;
+   cmd->dyn_stencil_front_compare_op = compareOp;
+   cmd->dyn_stencil_valid = true;
+   if (cmd->push_map && cmd->dyn_stencil_test_enable)
+      nv_3d_emit_stencil_state(&cmd->push, true,
+                               (unsigned)compareOp,
+                               cmd->dyn_stencil_front_compare_mask,
+                               cmd->dyn_stencil_front_write_mask,
+                               cmd->dyn_stencil_front_reference,
+                               (unsigned)failOp, (unsigned)depthFailOp,
+                               (unsigned)passOp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
+                              VkStencilFaceFlags faceMask, uint32_t compareMask)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)faceMask;
+   cmd->dyn_stencil_front_compare_mask = compareMask;
+   cmd->dyn_stencil_valid = true;
+   if (cmd->push_map && cmd->dyn_stencil_test_enable)
+      nv_3d_emit_stencil_state(&cmd->push, true,
+                               (unsigned)cmd->dyn_stencil_front_compare_op,
+                               compareMask,
+                               cmd->dyn_stencil_front_write_mask,
+                               cmd->dyn_stencil_front_reference,
+                               (unsigned)cmd->dyn_stencil_front_fail_op,
+                               (unsigned)cmd->dyn_stencil_front_zfail_op,
+                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
+                            VkStencilFaceFlags faceMask, uint32_t writeMask)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)faceMask;
+   cmd->dyn_stencil_front_write_mask = writeMask;
+   cmd->dyn_stencil_valid = true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetStencilReference(VkCommandBuffer commandBuffer,
+                            VkStencilFaceFlags faceMask, uint32_t reference)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)faceMask;
+   cmd->dyn_stencil_front_reference = reference;
+   cmd->dyn_stencil_valid = true;
+   if (cmd->push_map && cmd->dyn_stencil_test_enable)
+      nv_3d_emit_stencil_state(&cmd->push, true,
+                               (unsigned)cmd->dyn_stencil_front_compare_op,
+                               cmd->dyn_stencil_front_compare_mask,
+                               cmd->dyn_stencil_front_write_mask,
+                               reference,
+                               (unsigned)cmd->dyn_stencil_front_fail_op,
+                               (unsigned)cmd->dyn_stencil_front_zfail_op,
+                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetCullMode(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_cull_mode = cullMode;
+   cmd->dyn_cull_mode_valid = true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetFrontFace(VkCommandBuffer commandBuffer, VkFrontFace frontFace)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_front_ccw = (frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE);
+   cmd->dyn_front_face_valid = true;
+}
+

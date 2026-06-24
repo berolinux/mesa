@@ -177,6 +177,24 @@ struct nvrm_cmd_buffer {
    /* Primitive restart */
    bool prim_restart_enable;
    uint32_t prim_restart_index;
+   /* Dynamic depth/stencil (VK_EXT_extended_dynamic_state / core 1.3 subset) */
+   bool dyn_depth_test_enable;
+   bool dyn_depth_write_enable;
+   uint32_t dyn_depth_compare_op; /* VkCompareOp */
+   bool dyn_depth_valid;
+   bool dyn_stencil_test_enable;
+   uint32_t dyn_stencil_front_compare_op;
+   uint32_t dyn_stencil_front_fail_op;
+   uint32_t dyn_stencil_front_zfail_op;
+   uint32_t dyn_stencil_front_zpass_op;
+   uint32_t dyn_stencil_front_compare_mask;
+   uint32_t dyn_stencil_front_write_mask;
+   uint32_t dyn_stencil_front_reference;
+   bool dyn_stencil_valid;
+   bool dyn_cull_mode_valid;
+   uint32_t dyn_cull_mode;
+   bool dyn_front_face_valid;
+   bool dyn_front_ccw;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
@@ -355,6 +373,22 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBu
                                                        uint32_t drawCount, uint32_t stride);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
                                                              VkBool32 primitiveRestartEnable);
+
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthTestEnable(VkCommandBuffer commandBuffer, VkBool32 depthTestEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthWriteEnable(VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthCompareOp(VkCommandBuffer commandBuffer, VkCompareOp depthCompareOp);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilTestEnable(VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilOp(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+                                                VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+                                                VkCompareOp compareOp);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilCompareMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+                                                         uint32_t compareMask);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilWriteMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+                                                       uint32_t writeMask);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilReference(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+                                                       uint32_t reference);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetCullMode(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetFrontFace(VkCommandBuffer commandBuffer, VkFrontFace frontFace);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetViewport(VkCommandBuffer commandBuffer,
                                                uint32_t firstViewport, uint32_t viewportCount,
                                                const VkViewport *pViewports);

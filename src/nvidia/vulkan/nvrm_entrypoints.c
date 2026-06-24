@@ -90,6 +90,16 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdCopyImageToBuffer2, nvrm_CmdCopyImageToBuffer2);
    NVRM_SET(CmdClearColorImage, nvrm_CmdClearColorImage);
    NVRM_SET(CmdClearAttachments, nvrm_CmdClearAttachments);
+   NVRM_SET(CmdSetDepthTestEnable, nvrm_CmdSetDepthTestEnable);
+   NVRM_SET(CmdSetDepthWriteEnable, nvrm_CmdSetDepthWriteEnable);
+   NVRM_SET(CmdSetDepthCompareOp, nvrm_CmdSetDepthCompareOp);
+   NVRM_SET(CmdSetStencilTestEnable, nvrm_CmdSetStencilTestEnable);
+   NVRM_SET(CmdSetStencilOp, nvrm_CmdSetStencilOp);
+   NVRM_SET(CmdSetStencilCompareMask, nvrm_CmdSetStencilCompareMask);
+   NVRM_SET(CmdSetStencilWriteMask, nvrm_CmdSetStencilWriteMask);
+   NVRM_SET(CmdSetStencilReference, nvrm_CmdSetStencilReference);
+   NVRM_SET(CmdSetCullMode, nvrm_CmdSetCullMode);
+   NVRM_SET(CmdSetFrontFace, nvrm_CmdSetFrontFace);
    NVRM_SET(CmdPipelineBarrier2, nvrm_CmdPipelineBarrier2);
    NVRM_SET(QueueSubmit2, nvrm_QueueSubmit2);
    NVRM_SET(QueuePresentKHR, nvrm_QueuePresent2);
