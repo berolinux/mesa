@@ -650,6 +650,49 @@ nvrm_vk_filt(VkFilter f)
                                    : NV_TEX_SAMP_FILT_LINEAR;
 }
 
+VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_sampler, base, VkSampler, VK_OBJECT_TYPE_SAMPLER)
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_CreateSampler(VkDevice _device,
+                   const VkSamplerCreateInfo *pCreateInfo,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkSampler *pSampler)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   struct nvrm_sampler *s;
+
+   s = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*s), 8,
+                  VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!s)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   vk_object_base_init(&device->vk, &s->base, VK_OBJECT_TYPE_SAMPLER);
+   s->addr_u = nvrm_vk_addr_mode(pCreateInfo->addressModeU);
+   s->addr_v = nvrm_vk_addr_mode(pCreateInfo->addressModeV);
+   s->addr_p = nvrm_vk_addr_mode(pCreateInfo->addressModeW);
+   s->mag_filt = nvrm_vk_filt(pCreateInfo->magFilter);
+   s->min_filt = nvrm_vk_filt(pCreateInfo->minFilter);
+   s->mip_filt = (pCreateInfo->mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    ? NV_TEX_SAMP_FILT_NEAREST : NV_TEX_SAMP_FILT_LINEAR;
+   s->min_lod = pCreateInfo->minLod;
+   s->max_lod = pCreateInfo->maxLod;
+   s->lod_bias = pCreateInfo->mipLodBias;
+   s->unnormalized_coords = pCreateInfo->unnormalizedCoordinates;
+   *pSampler = nvrm_sampler_to_handle(s);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_DestroySampler(VkDevice _device, VkSampler _sampler,
+                    const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   VK_FROM_HANDLE(nvrm_sampler, s, _sampler);
+   if (!s)
+      return;
+   vk_object_base_finish(&s->base);
+   vk_free2(&device->vk.alloc, pAllocator, s);
+}
+
 /* Lazy per-device texture header pool stored via first descriptor set's device */
 static struct nv_tex_pool *
 nvrm_device_ensure_tex_pool(struct nvrm_device *dev)
@@ -670,23 +713,49 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
 {
    struct nv_tex_desc desc;
    struct nvrm_image *img;
-   uint32_t w, h, pitch;
+   struct nvrm_sampler *samp = NULL;
+   uint32_t w, h, pitch, level;
    uint8_t comp, dt;
-   (void)vk_samp;
    (void)sci_fallback;
 
    if (!dev || !view || !view->image || !out_entry)
       return -1;
    img = view->image;
+   if (vk_samp != VK_NULL_HANDLE)
+      samp = nvrm_sampler_from_handle(vk_samp);
+
    memset(&desc, 0, sizeof(desc));
+   level = view->level;
    w = img->vk.extent.width ? img->vk.extent.width : 1;
    h = img->vk.extent.height ? img->vk.extent.height : 1;
-   pitch = w * 4; /* assume RGBA8 pitch for unknown layouts; refine via image info */
-   if (img->vk.extent.width)
-      pitch = (uint32_t)((img->vk.extent.width * 4 + 31) & ~31u);
+   if (level > 0) {
+      w = w > (1u << level) ? (w >> level) : 1;
+      h = h > (1u << level) ? (h >> level) : 1;
+   }
+   /* Prefer stored row_pitch from CreateImage; scale for mips coarsely */
+   if (img->row_pitch)
+      pitch = level ? ((img->row_pitch >> level) + 31u) & ~31u : img->row_pitch;
+   else
+      pitch = (w * 4 + 31u) & ~31u;
+   if (pitch < 32)
+      pitch = 32;
+
    nvrm_vk_format_to_tex(view->format ? view->format : img->vk.format, &comp, &dt);
    desc.gpu_addr = img->gpu_offset ? img->gpu_offset :
                    (img->bo ? nv_rm_bo_gpu_offset(img->bo) : 0);
+   /* Mip offset estimate: sum prior levels */
+   if (level > 0 && img->row_pitch && img->vk.extent.height) {
+      uint32_t lv, off = 0, lw = img->vk.extent.width, lh = img->vk.extent.height;
+      uint32_t lp = img->row_pitch;
+      for (lv = 0; lv < level; lv++) {
+         off += lp * (lh ? lh : 1);
+         lw = lw > 1 ? lw / 2 : 1;
+         lh = lh > 1 ? lh / 2 : 1;
+         lp = (lp > 32 ? lp / 2 : 32);
+         lp = (lp + 31u) & ~31u;
+      }
+      desc.gpu_addr += off;
+   }
    desc.width = w;
    desc.height = h;
    desc.pitch = pitch;
@@ -697,16 +766,32 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
    desc.src_z = NV_TEX_SRC_B;
    desc.src_w = NV_TEX_SRC_A;
    desc.texture_type = NV_TEX_TEXTURE_TYPE_2D;
-   desc.normalized_coords = true;
+   if (img->vk.image_type == VK_IMAGE_TYPE_1D)
+      desc.texture_type = NV_TEX_TEXTURE_TYPE_1D;
+   else if (img->vk.image_type == VK_IMAGE_TYPE_3D)
+      desc.texture_type = NV_TEX_TEXTURE_TYPE_3D;
+   desc.normalized_coords = !(samp && samp->unnormalized_coords);
    if (view->format == VK_FORMAT_R8G8B8A8_SRGB ||
        view->format == VK_FORMAT_B8G8R8A8_SRGB)
       desc.s_r_g_b_conversion = true;
-   desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-   desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-   desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-   desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
-   desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
-   desc.mip_filt = NV_TEX_SAMP_FILT_NEAREST;
+   if (samp) {
+      desc.addr_u = samp->addr_u;
+      desc.addr_v = samp->addr_v;
+      desc.addr_p = samp->addr_p;
+      desc.mag_filt = samp->mag_filt;
+      desc.min_filt = samp->min_filt;
+      desc.mip_filt = samp->mip_filt;
+      desc.min_lod = samp->min_lod;
+      desc.max_lod = samp->max_lod;
+      desc.lod_bias = samp->lod_bias;
+   } else {
+      desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
+      desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
+      desc.mip_filt = NV_TEX_SAMP_FILT_NEAREST;
+   }
    nv_tex_encode_pitch_2d(&desc, out_entry);
    return 0;
 }
@@ -1232,6 +1317,59 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
          nv_tex_pool_emit_bind(&cmd->push, cmd->device->tex_pool);
       }
    }
+}
+
+
+
+
+/* Local compute dispatch helpers (pre-QMD); kept out of nv_3d_methods.h to
+ * avoid include-order / redefinition issues with inline helpers. */
+#define NVRM_BIND_GROUP_COMPUTE 5
+
+static void
+nvrm_emit_compute_dispatch(struct nv_push *p, uint32_t gx, uint32_t gy,
+                           uint32_t gz, uint64_t cs_prog, uint32_t regs)
+{
+   if (!p)
+      return;
+   /* Pre-QMD: reuse 3D pipeline program bind for compute shader object VA.
+    * Real path will build NVC3C0 QMD from class headers. */
+   if (cs_prog) {
+      uint32_t shader_word = NVC597_SET_PIPELINE_SHADER_ENABLE_TRUE |
+         (NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL <<
+          NVC597_SET_PIPELINE_SHADER_TYPE_SHIFT);
+      nv_push_method(p, NVC597_SET_PIPELINE_SHADER(NV_3D_PIPE_STAGE_PIXEL),
+                     shader_word);
+      nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_A(NV_3D_PIPE_STAGE_PIXEL),
+                     (uint32_t)(cs_prog >> 32) & 0xff);
+      nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_B(NV_3D_PIPE_STAGE_PIXEL),
+                     (uint32_t)(cs_prog & 0xffffffffu));
+      nv_push_method(p, NVC597_SET_PIPELINE_REGISTER_COUNT(NV_3D_PIPE_STAGE_PIXEL),
+                     regs & 0xff);
+   }
+   nv_3d_bind_group_constant_buffer(p, NVRM_BIND_GROUP_COMPUTE, 0, false);
+   (void)gx; (void)gy; (void)gz;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
+                 uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   struct nvrm_compute_pipeline *cp = NULL;
+   uint64_t prog = 0;
+   uint32_t regs = 16;
+
+   if (!cmd || !cmd->push_map)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   /* If a compute pipeline was bound via CmdBindPipeline, program_region is on gfx;
+    * track compute separately when available.  Use bound_gfx as fallback no-op. */
+   if (cmd->bound_gfx_pipeline && cmd->bound_gfx_pipeline->program_region_base)
+      prog = cmd->bound_gfx_pipeline->program_region_base;
+   (void)cp;
+   nvrm_emit_compute_dispatch(&cmd->push, groupCountX, groupCountY, groupCountZ,
+                               prog, regs);
 }
 
 /* Queue submit: kick channel with cmd buffer push contents */

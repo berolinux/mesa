@@ -86,9 +86,20 @@ struct nvrm_image {
    struct vk_image vk;
    struct nv_rm_bo *bo;
    uint64_t gpu_offset;
+   uint32_t row_pitch;       /* bytes; from format Bpp * width, 32B aligned */
+   uint32_t level0_size;     /* approximate level-0 plane size */
+   bool     is_linear;       /* prefer pitch/linear headers when true */
 };
 
 struct nvrm_graphics_pipeline; /* defined in nvrm_pipeline.c */
+
+struct nvrm_sampler {
+   struct vk_object_base base;
+   uint8_t addr_u, addr_v, addr_p;
+   uint8_t mag_filt, min_filt, mip_filt;
+   float min_lod, max_lod, lod_bias;
+   bool unnormalized_coords;
+};
 
 struct nvrm_cmd_buffer {
    struct vk_command_buffer vk;
@@ -267,5 +278,24 @@ VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit2(VkQueue queue, uint32_t submitC
                                                  const VkSubmitInfo2 *pSubmits, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,
                                                 const VkSubmitInfo *pSubmits, VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateSampler(VkDevice device,
+                                                  const VkSamplerCreateInfo *pCreateInfo,
+                                                  const VkAllocationCallbacks *pAllocator,
+                                                  VkSampler *pSampler);
+VKAPI_ATTR void VKAPI_CALL nvrm_DestroySampler(VkDevice device, VkSampler sampler,
+                                               const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateImage(VkDevice device,
+                                                const VkImageCreateInfo *pCreateInfo,
+                                                const VkAllocationCallbacks *pAllocator,
+                                                VkImage *pImage);
+VKAPI_ATTR void VKAPI_CALL nvrm_DestroyImage(VkDevice device, VkImage image,
+                                             const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
+                                            uint32_t groupCountX,
+                                            uint32_t groupCountY,
+                                            uint32_t groupCountZ);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_BindImageMemory2(VkDevice device,
+                                                     uint32_t bindInfoCount,
+                                                     const VkBindImageMemoryInfo *pBindInfos);
 
 #endif
