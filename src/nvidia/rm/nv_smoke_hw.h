@@ -35,11 +35,13 @@
  *
  * Kickoff path (G1 hung sema with g1_sema_only also failing):
  *   - Channel schedule (NVA06F/A06C GPFIFO_SCHEDULE) must succeed (preflight -EAGAIN)
- *   - Volta+: usermode doorbell + work_submit_token; else GPPut-only kick (pre_d=1)
+ *   - Volta+: usermode doorbell @ +0x90 (NVC361_NOTIFY_CHANNEL_PENDING) + work_submit_token;
+ *     else GPPut-only kick (pre_d=1). Matches 610.43.02 / clc361.h binary RE.
+ *   - CE/3D/compute/GPFIFO class ladders newest-first (C8B5/C8C0/C86F…; HW_MODEL_FROM_BINARIES_610)
  *   - USERD GPPut published before doorbell (libdrm nvidia_gpfifo_submit_one)
  *   - GP entry wait uses SYNC_WAIT bit 31 (not LEVEL_SUBROUTINE bit 9)
  *   - nv_channel_submit_preflight() before G1 reports schedule/USERD/doorbell state
- *   - g1_host_sema_rc: NVC36F host sema only (kickoff works iff this succeeds)
+ *   - g1_host_sema_rc: NVC36F host sema on subch 0 only (kickoff works iff this succeeds)
  *   - g1_userd_gp_get/put vs g1_hput: ring consumption after failed G1
  *   - g1_svram/g1_bvram: sema/src-dst BO placement (VRAM vs sysmem)
  *   - Scratch sema prefers VRAM+CPU map; src/dst prefer sysmem for host verify
