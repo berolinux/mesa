@@ -134,17 +134,18 @@ main(int argc, char **argv)
 
    if (r == 0) {
       fprintf(stderr, "nvidia_smoke_hw_cli: PASS slices=0x%x ok=0x%x gpu_tried=%d "
-              "g1_class=0x%x g1_gpfifo=0x%x g1_host_sema=%d\n",
+              "g1_class=0x%x g1_gpfifo=0x%x g1_host_sema=%d g1_hs_mode=%d\n",
               (unsigned)res.slices_run, (unsigned)res.slices_ok,
               res.standalone_gpu_tried, (unsigned)res.g1_class_copy,
-              (unsigned)res.g1_gpfifo_class, res.g1_host_sema_rc);
+              (unsigned)res.g1_gpfifo_class, res.g1_host_sema_rc,
+              res.g1_host_sema_mode);
       return 0;
    }
    fprintf(stderr,
            "nvidia_smoke_hw_cli: FAIL rc=%d open_rc=%d ch_rc=%d gpu_tried=%d "
            "buf_va_rc=%d eng_rc=%d sready_rc=%d\n"
            "  slices_run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d\n"
-           "  g1_pre=%d g1_sched=%d g1_eng_alloc=%d g1_host_sema=%d g1_sema_obs=0x%x\n"
+           "  g1_pre=%d g1_sched=%d g1_eng_alloc=%d g1_host_sema=%d g1_hs_mode=%d g1_sema_obs=0x%x\n"
            "  g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x g1_h_copy=0x%x\n"
            "  g1_submit=%d sema_only=%d remap=%d\n"
            "  g1_userd_get/put=%u/%u host_gpfifo_put=%u doorbell=%d scheduled=%d\n"
@@ -153,9 +154,10 @@ main(int argc, char **argv)
            "    2) ch_rc=-5: GPFIFO class ladder (C86F..C36F) / TSG / USERD / VASpace / error ctx\n"
            "    3) sready/g1_pre/g1_sched/doorbell: schedule + USERD GPPut + token@usermode+0x90\n"
            "    4) g1_host_sema!=0: kickoff/channel (not CE); fix step 3 before CE methods\n"
+           "       hs_mode tries 2=blob0x1001>>2, 3=blob&~3, 0=open>>2, 1=open&~3 (pass5)\n"
            "    5) host_sema ok, g1_rc fail: CE class ladder (C8B5..) / SET_OBJECT subch4 / VA\n"
            "    6) g1_userd_get unchanged: GPPut/doorbell not running on silicon\n"
-           "    (RE: 610.43.02 glcore/cuda — see HW_MODEL_DEEP_DISASM_610.43.02.md)\n",
+           "    (RE: HW_MODEL_PASS5_DEEP_DISASM_610.43.02.md + PASS4)\n",
            r, res.standalone_open_rc, res.standalone_channel_rc,
            res.standalone_gpu_tried,
            res.standalone_buf_va_rc, res.standalone_engine_rc,
@@ -163,7 +165,8 @@ main(int argc, char **argv)
            (unsigned)res.slices_run, (unsigned)res.slices_ok,
            res.g1_rc, res.g2_rc, res.g3_rc,
            res.g1_preflight_rc, res.g1_schedule_rc, res.g1_engine_alloc_rc,
-           res.g1_host_sema_rc, (unsigned)res.g1_sema_observed,
+           res.g1_host_sema_rc, res.g1_host_sema_mode,
+           (unsigned)res.g1_sema_observed,
            (unsigned)res.g1_class_copy, (unsigned)res.g1_gpfifo_class,
            (unsigned)res.g1_work_submit_token, (unsigned)res.g1_h_obj_copy,
            res.g1_submit_rc, res.g1_sema_only_rc, res.g1_remap_fill_rc,

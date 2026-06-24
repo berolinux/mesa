@@ -1387,19 +1387,38 @@ nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
                                       wait_timeout_ns, check_notifier);
 }
 
+/*
+ * Host sema mode ladder (pass5 RE / glcore 610.43.02 @ b6c938-b6c959):
+ *   blob execute 0x1001 first (matches proprietary emit), then open bitfields.
+ *   For each execute, try addr>>2 (clc36f) then addr&~3 (blob stores full lo).
+ * Order prioritizes silicon bring-up fidelity over theoretical header purity.
+ */
+static const enum nv_host_sema_mode nv_host_sema_try_order[NV_HOST_SEMA_MODE_COUNT] = {
+   NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+   NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+   NV_HOST_SEMA_MODE_OPEN_SHIFT2,
+   NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+};
+
 int
-nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
-                                   uint64_t sema_gpu_addr,
-                                   volatile uint32_t *sema_cpu,
-                                   uint32_t sema_payload,
-                                   bool sema_reset,
-                                   uint64_t wait_timeout_ns,
-                                   bool check_notifier)
+nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
+                                      uint64_t sema_gpu_addr,
+                                      volatile uint32_t *sema_cpu,
+                                      uint32_t sema_payload,
+                                      bool sema_reset,
+                                      uint64_t wait_timeout_ns,
+                                      bool check_notifier,
+                                      int *mode_used_out)
 {
    struct nv_push push;
    uint32_t *map;
    uint32_t need = 16;
    int pre;
+   int last_rc = -EIO;
+   unsigned i;
+
+   if (mode_used_out)
+      *mode_used_out = (int)NV_HOST_SEMA_MODE_BLOB_SHIFT2;
 
    if (!ch || !sema_gpu_addr)
       return -EINVAL;
@@ -1410,22 +1429,51 @@ nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
    if (pre)
       return pre;
 
-   if (sema_reset && sema_cpu)
-      sema_cpu[0] = 0;
+   for (i = 0; i < NV_HOST_SEMA_MODE_COUNT; i++) {
+      enum nv_host_sema_mode mode = nv_host_sema_try_order[i];
 
-   map = nv_channel_push_begin(ch, need);
-   if (!map)
-      return -ENOMEM;
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
 
-   /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
-   nv_push_init(&push, map, need);
-   nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-   /* WFI then sema: ensures prior segment methods complete before sema write */
-   nv_push_host_semaphore_release_wfi(&push, sema_gpu_addr, sema_payload, true);
-   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
 
-   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
-                                      wait_timeout_ns, check_notifier);
+      /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
+      nv_push_init(&push, map, need);
+      nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+      /* WFI then sema: ensures prior segment methods complete before sema write */
+      nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr, sema_payload,
+                                              true, mode);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      last_rc = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+      if (mode_used_out)
+         *mode_used_out = (int)mode;
+      if (last_rc == 0)
+         return 0;
+      /* -ETIMEDOUT / -EIO: sema did not complete — try next encoding */
+      if (last_rc != -ETIMEDOUT && last_rc != -EIO && last_rc != -EAGAIN)
+         return last_rc;
+   }
+
+   return last_rc;
+}
+
+int
+nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier)
+{
+   return nv_channel_gpfifo_host_sema_submit_ex(ch, sema_gpu_addr, sema_cpu,
+                                                sema_payload, sema_reset,
+                                                wait_timeout_ns, check_notifier,
+                                                NULL);
 }
 
 void

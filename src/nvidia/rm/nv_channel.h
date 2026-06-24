@@ -306,6 +306,22 @@ nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
                                    uint64_t wait_timeout_ns,
                                    bool check_notifier);
 
+/**
+ * Host sema with silicon A/B mode ladder (pass5 / 610.43.02 glcore b6c952).
+ * Tries blob execute 0x1001 + addr encodings, then open-header bitfields.
+ * On success writes winning mode into *mode_used_out (if non-NULL).
+ * On total failure mode_used_out gets last attempted mode.
+ */
+int
+nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
+                                      uint64_t sema_gpu_addr,
+                                      volatile uint32_t *sema_cpu,
+                                      uint32_t sema_payload,
+                                      bool sema_reset,
+                                      uint64_t wait_timeout_ns,
+                                      bool check_notifier,
+                                      int *mode_used_out);
+
 /** Snapshot USERD GPGet/GPPut and host gpfifo_put index (0 if unavailable). */
 void nv_channel_userd_snapshot(struct nv_channel *ch,
                                uint32_t *gp_get_out, uint32_t *gp_put_out,

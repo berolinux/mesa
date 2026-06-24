@@ -47,13 +47,35 @@ extern "C" {
 #define NVC36F_CRC_CHECK               0x0000007C
 #define NVC36F_YIELD                   0x00000080
 
-/* SEMAPHORED operations */
+/* SEMAPHORED operations (clc36f / open-gpu-doc style bitfields) */
 #define NVC36F_SEMAPHORED_OPERATION_ACQUIRE      0x00000001
 #define NVC36F_SEMAPHORED_OPERATION_RELEASE      0x00000002
 #define NVC36F_SEMAPHORED_OPERATION_ACQ_GEQ      0x00000004
 #define NVC36F_SEMAPHORED_RELEASE_WFI_DIS        (1u << 20)
 #define NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE     (1u << 24)
 #define NVC36F_SEMAPHORED_ACQUIRE_SWITCH_TSG_ENABLE (1u << 12)
+
+/*
+ * Open-header release execute: OPERATION_RELEASE | WFI_DIS | SIZE_4BYTE
+ *   = 0x2 | (1<<20) | (1<<24) = 0x01100002
+ *
+ * Blob (610.43.02 glcore @ b6c952) hardcodes SEMAPHORED = 0x1001 after inc4
+ * sema block 0x20040004. Pass5 RE: try this first on silicon if open bits fail.
+ */
+#define NVC36F_SEMAPHORED_RELEASE_OPEN_HDRS      \
+   (NVC36F_SEMAPHORED_OPERATION_RELEASE |        \
+    NVC36F_SEMAPHORED_RELEASE_WFI_DIS |          \
+    NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE)
+#define NVC36F_SEMAPHORED_RELEASE_BLOB_610       0x00001001u
+
+/* Host sema emit modes for silicon A/B (nv_channel_gpfifo_host_sema_submit). */
+enum nv_host_sema_mode {
+   NV_HOST_SEMA_MODE_OPEN_SHIFT2 = 0, /* execute=open hdrs; SEMAPHOREB = addr>>2 */
+   NV_HOST_SEMA_MODE_OPEN_ALIGN4 = 1, /* execute=open hdrs; SEMAPHOREB = addr&~3 */
+   NV_HOST_SEMA_MODE_BLOB_SHIFT2 = 2, /* execute=0x1001; addr>>2 (clc36f style) */
+   NV_HOST_SEMA_MODE_BLOB_ALIGN4 = 3, /* execute=0x1001; addr&~3 (blob b6c959 lo) */
+   NV_HOST_SEMA_MODE_COUNT       = 4,
+};
 
 /* GPFIFO entry (NV506F/NVC36F) */
 #define NV_GP_ENTRY_SIZE               8
@@ -188,17 +210,59 @@ nv_push_nop(struct nv_push *p)
    nv_push_method(p, NVC36F_NOP, 0);
 }
 
+/* SEMAPHOREB low-address encoding for a host sema mode. */
+static inline uint32_t
+nv_host_sema_addr_lo(uint64_t sema_gpu_addr, enum nv_host_sema_mode mode)
+{
+   switch (mode) {
+   case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
+      return (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu);
+   case NV_HOST_SEMA_MODE_OPEN_ALIGN4:
+   case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
+   default:
+      return (uint32_t)(sema_gpu_addr & ~0x3u);
+   }
+}
+
+static inline uint32_t
+nv_host_sema_execute(enum nv_host_sema_mode mode)
+{
+   switch (mode) {
+   case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
+      return NVC36F_SEMAPHORED_RELEASE_BLOB_610;
+   case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
+   case NV_HOST_SEMA_MODE_OPEN_ALIGN4:
+   default:
+      return NVC36F_SEMAPHORED_RELEASE_OPEN_HDRS;
+   }
+}
+
+/**
+ * Host semaphore release with explicit silicon A/B mode.
+ * Default callers use NV_HOST_SEMA_MODE_OPEN_SHIFT2 (clc36f-faithful).
+ * Smoke/host_sema_submit ladders try BLOB_* modes first (matches glcore 0x1001).
+ */
+static inline void
+nv_push_sema_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
+                          uint32_t payload, enum nv_host_sema_mode mode)
+{
+   nv_push_method(p, NVC36F_SEMAPHOREA,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB,
+                  nv_host_sema_addr_lo(sema_gpu_addr, mode));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED, nv_host_sema_execute(mode));
+}
+
 /* Host semaphore release (4-byte payload) at GPU sema address */
 static inline void
 nv_push_sema_release(struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload)
 {
-   nv_push_method(p, NVC36F_SEMAPHOREA, (uint32_t)(sema_gpu_addr >> 32) & 0xff);
-   nv_push_method(p, NVC36F_SEMAPHOREB, (uint32_t)(sema_gpu_addr & ~0x3u));
-   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
-   nv_push_method(p, NVC36F_SEMAPHORED,
-                  NVC36F_SEMAPHORED_OPERATION_RELEASE |
-                  NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
-                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+   /* Historic: align4 + open headers (same as nv_push_sema_release before pass5) */
+   nv_push_sema_release_mode(p, sema_gpu_addr, payload,
+                             NV_HOST_SEMA_MODE_OPEN_ALIGN4);
 }
 
 /* Host semaphore acquire (stall channel until mem == payload; ACQ_GEQ variant). */

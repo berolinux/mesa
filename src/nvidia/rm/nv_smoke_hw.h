@@ -104,6 +104,7 @@ struct nv_smoke_hw_result {
    int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
    int g1_remap_fill_rc; /* tertiary: REMAP fill+sema if copy+sema_only both fail or copy fails */
    int g1_host_sema_rc;  /* quaternary: NVC36F host sema only (kickoff probe) */
+   int g1_host_sema_mode; /* nv_host_sema_mode that succeeded (or last tried); -1 n/a */
    int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */
    int g1_preflight_detail; /* 0 ok, 1=GPPut-only (no doorbell token), else errno */
    int g1_schedule_rc;  /* channel->schedule_rc from last GPFIFO_SCHEDULE attempt */
@@ -132,6 +133,7 @@ struct nv_smoke_hw_result {
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
    int g2_preflight_rc;
    int g2_host_sema_rc; /* host/GPFIFO sema (run before compute; kickoff gate) */
+   int g2_host_sema_mode; /* winning/last nv_host_sema_mode; -1 n/a */
    int g2_engine_alloc_rc;
    uint32_t g2_h_obj_compute;
    uint32_t g2_store_observed; /* dst_cpu[0] after G2 when mapped */
@@ -143,6 +145,7 @@ struct nv_smoke_hw_result {
    int g3_sema_only_rc; /* secondary: 3D sema-only if clear path fails */
    int g3_preflight_rc;
    int g3_host_sema_rc;
+   int g3_host_sema_mode; /* winning/last nv_host_sema_mode; -1 n/a */
    uint32_t g3_class_3d;
    uint32_t g3_h_obj_3d;
 };

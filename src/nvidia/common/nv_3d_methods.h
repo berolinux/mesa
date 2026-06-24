@@ -1754,19 +1754,19 @@ nv_3d_emit_draw_indirect_multi_with_sema(struct nv_push *p,
 
 /** Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object). */
 static inline void
+nv_push_host_semaphore_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
+                                    uint32_t payload, enum nv_host_sema_mode mode)
+{
+   nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
+}
+
+static inline void
 nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                                uint32_t payload)
 {
-   /* Offset must be 4-byte aligned; SEMAPHOREB stores bits 31:2 */
-   nv_push_method(p, NVC36F_SEMAPHOREA,
-                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
-   nv_push_method(p, NVC36F_SEMAPHOREB,
-                  (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu));
-   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
-   nv_push_method(p, NVC36F_SEMAPHORED,
-                  NVC36F_SEMAPHORED_OPERATION_RELEASE |
-                  NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
-                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+   /* Default: clc36f shift2 + open bitfield execute (production paths). */
+   nv_push_host_semaphore_release_mode(p, sema_gpu_addr, payload,
+                                       NV_HOST_SEMA_MODE_OPEN_SHIFT2);
 }
 
 /**
@@ -1774,12 +1774,22 @@ nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
  * before sema; useful as G1 kickoff probe when methods may still be in flight).
  */
 static inline void
-nv_push_host_semaphore_release_wfi(struct nv_push *p, uint64_t sema_gpu_addr,
-                                   uint32_t payload, bool with_wfi)
+nv_push_host_semaphore_release_wfi_mode(struct nv_push *p,
+                                        uint64_t sema_gpu_addr,
+                                        uint32_t payload, bool with_wfi,
+                                        enum nv_host_sema_mode mode)
 {
    if (with_wfi)
       nv_push_method(p, NVC36F_WFI, 0);
-   nv_push_host_semaphore_release(p, sema_gpu_addr, payload);
+   nv_push_host_semaphore_release_mode(p, sema_gpu_addr, payload, mode);
+}
+
+static inline void
+nv_push_host_semaphore_release_wfi(struct nv_push *p, uint64_t sema_gpu_addr,
+                                   uint32_t payload, bool with_wfi)
+{
+   nv_push_host_semaphore_release_wfi_mode(p, sema_gpu_addr, payload, with_wfi,
+                                           NV_HOST_SEMA_MODE_OPEN_SHIFT2);
 }
 
 /** 3D report semaphore acquire: stall until memory at sema_gpu_addr == payload. */
