@@ -210,6 +210,40 @@ nv_sass_emit_stg_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data)
    return nv_sass_emit_raw(b, pack_lo_rrr(0, ra_addr, rb_data), NV_SASS_STG_HI_BASE);
 }
 
+bool
+nv_sass_emit_ldl_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr)
+{
+   /* Local mem load: Rd = LMEM[Ra + imm0]; address reg holds byte offset */
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra_addr);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra_addr, 0), NV_SASS_LDL_HI_BASE);
+}
+
+bool
+nv_sass_emit_stl_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data)
+{
+   /* Local mem store: LMEM[Ra] = Rb */
+   nv_sass_note_reg(b, ra_addr);
+   nv_sass_note_reg(b, rb_data);
+   return nv_sass_emit_raw(b, pack_lo_rrr(0, ra_addr, rb_data), NV_SASS_STL_HI_BASE);
+}
+
+bool
+nv_sass_emit_lds_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra_addr);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra_addr, 0), NV_SASS_LDS_HI_BASE);
+}
+
+bool
+nv_sass_emit_sts_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data)
+{
+   nv_sass_note_reg(b, ra_addr);
+   nv_sass_note_reg(b, rb_data);
+   return nv_sass_emit_raw(b, pack_lo_rrr(0, ra_addr, rb_data), NV_SASS_STS_HI_BASE);
+}
+
 uint32_t
 nv_sass_buf_copy_out(const struct nv_sass_buf *b,
                      uint32_t *dst, uint32_t dst_cap_dwords)

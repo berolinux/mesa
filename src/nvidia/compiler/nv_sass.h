@@ -74,6 +74,14 @@ extern "C" {
 #define NV_SASS_LDG_HI_BASE     0xeed00000u
 #define NV_SASS_STG_HI_BASE     0xeed80000u
 
+/* LDL / STL — local memory load/store (per-thread LMEM; spill/frame) */
+#define NV_SASS_LDL_HI_BASE     0xef400000u
+#define NV_SASS_STL_HI_BASE     0xef480000u
+
+/* LDS / STS — shared memory (CTA/shared) approximations */
+#define NV_SASS_LDS_HI_BASE     0xef480800u
+#define NV_SASS_STS_HI_BASE     0xef580000u
+
 /* BRA / relative branch (lo has offset, hi has BRA class) */
 #define NV_SASS_BRA_HI_BASE     0xe2400000u
 
@@ -211,6 +219,10 @@ bool nv_sass_emit_lop3(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
 bool nv_sass_emit_s2r(struct nv_sass_buf *b, uint8_t rd, uint8_t sr);
 bool nv_sass_emit_ldg_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
 bool nv_sass_emit_stg_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data);
+bool nv_sass_emit_ldl_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
+bool nv_sass_emit_stl_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data);
+bool nv_sass_emit_lds_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
+bool nv_sass_emit_sts_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data);
 
 bool nv_sass_emit_shf_l(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 bool nv_sass_emit_shf_r(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb, bool arithmetic);

@@ -65,11 +65,11 @@ stage_to_sph_type(enum nv_compiler_stage stage)
 static struct nv_ra_context *nv_isel_ra;
 
 /*
- * Spill model: spilled SSA values live in per-thread local memory at byte
- * offset (spill_slot * 4).  Address is built as MOV R254, imm_offset then
- * LDG/STG through that register (global-form load/store as stand-in for LDL/STL
- * until dedicated local-memory opcodes are wired; offset is absolute within
- * the spill region the QMD/SPH local_mem_low reservation covers).
+ * Spill model: spilled SSA values live in per-thread local memory (LMEM) at
+ * byte offset (spill_slot * 4).  Address is built as MOV R254, imm_offset then
+ * STL/LDL (local store/load).  SPH/QMD local_mem_low must reserve at least
+ * nv_ra_spill_local_bytes(); compute path also issues SET_SHADER_LOCAL_MEMORY*
+ * for the backing window when a global LMEM BO is allocated.
  */
 static bool
 spill_emit_addr(struct nv_sass_buf *sb, uint16_t slot)
@@ -83,7 +83,7 @@ spill_store_reg(struct nv_sass_buf *sb, uint8_t data_reg, uint16_t slot)
 {
    if (!spill_emit_addr(sb, slot))
       return false;
-   return nv_sass_emit_stg_u32(sb, NV_RA_SPILL_TMP_REG, data_reg);
+   return nv_sass_emit_stl_u32(sb, NV_RA_SPILL_TMP_REG, data_reg);
 }
 
 static bool
@@ -91,7 +91,7 @@ spill_load_to_tmp(struct nv_sass_buf *sb, uint16_t slot)
 {
    if (!spill_emit_addr(sb, slot))
       return false;
-   return nv_sass_emit_ldg_u32(sb, NV_RA_SPILL_TMP_REG, NV_RA_SPILL_TMP_REG);
+   return nv_sass_emit_ldl_u32(sb, NV_RA_SPILL_TMP_REG, NV_RA_SPILL_TMP_REG);
 }
 
 /* Destination register for a def: spilled defs write R254 then STG spill slot. */
@@ -475,6 +475,31 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       ra = src_reg_reload(sb, &intr->src[1]);
       rb = src_reg_reload(sb, &intr->src[0]);
       return nv_sass_emit_stg_u32(sb, ra, rb);
+
+   case nir_intrinsic_load_shared:
+      rd = ssa_reg_dst(&intr->def);
+      ra = src_reg_reload(sb, &intr->src[0]);
+      ok = nv_sass_emit_lds_u32(sb, rd, ra);
+      break;
+
+   case nir_intrinsic_store_shared:
+      ra = src_reg_reload(sb, &intr->src[1]);
+      rb = src_reg_reload(sb, &intr->src[0]);
+      return nv_sass_emit_sts_u32(sb, ra, rb);
+
+   case nir_intrinsic_load_scratch:
+   case nir_intrinsic_load_stack:
+      /* Per-thread scratch / local frame (same LMEM as spill slots) */
+      rd = ssa_reg_dst(&intr->def);
+      ra = src_reg_reload(sb, &intr->src[0]);
+      ok = nv_sass_emit_ldl_u32(sb, rd, ra);
+      break;
+
+   case nir_intrinsic_store_scratch:
+   case nir_intrinsic_store_stack:
+      ra = src_reg_reload(sb, &intr->src[1]);
+      rb = src_reg_reload(sb, &intr->src[0]);
+      return nv_sass_emit_stl_u32(sb, ra, rb);
 
    case nir_intrinsic_load_ubo:
    case nir_intrinsic_load_uniform: {
