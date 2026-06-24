@@ -330,7 +330,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          ch->scheduled = true;
    }
 
-   /* Work submit token (Volta+) */
+   /* Work submit token (Volta+) via channel GPFIFO ctrl */
    {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
       memset(&tok, 0, sizeof(tok));
@@ -341,6 +341,10 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          ch->has_work_submit_token = true;
       }
    }
+
+   /* Refresh usermode map if device got it after channel start */
+   if (!ch->usermode_map)
+      ch->usermode_map = nv_rm_device_usermode_map(rm);
 
    return ch;
 
@@ -407,6 +411,63 @@ nv_channel_push_used(struct nv_channel *ch)
 }
 
 int
+nv_channel_ensure_submit_ready(struct nv_channel *ch)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+   return -ENOSYS;
+#else
+   int ret;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+
+   /* Schedule if create-time schedule failed (channel won't run methods) */
+   if (!ch->scheduled) {
+      if (ch->use_channel_group && ch->h_channel_group) {
+         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+         memset(&gsched, 0, sizeof(gsched));
+         gsched.bEnable = NV_TRUE;
+         gsched.bSkipSubmit = NV_FALSE;
+         if (nv_rm_control(ch->rm, ch->h_channel_group,
+                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &gsched, sizeof(gsched)) == 0)
+            ch->scheduled = true;
+      }
+      if (!ch->scheduled) {
+         NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
+         memset(&sched, 0, sizeof(sched));
+         sched.bEnable = NV_TRUE;
+         sched.bSkipSubmit = NV_FALSE;
+         if (nv_rm_control(ch->rm, ch->h_channel,
+                           NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &sched, sizeof(sched)) == 0)
+            ch->scheduled = true;
+      }
+   }
+
+   /* Doorbell prerequisites (Volta+): usermode page + work submit token */
+   if (!ch->usermode_map && ch->rm) {
+      (void)nv_rm_device_ensure_usermode(ch->rm);
+      ch->usermode_map = nv_rm_device_usermode_map(ch->rm);
+   }
+   if (!ch->has_work_submit_token && ch->rm) {
+      NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
+      memset(&tok, 0, sizeof(tok));
+      if (nv_rm_control(ch->rm, ch->h_channel,
+                        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                        &tok, sizeof(tok)) == 0) {
+         ch->work_submit_token = tok.workSubmitToken;
+         ch->has_work_submit_token = true;
+      }
+   }
+
+   (void)ret;
+   return 0;
+#endif
+}
+
+int
 nv_channel_kickoff(struct nv_channel *ch)
 {
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -416,6 +477,7 @@ nv_channel_kickoff(struct nv_channel *ch)
    uint32_t seg_dwords;
    uint64_t pb_addr;
    int r;
+   bool ring_doorbell;
 
    if (!ch || !ch->gpfifo_cpu || !ch->userd || !ch->push_cpu)
       return -EINVAL;
@@ -423,6 +485,8 @@ nv_channel_kickoff(struct nv_channel *ch)
    seg_dwords = ch->push_dw_used - ch->push_dw_base;
    if (seg_dwords == 0)
       return 0;
+
+   (void)nv_channel_ensure_submit_ready(ch);
 
    /* Align segment end for some engines that want 4-dword alignment */
    while (seg_dwords & 3) {
@@ -432,15 +496,29 @@ nv_channel_kickoff(struct nv_channel *ch)
 
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
 
+   /*
+    * Ring doorbell when we have usermode map + token.  Pre-Volta / no token
+    * still publishes USERD GPPut (GPPut-only kick path).
+    */
+   ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
+
    /* libdrm helper: write GPFIFO entry, advance put, USERD GPPut, doorbell */
    r = nvidia_gpfifo_submit_one(ch->gpfifo_cpu, ch->gpfifo_entries,
                                 &ch->gpfifo_put, ch->userd,
                                 pb_addr, seg_dwords,
-                                ch->usermode_map, ch->work_submit_token,
-                                ch->has_work_submit_token,
+                                ring_doorbell ? ch->usermode_map : NULL,
+                                ch->work_submit_token,
+                                ring_doorbell,
                                 1000000000ull /* 1s ring-full stall */);
    if (r)
       return r;
+
+   /*
+    * Extra doorbell ring if submit_one did not (no token at submit time) but
+    * we obtained token+map mid-submit — rare race with ensure_submit_ready.
+    */
+   if (!ring_doorbell && ch->usermode_map && ch->has_work_submit_token)
+      nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
 
    ch->push_dw_base = ch->push_dw_used;
    return 0;

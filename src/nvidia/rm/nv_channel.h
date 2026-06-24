@@ -97,6 +97,12 @@ uint32_t nv_channel_resolve_class_3d(const struct nv_channel *ch,
 uint32_t *
 nv_channel_push_begin(struct nv_channel *ch, uint32_t need_dwords);
 
+/**
+ * Ensure channel is scheduled + work_submit_token/usermode doorbell ready.
+ * Called lazily from kickoff if create-time setup was incomplete.
+ */
+int nv_channel_ensure_submit_ready(struct nv_channel *ch);
+
 /** Commit pushbuffer segment and submit via GPFIFO + GPPut update */
 int
 nv_channel_kickoff(struct nv_channel *ch);

@@ -28,7 +28,15 @@
  *
  *   NV_SMOKE_HW_VERBOSE=1
  *     Always print nv_smoke_hw_log_result (g1_submit/payload/sema/class).
- *     Failures also log even without this flag.
+ *     Failures also log even without this flag.  Also logs device classes.
+ *
+ *   NV_RM_LOG_CLASSES=1
+ *     Log refined gpfifo/3d/compute/copy classes at nv_rm_device_open time.
+ *
+ * Kickoff path (G1 hung sema with g1_sema_only also failing):
+ *   - Channel schedule (NVA06F/A06C GPFIFO_SCHEDULE) must succeed
+ *   - Volta+: usermode doorbell + work_submit_token; else GPPut-only kick
+ *   - USERD GPPut published before doorbell (libdrm nvidia_gpfifo_submit_one)
  *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
