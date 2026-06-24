@@ -408,75 +408,8 @@ nv_compute_emit_inline_qmd_launch(struct nv_push *p, uint64_t qmd_gpu_addr,
    }
 }
 
-/**
- * High-level: encode QMD from desc and emit compute launch methods.
- * Does not allocate QMD GPU memory — caller provides qmd_gpu_addr for the
- * address fields; for record-only paths pass 0 (inline data still loaded).
- */
-static inline void
-nv_compute_emit_dispatch(struct nv_push *p, const struct nv_qmd_desc *desc,
-                         uint64_t qmd_gpu_addr, uint32_t class_compute)
-{
-   uint32_t qmd[NV_QMD_DWORDS];
-
-   if (!p || !desc)
-      return;
-
-   nv_qmd_encode(desc, qmd);
-
-   if (class_compute)
-      nv_compute_set_object(p, class_compute);
-   else
-      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
-
-   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
-}
-
-/**
- * Encode QMD into caller buffer and optionally mirror into host-mapped QMD BO.
- * When qmd_host is non-NULL, the 256-byte QMD is written there so the GPU VA
- * at qmd_gpu_addr contains the same contents as the inline LOAD path — this
- * matches the proprietary driver's "materialize QMD then SEND_PCAS" model and
- * is the prerequisite for GPU-side indirect grid patching (copy indirect
- * {x,y,z} into CTA_RASTER_* MW fields before PCAS).
- */
-static inline void
-nv_qmd_materialize(const struct nv_qmd_desc *desc, uint32_t qmd_out[NV_QMD_DWORDS],
-                   void *qmd_host)
-{
-   if (!desc || !qmd_out)
-      return;
-   nv_qmd_encode(desc, qmd_out);
-   if (qmd_host)
-      memcpy(qmd_host, qmd_out, NV_QMD_BYTES);
-}
-
-/**
- * Dispatch using materialised QMD: encode, optionally host-mirror, then launch.
- * Preferred over nv_compute_emit_dispatch when a dedicated QMD scratch BO
- * exists and may be reused across launches in the same command buffer.
- */
-static inline void
-nv_compute_emit_dispatch_materialized(struct nv_push *p,
-                                      const struct nv_qmd_desc *desc,
-                                      uint64_t qmd_gpu_addr,
-                                      void *qmd_host,
-                                      uint32_t class_compute)
-{
-   uint32_t qmd[NV_QMD_DWORDS];
-
-   if (!p || !desc)
-      return;
-
-   nv_qmd_materialize(desc, qmd, qmd_host);
-
-   if (class_compute)
-      nv_compute_set_object(p, class_compute);
-   else
-      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
-
-   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
-}
+/* nv_compute_emit_dispatch / nv_qmd_materialize / nv_compute_emit_dispatch_materialized
+ * follow nv_qmd_encode_full (below) so sema/dependent sideband is always applied. */
 
 /**
  * Patch CTA raster (grid) dimensions into an already-encoded QMD dword array.
@@ -618,6 +551,76 @@ nv_qmd_encode_full(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
 {
    nv_qmd_encode(d, qmd);
    nv_qmd_apply_desc_sideband(d, qmd);
+}
+
+/**
+ * High-level: encode QMD (with sema/dependent sideband) and emit compute launch.
+ * Does not allocate QMD GPU memory — caller provides qmd_gpu_addr for the
+ * address fields; for record-only paths pass 0 (inline data still loaded).
+ */
+static inline void
+nv_compute_emit_dispatch(struct nv_push *p, const struct nv_qmd_desc *desc,
+                         uint64_t qmd_gpu_addr, uint32_t class_compute)
+{
+   uint32_t qmd[NV_QMD_DWORDS];
+
+   if (!p || !desc)
+      return;
+
+   nv_qmd_encode_full(desc, qmd);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+}
+
+/**
+ * Encode QMD into caller buffer and optionally mirror into host-mapped QMD BO.
+ * When qmd_host is non-NULL, the 256-byte QMD is written there so the GPU VA
+ * at qmd_gpu_addr contains the same contents as the inline LOAD path — this
+ * matches the proprietary driver's "materialize QMD then SEND_PCAS" model and
+ * is the prerequisite for GPU-side indirect grid patching (copy indirect
+ * {x,y,z} into CTA_RASTER_* MW fields before PCAS).
+ */
+static inline void
+nv_qmd_materialize(const struct nv_qmd_desc *desc, uint32_t qmd_out[NV_QMD_DWORDS],
+                   void *qmd_host)
+{
+   if (!desc || !qmd_out)
+      return;
+   nv_qmd_encode_full(desc, qmd_out);
+   if (qmd_host)
+      memcpy(qmd_host, qmd_out, NV_QMD_BYTES);
+}
+
+/**
+ * Dispatch using materialised QMD: encode, optionally host-mirror, then launch.
+ * Preferred over nv_compute_emit_dispatch when a dedicated QMD scratch BO
+ * exists and may be reused across launches in the same command buffer.
+ */
+static inline void
+nv_compute_emit_dispatch_materialized(struct nv_push *p,
+                                      const struct nv_qmd_desc *desc,
+                                      uint64_t qmd_gpu_addr,
+                                      void *qmd_host,
+                                      uint32_t class_compute)
+{
+   uint32_t qmd[NV_QMD_DWORDS];
+
+   if (!p || !desc)
+      return;
+
+   nv_qmd_materialize(desc, qmd, qmd_host);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
 }
 
 /**

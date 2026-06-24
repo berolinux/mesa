@@ -97,6 +97,18 @@ nv_channel_push_used(struct nv_channel *ch);
 int
 nv_channel_wait_idle(struct nv_channel *ch, uint64_t timeout_ns);
 
+/**
+ * Submit push segment (kickoff) then optionally wait for GPFIFO drain.
+ * wait_timeout_ns: 0 = kick only; UINT64_MAX-style large = wait long.
+ * Returns kickoff error or wait error.
+ */
+int
+nv_channel_submit_and_wait(struct nv_channel *ch, uint64_t wait_timeout_ns);
+
+/** Kickoff if there are pending push dwords; no-op if empty. */
+int
+nv_channel_flush(struct nv_channel *ch);
+
 #ifdef __cplusplus
 }
 #endif

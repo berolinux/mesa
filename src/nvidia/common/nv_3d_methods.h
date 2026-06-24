@@ -1026,6 +1026,31 @@ nv_3d_mme_call_macro(struct nv_push *p, uint32_t macro_index, uint32_t data0)
    nv_push_method(p, NVC597_CALL_MME_MACRO(macro_index), data0);
 }
 
+/** Stream additional MME data dwords after CALL_MME_MACRO (macro reads via FIFO). */
+static inline void
+nv_3d_mme_call_data(struct nv_push *p, uint32_t macro_index, uint32_t data)
+{
+   if (!p)
+      return;
+   nv_push_method(p, NVC597_CALL_MME_DATA(macro_index), data);
+}
+
+/** Call macro then push N extra data dwords (indirect addr/stride/count packs). */
+static inline void
+nv_3d_mme_call_macro_with_data(struct nv_push *p, uint32_t macro_index,
+                               uint32_t data0, const uint32_t *extra,
+                               uint32_t extra_count)
+{
+   uint32_t i;
+   if (!p)
+      return;
+   nv_3d_mme_call_macro(p, macro_index, data0);
+   if (!extra)
+      return;
+   for (i = 0; i < extra_count; i++)
+      nv_3d_mme_call_data(p, macro_index, extra[i]);
+}
+
 /**
  * Prepare shadow-RAM control for MME method tracking (replay/passthrough).
  * mode: NVC597_SET_MME_SHADOW_RAM_CONTROL_MODE_* 
@@ -1038,10 +1063,40 @@ nv_3d_mme_set_shadow_ram_control(struct nv_push *p, uint32_t mode)
    nv_push_method(p, NVC597_SET_MME_SHADOW_RAM_CONTROL, mode & 3u);
 }
 
+/** SET_MME_VERSION — required on some gens before LOAD_MME_*. */
+static inline void
+nv_3d_mme_set_version(struct nv_push *p, uint32_t version)
+{
+   if (!p)
+      return;
+   nv_push_method(p, NVC597_SET_MME_VERSION, version);
+}
+
+/**
+ * Upload a complete MME macro: instruction RAM + start-address slot.
+ * start_slot typically equals macro_index for 1:1 mapping.
+ */
+static inline void
+nv_3d_mme_upload_macro(struct nv_push *p, uint32_t macro_index,
+                       uint32_t instr_ram_offset,
+                       const uint32_t *insns, uint32_t insn_count)
+{
+   if (!p || !insns || !insn_count)
+      return;
+   nv_3d_mme_load_instructions(p, instr_ram_offset, insns, insn_count);
+   nv_3d_mme_set_start_address(p, macro_index, instr_ram_offset);
+}
+
 /**
  * GPU indirect path C (MME-ready): set MME mem address to indirect BO,
  * pass draw_count via data — actual loop body requires uploaded macro.
  * Returns false if no macro_index configured (caller falls back to path B).
+ *
+ * data0 convention (matches future macro microcode):
+ *   bits 15:0  = draw_count
+ *   bits 31:16 = stride in bytes
+ * extra[0] = indirect_gpu_addr low32 (redundant with MEM_ADDRESS when macro
+ *            prefers method data over MME mem addr regs)
  */
 static inline bool
 nv_3d_emit_draw_indirect_mme_kick(struct nv_push *p,
@@ -1051,18 +1106,37 @@ nv_3d_emit_draw_indirect_mme_kick(struct nv_push *p,
                                   uint32_t macro_index,
                                   bool macro_uploaded)
 {
+   uint32_t extra[2];
    if (!p || !indirect_gpu_addr || !draw_count || !macro_uploaded)
       return false;
    nv_push_method(p, NVC597_SET_MME_MEM_ADDRESS_A,
                   (uint32_t)(indirect_gpu_addr >> 32) & 0xff);
    nv_push_method(p, NVC597_SET_MME_MEM_ADDRESS_B,
                   (uint32_t)(indirect_gpu_addr & 0xffffffffu));
-   /* data0: draw_count | (stride << 16) — convention for future macro */
-   nv_3d_mme_call_macro(p, macro_index,
-                        (draw_count & 0xffffu) |
-                        ((stride_bytes & 0xffffu) << 16));
-   (void)stride_bytes;
+   extra[0] = (uint32_t)(indirect_gpu_addr & 0xffffffffu);
+   extra[1] = (uint32_t)(indirect_gpu_addr >> 32);
+   nv_3d_mme_call_macro_with_data(p, macro_index,
+                                  (draw_count & 0xffffu) |
+                                  ((stride_bytes & 0xffffu) << 16),
+                                  extra, 2);
    return true;
+}
+
+/**
+ * Same as draw indirect MME kick but for indexed indirect (20-byte records).
+ * data0 still carries count|stride; macro distinguishes via macro_index.
+ */
+static inline bool
+nv_3d_emit_draw_indexed_indirect_mme_kick(struct nv_push *p,
+                                          uint64_t indirect_gpu_addr,
+                                          uint32_t draw_count,
+                                          uint32_t stride_bytes,
+                                          uint32_t macro_index,
+                                          bool macro_uploaded)
+{
+   return nv_3d_emit_draw_indirect_mme_kick(p, indirect_gpu_addr, draw_count,
+                                            stride_bytes, macro_index,
+                                            macro_uploaded);
 }
 
 /** Map pipe_format (numeric, see p_format.h) to vertex component bit-width code. */

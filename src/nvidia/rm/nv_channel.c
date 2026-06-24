@@ -326,9 +326,7 @@ nv_channel_kickoff(struct nv_channel *ch)
 #else
    uint32_t seg_dwords;
    uint64_t pb_addr;
-   uint32_t entry[2];
-   uint32_t put_idx, next_put;
-   volatile nvidia_userd_control_t *ud;
+   int r;
 
    if (!ch || !ch->gpfifo_cpu || !ch->userd || !ch->push_cpu)
       return -EINVAL;
@@ -344,39 +342,44 @@ nv_channel_kickoff(struct nv_channel *ch)
    }
 
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
-   nvidia_gp_entry_pack(entry, pb_addr, seg_dwords, false, false);
 
-   put_idx = ch->gpfifo_put;
-   next_put = (put_idx + 1) % ch->gpfifo_entries;
-
-   /* Stall if ring full (GPGet == next_put) */
-   ud = (volatile nvidia_userd_control_t *)ch->userd;
-   {
-      uint64_t deadline = now_ns() + 1000000000ull; /* 1s */
-      while (ud->GPGet == next_put) {
-         if (now_ns() > deadline)
-            return -ETIMEDOUT;
-      }
-   }
-
-   ch->gpfifo_cpu[put_idx * 2 + 0] = entry[0];
-   ch->gpfifo_cpu[put_idx * 2 + 1] = entry[1];
-
-   /* Memory barrier before publishing put */
-   __sync_synchronize();
-
-   ch->gpfifo_put = next_put;
-   ud->GPPut = next_put;
-   __sync_synchronize();
-
-   /* Volta+: ring usermode doorbell with work_submit_token (nvidia-push path).
-    * Pre-Volta / missing usermode: GPPut alone is sufficient. */
-   if (ch->has_work_submit_token && ch->usermode_map)
-      nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
+   /* libdrm helper: write GPFIFO entry, advance put, USERD GPPut, doorbell */
+   r = nvidia_gpfifo_submit_one(ch->gpfifo_cpu, ch->gpfifo_entries,
+                                &ch->gpfifo_put, ch->userd,
+                                pb_addr, seg_dwords,
+                                ch->usermode_map, ch->work_submit_token,
+                                ch->has_work_submit_token,
+                                1000000000ull /* 1s ring-full stall */);
+   if (r)
+      return r;
 
    ch->push_dw_base = ch->push_dw_used;
    return 0;
 #endif
+}
+
+int
+nv_channel_flush(struct nv_channel *ch)
+{
+   if (!ch)
+      return -EINVAL;
+   if (ch->push_dw_used <= ch->push_dw_base)
+      return 0;
+   return nv_channel_kickoff(ch);
+}
+
+int
+nv_channel_submit_and_wait(struct nv_channel *ch, uint64_t wait_timeout_ns)
+{
+   int r;
+   if (!ch)
+      return -EINVAL;
+   r = nv_channel_flush(ch);
+   if (r)
+      return r;
+   if (!wait_timeout_ns)
+      return 0;
+   return nv_channel_wait_idle(ch, wait_timeout_ns);
 }
 
 int
@@ -386,24 +389,9 @@ nv_channel_wait_idle(struct nv_channel *ch, uint64_t timeout_ns)
    (void)ch; (void)timeout_ns;
    return -ENOSYS;
 #else
-   volatile nvidia_userd_control_t *ud;
-   uint64_t deadline;
-   uint32_t target;
-
    if (!ch || !ch->userd)
       return -EINVAL;
 
-   ud = (volatile nvidia_userd_control_t *)ch->userd;
-   target = ch->gpfifo_put;
-   deadline = timeout_ns ? now_ns() + timeout_ns : 0;
-
-   for (;;) {
-      if (ud->GPGet == target)
-         return 0;
-      if (!timeout_ns)
-         return -EAGAIN;
-      if (now_ns() > deadline)
-         return -ETIMEDOUT;
-   }
+   return nvidia_userd_wait_gpfifo_idle(ch->userd, ch->gpfifo_put, timeout_ns);
 #endif
 }

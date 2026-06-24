@@ -757,7 +757,7 @@ nvrm_queue_submit(struct vk_queue *vk_queue,
          ch->push_dw_used = seg_base + (uint32_t)(tail.cur - tail.start);
       }
 
-      if (nv_channel_kickoff(ch) != 0)
+      if (nv_channel_flush(ch) != 0)
          return VK_ERROR_DEVICE_LOST;
    }
 

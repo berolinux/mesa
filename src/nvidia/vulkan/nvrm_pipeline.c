@@ -2764,6 +2764,15 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    desc->sm_global_caching = true;
    desc->invalidate_caches = !cmd->compute_init_done;
 
+   /* Optional QMD sema release for queue submit_fence chaining (if cmd has
+    * scratch sema from prior event/query work; 0 leaves sema disabled). */
+   if (cmd->device && cmd->device->queue &&
+       cmd->device->queue->submit_fence &&
+       cmd->device->queue->submit_fence->sema_gpu_addr) {
+      desc->sema_release0_addr = cmd->device->queue->submit_fence->sema_gpu_addr;
+      desc->sema_release0_value = cmd->device->queue->submit_seq + 1;
+   }
+
    if (cs && cs->const_gpu_addr && cs->const_size) {
       desc->cb_addr[0] = cs->const_gpu_addr;
       desc->cb_size[0] = cs->const_size;
@@ -2982,7 +2991,7 @@ nvrm_queue_submit_one_cmd(struct nvrm_queue *queue,
       ch->push_dw_used = seg_base + (uint32_t)(tail.cur - tail.start);
    }
 
-   if (nv_channel_kickoff(ch) != 0)
+   if (nv_channel_flush(ch) != 0)
       return VK_ERROR_DEVICE_LOST;
    return VK_SUCCESS;
 }
@@ -3041,6 +3050,10 @@ nvrm_QueueWaitIdle(VkQueue _queue)
    VK_FROM_HANDLE(nvrm_queue, queue, _queue);
    if (!queue)
       return VK_SUCCESS;
+   /* Flush any unsubmitted channel tail before waiting. */
+   if (queue->channel)
+      (void)nv_channel_flush(queue->channel);
+
    if (queue->submit_fence && queue->submit_seq) {
       if (nv_fence_wait(queue->submit_fence, queue->submit_seq,
                         5000000000ull) != 0)

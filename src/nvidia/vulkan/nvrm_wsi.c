@@ -84,7 +84,7 @@ nvrm_QueuePresent2(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
     * in pPresentInfo are processed by wsi_common_queue_present; we only need
     * to guarantee our own push has reached the kernel. */
    if (queue->channel_ready && queue->channel)
-      nv_channel_kickoff(queue->channel);
+      (void)nv_channel_flush(queue->channel);
 
    result = wsi_common_queue_present(device->physical->vk.wsi_device,
                                      &queue->vk, pPresentInfo);
@@ -101,7 +101,7 @@ nvrm_QueuePresent2(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
    /* Kick again after present so any post-present sema releases on our channel
     * progress; harmless if channel is idle. */
    if (queue->channel_ready && queue->channel)
-      nv_channel_kickoff(queue->channel);
+      (void)nv_channel_flush(queue->channel);
 
    return result;
 }
