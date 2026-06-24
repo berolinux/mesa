@@ -114,6 +114,15 @@ void nv_device_info_refine_gpfifo_from_list(struct nv_device_info *info,
 void nv_device_info_log_classes(const struct nv_device_info *info,
                                 const char *prefix);
 
+/**
+ * Newest-first class ladders from 610.43.02 binary RE + OGKM headers.
+ * Writes up to *inout_n entries into out[]; sets *inout_n to count written.
+ * engine_kind: 0=3d, 1=compute, 2=copy, 5=gpfifo (same as refine_* kinds + 5).
+ * prefer_first: optional class to put at index 0 (e.g. refined device class).
+ */
+void nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
+                                      uint32_t *out, unsigned *inout_n);
+
 #ifdef __cplusplus
 }
 #endif

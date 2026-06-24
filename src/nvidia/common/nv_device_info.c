@@ -8,7 +8,11 @@
 
 #include <stdio.h>
 
-/* Channel / engine class IDs from open-gpu-kernel-modules class headers */
+/* Channel / engine class IDs from open-gpu-kernel-modules class headers.
+ * 610.43.02 glcore/cuda also embed C8xx / C86F ladders (binary RE; see
+ * mesa/src/nvidia/traces/HW_MODEL_FROM_BINARIES_610.43.02.md) — try newest first
+ * via refine_class_from_list / channel engine alts.
+ */
 #define KEPLER_A_COMPUTE_A          0x0000a0c0
 #define MAXWELL_COMPUTE_A           0x0000b0c0
 #define MAXWELL_COMPUTE_B           0x0000b1c0
@@ -20,6 +24,8 @@
 #define AMPERE_COMPUTE_B            0x0000c7c0
 #define ADA_COMPUTE_A               0x0000c9c0
 #define HOPPER_COMPUTE_A            0x0000cbc0
+/* 610 blob ladders (u16 frequency in libcuda/glcore; may refine from RM classlist) */
+#define BLACKWELL_COMPUTE_A         0x0000cdc0  /* tentative; refine prefers highest in band */
 
 #define KEPLER_A_3D_A               0x0000a097
 #define MAXWELL_A_3D_A              0x0000b097
@@ -32,6 +38,7 @@
 #define AMPERE_B_3D_B               0x0000c797
 #define ADA_A_3D_A                  0x0000c997
 #define HOPPER_A_3D_A               0x0000cb97
+#define BLACKWELL_3D_A              0x0000cd97  /* tentative; refine prefers highest in band */
 
 #define KEPLER_CHANNEL_GPFIFO_A     0x0000a06f
 #define MAXWELL_CHANNEL_GPFIFO_A    0x0000b06f
@@ -40,6 +47,8 @@
 #define TURING_CHANNEL_GPFIFO_A     0x0000c46f
 #define AMPERE_CHANNEL_GPFIFO_A     0x0000c56f
 #define HOPPER_CHANNEL_GPFIFO_A     0x0000c76f
+/* 610 binaries also carry 0xC86F (Blackwell-era GPFIFO); refine picks highest 0x*6f */
+#define BLACKWELL_CHANNEL_GPFIFO_A  0x0000c86f
 
 #define FERMI_TWOD_A                0x0000902d
 #define KEPLER_INLINE_TO_MEMORY_A   0x0000a040
@@ -52,6 +61,8 @@
 #define AMPERE_DMA_COPY_A           0x0000c6b5
 #define AMPERE_DMA_COPY_B           0x0000c7b5
 #define HOPPER_DMA_COPY_A           0x0000c8b5
+/* 610 RE: C8B5 very common; may also see higher *B5 via classlist refine */
+#define BLACKWELL_DMA_COPY_A        0x0000c9b5  /* tentative upper; refine band allows up to 0xCFB5 */
 
 enum nv_gpu_family
 nv_device_info_family_from_arch(uint32_t architecture)
@@ -169,11 +180,19 @@ nv_device_info_select_classes(struct nv_device_info *info)
       info->class_m2mf = AMPERE_DMA_COPY_B;
       break;
    case NV_GPU_FAMILY_HOPPER:
-   case NV_GPU_FAMILY_BLACKWELL:
       info->class_compute = HOPPER_COMPUTE_A;
       info->class_3d = HOPPER_A_3D_A;
       info->class_gpfifo = HOPPER_CHANNEL_GPFIFO_A;
       info->class_copy = HOPPER_DMA_COPY_A;
+      info->class_m2mf = HOPPER_DMA_COPY_A;
+      info->gsp_mode = true;
+      break;
+   case NV_GPU_FAMILY_BLACKWELL:
+      /* Prefer newest IDs seen in 610 ladders; RM classlist refine upgrades further */
+      info->class_compute = BLACKWELL_COMPUTE_A;
+      info->class_3d = BLACKWELL_3D_A;
+      info->class_gpfifo = BLACKWELL_CHANNEL_GPFIFO_A;
+      info->class_copy = HOPPER_DMA_COPY_A; /* C8B5 solid in 610; refine may pick C9B5+ */
       info->class_m2mf = HOPPER_DMA_COPY_A;
       info->gsp_mode = true;
       break;
@@ -206,29 +225,29 @@ nv_device_info_refine_class_from_list(struct nv_device_info *info,
    if (!info || !class_list || !count)
       return;
 
-   /* Class ID bands (open-gpu-doc / class/cl* headers): 3D ~0x9000-0xC9A0,
-    * compute ~0x90C0-0xC9C0, DMA copy ~0x90B5-0xC8B5, NVDEC ~0xB0B0-0xC7B0,
-    * NVENC ~0x90B7-0xC4B7 — refine within band, prefer highest. */
+   /* Class ID bands (open-gpu-doc / class/cl* headers + 610.43.02 binary ladders):
+    * 3D ~0x9097-0xCFA0, compute ~0x90C0-0xCFC0, DMA copy ~0x90B5-0xCFB5,
+    * NVDEC ~0xB0B0-0xCFB0, NVENC ~0x90B7-0xCFB7 — refine within band, prefer highest. */
    switch (engine_kind) {
    case 0: /* graphics / 3D */
       lo = 0x00009097u;
-      hi = 0x0000c9a0u;
+      hi = 0x0000cfa0u;
       break;
    case 1: /* compute */
       lo = 0x000090c0u;
-      hi = 0x0000c9c0u;
+      hi = 0x0000cfc0u;
       break;
    case 2: /* copy / dma */
       lo = 0x000090b5u;
-      hi = 0x0000c8b5u;
+      hi = 0x0000cfb5u;
       break;
    case 3: /* nvdec */
       lo = 0x0000b0b0u;
-      hi = 0x0000c7b0u;
+      hi = 0x0000cfb0u;
       break;
    case 4: /* nvenc */
       lo = 0x000090b7u;
-      hi = 0x0000c4b7u;
+      hi = 0x0000cfb7u;
       break;
    default:
       return;
@@ -320,4 +339,71 @@ nv_device_info_log_classes(const struct nv_device_info *info, const char *prefix
            (unsigned)info->class_nvenc,
            (int)info->has_graphics,
            (int)info->has_compute);
+}
+
+void
+nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
+                                 uint32_t *out, unsigned *inout_n)
+{
+   /* Newest-first ladders (610.43.02 glcore/cuda class ID frequency + OGKM). */
+   static const uint32_t ladder_copy[] = {
+      0x0000c9b5u, 0x0000c8b5u, 0x0000c7b5u, 0x0000c6b5u, 0x0000c5b5u,
+      0x0000c3b5u, 0x0000c1b5u, 0x0000c0b5u, 0x0000b0b5u,
+   };
+   static const uint32_t ladder_compute[] = {
+      0x0000cdc0u, 0x0000cbc0u, 0x0000c9c0u, 0x0000c8c0u, 0x0000c7c0u,
+      0x0000c6c0u, 0x0000c5c0u, 0x0000c4c0u, 0x0000c3c0u, 0x0000b1c0u,
+   };
+   static const uint32_t ladder_3d[] = {
+      0x0000cd97u, 0x0000cb97u, 0x0000c997u, 0x0000c897u, 0x0000c797u,
+      0x0000c697u, 0x0000c597u, 0x0000c397u, 0x0000b197u, 0x0000b097u,
+   };
+   static const uint32_t ladder_gpfifo[] = {
+      0x0000c86fu, 0x0000c76fu, 0x0000c56fu, 0x0000c46fu, 0x0000c36fu,
+      0x0000c06fu, 0x0000b06fu, 0x0000a26fu, 0x0000a16fu, 0x0000a06fu,
+   };
+   const uint32_t *lad = NULL;
+   unsigned lad_n = 0, max_n, i, n = 0;
+
+   if (!out || !inout_n || !*inout_n)
+      return;
+   max_n = *inout_n;
+
+   switch (engine_kind) {
+   case 0:
+      lad = ladder_3d;
+      lad_n = sizeof(ladder_3d) / sizeof(ladder_3d[0]);
+      break;
+   case 1:
+      lad = ladder_compute;
+      lad_n = sizeof(ladder_compute) / sizeof(ladder_compute[0]);
+      break;
+   case 2:
+      lad = ladder_copy;
+      lad_n = sizeof(ladder_copy) / sizeof(ladder_copy[0]);
+      break;
+   case 5:
+      lad = ladder_gpfifo;
+      lad_n = sizeof(ladder_gpfifo) / sizeof(ladder_gpfifo[0]);
+      break;
+   default:
+      *inout_n = 0;
+      return;
+   }
+
+   if (prefer_first && n < max_n)
+      out[n++] = prefer_first;
+   for (i = 0; i < lad_n && n < max_n; i++) {
+      unsigned t;
+      uint32_t c = lad[i];
+      if (!c)
+         continue;
+      for (t = 0; t < n; t++)
+         if (out[t] == c)
+            break;
+      if (t < n)
+         continue;
+      out[n++] = c;
+   }
+   *inout_n = n;
 }

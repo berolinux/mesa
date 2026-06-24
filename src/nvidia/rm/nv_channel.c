@@ -6,6 +6,7 @@
 #include "nv_channel.h"
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
+#include "nv_device_info.h"
 #include "nv_push.h"
 #include "nv_qmd.h"
 #include "nv_rm.h"
@@ -34,15 +35,15 @@ now_ns(void)
    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
-/* Fallback class IDs (open-gpu-kernel-modules class headers; match nv_device_info) */
+/* Fallback class IDs (OGKM + 610.43.02 binary ladders; prefer refined/bound over these) */
 #ifndef NV_CH_FALLBACK_COPY
-#define NV_CH_FALLBACK_COPY     0x0000c6b5u  /* AMPERE_DMA_COPY_A / NVC6B5-class */
+#define NV_CH_FALLBACK_COPY     0x0000c8b5u  /* HOPPER_DMA_COPY_A — common in 610 RE */
 #endif
 #ifndef NV_CH_FALLBACK_COMPUTE
-#define NV_CH_FALLBACK_COMPUTE  0x0000c3c0u  /* VOLTA_COMPUTE_A / NVC3C0 methods */
+#define NV_CH_FALLBACK_COMPUTE  0x0000c7c0u  /* AMPERE_COMPUTE_B / Hopper-line methods */
 #endif
 #ifndef NV_CH_FALLBACK_3D
-#define NV_CH_FALLBACK_3D       0x0000c597u  /* TURING_A_3D_A / NVC597 methods */
+#define NV_CH_FALLBACK_3D       0x0000c797u  /* AMPERE_B_3D_B — common in 610 RE */
 #endif
 
 uint32_t
@@ -524,10 +525,11 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    return -ENOSYS;
 #else
    uint32_t cc, ccomp, c3;
-   /* Class fallbacks if refined class fails alloc (same method layouts often) */
-   uint32_t copy_alts[7];
-   uint32_t compute_alts[5];
-   uint32_t t3d_alts[4];
+   /* Newest-first ladders (610.43.02 binary RE + OGKM); prefer refined/bound first */
+   uint32_t copy_alts[12];
+   uint32_t compute_alts[12];
+   uint32_t t3d_alts[12];
+   unsigned n_copy = 12, n_comp = 12, n_3d = 12;
    int any_ok = 0;
    int last_fail = 0;
    unsigned ai;
@@ -554,29 +556,17 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    if (!c3)
       c3 = NV_CH_FALLBACK_3D;
 
-   copy_alts[0] = cc;
-   copy_alts[1] = 0x0000c7b5u; /* AMPERE_DMA_COPY_B */
-   copy_alts[2] = 0x0000c6b5u; /* AMPERE_DMA_COPY_A */
-   copy_alts[3] = 0x0000c5b5u; /* TURING_DMA_COPY_A */
-   copy_alts[4] = 0x0000c3b5u; /* VOLTA_DMA_COPY_A */
-   copy_alts[5] = 0x0000c1b5u; /* PASCAL_DMA_COPY_B */
-   copy_alts[6] = 0x0000b0b5u; /* MAXWELL_DMA_COPY_A */
-
-   compute_alts[0] = ccomp;
-   compute_alts[1] = 0x0000c7c0u; /* AMPERE_COMPUTE_B */
-   compute_alts[2] = 0x0000c6c0u; /* AMPERE_COMPUTE_A */
-   compute_alts[3] = 0x0000c5c0u; /* TURING_COMPUTE_A */
-   compute_alts[4] = 0x0000c3c0u; /* VOLTA_COMPUTE_A */
-
-   t3d_alts[0] = c3;
-   t3d_alts[1] = 0x0000c797u;
-   t3d_alts[2] = 0x0000c697u;
-   t3d_alts[3] = 0x0000c597u; /* TURING_A_3D_A */
+   n_copy = sizeof(copy_alts) / sizeof(copy_alts[0]);
+   nv_device_info_fill_class_ladder(2, cc, copy_alts, &n_copy);
+   n_comp = sizeof(compute_alts) / sizeof(compute_alts[0]);
+   nv_device_info_fill_class_ladder(1, ccomp, compute_alts, &n_comp);
+   n_3d = sizeof(t3d_alts) / sizeof(t3d_alts[0]);
+   nv_device_info_fill_class_ladder(0, c3, t3d_alts, &n_3d);
 
    if (!ch->h_obj_copy) {
-      uint32_t tried[8];
+      uint32_t tried[16];
       unsigned nt = 0;
-      for (ai = 0; ai < sizeof(copy_alts) / sizeof(copy_alts[0]); ai++) {
+      for (ai = 0; ai < n_copy; ai++) {
          uint32_t cl = copy_alts[ai];
          uint32_t h = 0;
          unsigned t;
@@ -588,7 +578,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
                break;
          if (t < nt)
             continue;
-         if (nt < 8)
+         if (nt < 16)
             tried[nt++] = cl;
          r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_copy_parent);
          if (r == 0 && h) {
@@ -604,9 +594,9 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    }
 
    if (!ch->h_obj_compute) {
-      uint32_t tried[8];
+      uint32_t tried[16];
       unsigned nt = 0;
-      for (ai = 0; ai < sizeof(compute_alts) / sizeof(compute_alts[0]); ai++) {
+      for (ai = 0; ai < n_comp; ai++) {
          uint32_t cl = compute_alts[ai];
          uint32_t h = 0;
          unsigned t;
@@ -618,7 +608,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
                break;
          if (t < nt)
             continue;
-         if (nt < 8)
+         if (nt < 16)
             tried[nt++] = cl;
          r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_compute_parent);
          if (r == 0 && h) {
@@ -635,9 +625,9 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    }
 
    if (!ch->h_obj_3d) {
-      uint32_t tried[8];
+      uint32_t tried[16];
       unsigned nt = 0;
-      for (ai = 0; ai < sizeof(t3d_alts) / sizeof(t3d_alts[0]); ai++) {
+      for (ai = 0; ai < n_3d; ai++) {
          uint32_t cl = t3d_alts[ai];
          uint32_t h = 0;
          unsigned t;
@@ -649,7 +639,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
                break;
          if (t < nt)
             continue;
-         if (nt < 8)
+         if (nt < 16)
             tried[nt++] = cl;
          r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_3d_parent);
          if (r == 0 && h) {
@@ -1174,11 +1164,12 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
                                               bool try_pipelined,
                                               uint32_t *class_used_out)
 {
-   uint32_t classes[8];
-   unsigned n = 0, i, pipe_pass;
+   uint32_t classes[16];
+   unsigned n = 16, i, pipe_pass;
    int last = -EINVAL;
-   uint32_t tried[8];
+   uint32_t tried[16];
    unsigned nt = 0;
+   uint32_t prefer = 0;
 
    if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
       return -EINVAL;
@@ -1187,17 +1178,14 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
    if (class_used_out)
       *class_used_out = 0;
 
-   /* Prefer successfully RmAlloc'd class, then info refine, then alternates */
+   /* Prefer RmAlloc'd class, then device refine, then 610 RE newest-first ladder */
    if (ch->class_copy_bound)
-      classes[n++] = ch->class_copy_bound;
-   if (ch->info && ch->info->class_copy)
-      classes[n++] = ch->info->class_copy;
-   classes[n++] = nv_channel_resolve_class_copy(ch, 0);
-   classes[n++] = 0x0000c7b5u;
-   classes[n++] = 0x0000c6b5u;
-   classes[n++] = 0x0000c5b5u;
-   classes[n++] = 0x0000c3b5u;
-   classes[n++] = 0x0000c1b5u;
+      prefer = ch->class_copy_bound;
+   else if (ch->info && ch->info->class_copy)
+      prefer = ch->info->class_copy;
+   else
+      prefer = nv_channel_resolve_class_copy(ch, 0);
+   nv_device_info_fill_class_ladder(2, prefer, classes, &n);
 
    for (pipe_pass = 0; pipe_pass < (try_pipelined ? 2u : 1u); pipe_pass++) {
       bool pipelined = (pipe_pass == 1);
@@ -1213,7 +1201,7 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
                break;
          if (t < nt)
             continue;
-         if (nt < 8)
+         if (nt < 16)
             tried[nt++] = cc;
 
          r = g1_copy_sema_one(ch, cc, pipelined, src_gpu_addr, dst_gpu_addr,
