@@ -1733,6 +1733,24 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
                                                : pipe->stencil_reference;
          nv_3d_emit_stencil_state(&cmd->push, true, cop, cm, wm, ref, fop, zfop, zpop);
       }
+      if (cmd->dyn_depth_bias_valid) {
+         nv_3d_emit_depth_bias(&cmd->push, cmd->dyn_depth_bias_enable,
+                               cmd->dyn_depth_bias_constant,
+                               cmd->dyn_depth_bias_clamp,
+                               cmd->dyn_depth_bias_slope);
+      }
+      if (cmd->dyn_sample_mask_valid)
+         nv_3d_emit_sample_mask(&cmd->push, cmd->dyn_sample_mask);
+      if (cmd->dyn_blend_const_valid)
+         nv_3d_emit_blend_constants(&cmd->push,
+                                    cmd->dyn_blend_const[0], cmd->dyn_blend_const[1],
+                                    cmd->dyn_blend_const[2], cmd->dyn_blend_const[3]);
+      if (cmd->dyn_color_write_valid)
+         nv_3d_emit_color_write_mask(&cmd->push, 0, cmd->dyn_color_write_mask);
+      if (cmd->dyn_blend_valid)
+         nv_3d_emit_blend_enable_target(&cmd->push, 0, cmd->dyn_blend_enable);
+      if (pipe->sample_count > 1)
+         nv_3d_emit_msaa(&cmd->push, pipe->sample_count, false);
    }
 
    nv_3d_set_primitive_topology(&cmd->push, pipe->topology_nv);
@@ -2639,8 +2657,9 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    desc->cta_y = cta_y;
    desc->cta_z = cta_z;
    desc->register_count = regs;
-   desc->shared_mem_size = shared;
+   desc->shared_mem_size = nv_qmd_align_shared_mem(shared);
    desc->local_mem_low = local_spill;
+   desc->barrier_count = nv_qmd_default_barrier_count(cta_x, cta_y, cta_z);
    desc->sass_version = sass_ver;
    desc->sm_global_caching = true;
    desc->invalidate_caches = !cmd->compute_init_done;
@@ -2648,7 +2667,12 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    if (cs && cs->const_gpu_addr && cs->const_size) {
       desc->cb_addr[0] = cs->const_gpu_addr;
       desc->cb_size[0] = cs->const_size;
-      desc->cb_valid_mask = 0x1;
+      desc->cb_valid_mask |= 0x1;
+   }
+   if (cmd->push_const_bo && cmd->push_const_dwords) {
+      desc->cb_addr[1] = nv_rm_bo_gpu_offset(cmd->push_const_bo);
+      desc->cb_size[1] = cmd->push_const_bo_size ? cmd->push_const_bo_size : 256;
+      desc->cb_valid_mask |= 0x2;
    }
 }
 
@@ -2986,5 +3010,70 @@ nvrm_CmdSetFrontFace(VkCommandBuffer commandBuffer, VkFrontFace frontFace)
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    cmd->dyn_front_ccw = (frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE);
    cmd->dyn_front_face_valid = true;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthBiasEnable(VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_bias_enable = depthBiasEnable;
+   cmd->dyn_depth_bias_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_depth_bias(&cmd->push, depthBiasEnable,
+                            cmd->dyn_depth_bias_constant,
+                            cmd->dyn_depth_bias_clamp,
+                            cmd->dyn_depth_bias_slope);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthBias(VkCommandBuffer commandBuffer,
+                     float depthBiasConstantFactor, float depthBiasClamp,
+                     float depthBiasSlopeFactor)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_bias_constant = depthBiasConstantFactor;
+   cmd->dyn_depth_bias_clamp = depthBiasClamp;
+   cmd->dyn_depth_bias_slope = depthBiasSlopeFactor;
+   cmd->dyn_depth_bias_enable = true;
+   cmd->dyn_depth_bias_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_depth_bias(&cmd->push, true, depthBiasConstantFactor,
+                            depthBiasClamp, depthBiasSlopeFactor);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetBlendConstants(VkCommandBuffer commandBuffer,
+                          const float blendConstants[4])
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   if (!blendConstants)
+      return;
+   cmd->dyn_blend_const[0] = blendConstants[0];
+   cmd->dyn_blend_const[1] = blendConstants[1];
+   cmd->dyn_blend_const[2] = blendConstants[2];
+   cmd->dyn_blend_const[3] = blendConstants[3];
+   cmd->dyn_blend_const_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_blend_constants(&cmd->push, blendConstants[0], blendConstants[1],
+                                 blendConstants[2], blendConstants[3]);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetColorWriteEnableEXT(VkCommandBuffer commandBuffer,
+                               uint32_t attachmentCount,
+                               const VkBool32 *pColorWriteEnables)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t i;
+   if (!pColorWriteEnables || !attachmentCount)
+      return;
+   /* Target 0: full RGBA mask if enabled, else 0 */
+   cmd->dyn_color_write_mask = pColorWriteEnables[0] ? 0xf : 0;
+   cmd->dyn_color_write_valid = true;
+   if (cmd->push_map) {
+      for (i = 0; i < attachmentCount && i < 8; i++)
+         nv_3d_emit_color_write_mask(&cmd->push, i,
+                                     pColorWriteEnables[i] ? 0xf : 0);
+   }
 }
 

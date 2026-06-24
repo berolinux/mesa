@@ -100,6 +100,13 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdSetStencilReference, nvrm_CmdSetStencilReference);
    NVRM_SET(CmdSetCullMode, nvrm_CmdSetCullMode);
    NVRM_SET(CmdSetFrontFace, nvrm_CmdSetFrontFace);
+   NVRM_SET(CmdSetDepthBiasEnable, nvrm_CmdSetDepthBiasEnable);
+   NVRM_SET(CmdSetDepthBias, nvrm_CmdSetDepthBias);
+   NVRM_SET(CmdSetBlendConstants, nvrm_CmdSetBlendConstants);
+   NVRM_SET(CmdSetColorWriteEnableEXT, nvrm_CmdSetColorWriteEnableEXT);
+   NVRM_SET(CmdSetEvent2, nvrm_CmdSetEvent2);
+   NVRM_SET(CmdResetEvent2, nvrm_CmdResetEvent2);
+   NVRM_SET(CmdWaitEvents2, nvrm_CmdWaitEvents2);
    NVRM_SET(CmdPipelineBarrier2, nvrm_CmdPipelineBarrier2);
    NVRM_SET(QueueSubmit2, nvrm_QueueSubmit2);
    NVRM_SET(QueuePresentKHR, nvrm_QueuePresent2);

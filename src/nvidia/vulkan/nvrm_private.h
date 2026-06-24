@@ -195,6 +195,20 @@ struct nvrm_cmd_buffer {
    uint32_t dyn_cull_mode;
    bool dyn_front_face_valid;
    bool dyn_front_ccw;
+   /* Dynamic blend / colour write / depth bias / MSAA */
+   bool dyn_blend_enable;
+   bool dyn_blend_valid;
+   uint32_t dyn_color_write_mask; /* RGBA nibble, target 0 */
+   bool dyn_color_write_valid;
+   bool dyn_depth_bias_enable;
+   float dyn_depth_bias_constant;
+   float dyn_depth_bias_clamp;
+   float dyn_depth_bias_slope;
+   bool dyn_depth_bias_valid;
+   uint32_t dyn_sample_mask;
+   bool dyn_sample_mask_valid;
+   float dyn_blend_const[4];
+   bool dyn_blend_const_valid;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
@@ -389,6 +403,19 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetStencilReference(VkCommandBuffer commandBu
                                                        uint32_t reference);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetCullMode(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetFrontFace(VkCommandBuffer commandBuffer, VkFrontFace frontFace);
+
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthBiasEnable(VkCommandBuffer commandBuffer, VkBool32 depthBiasEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor,
+                                                float depthBiasClamp, float depthBiasSlopeFactor);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetBlendConstants(VkCommandBuffer commandBuffer, const float blendConstants[4]);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetColorWriteEnableEXT(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+                                                          const VkBool32 *pColorWriteEnables);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
+                                             const VkDependencyInfo *pDependencyInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
+                                               VkPipelineStageFlags2 stageMask);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
+                                               const VkEvent *pEvents, const VkDependencyInfo *pDependencyInfos);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetViewport(VkCommandBuffer commandBuffer,
                                                uint32_t firstViewport, uint32_t viewportCount,
                                                const VkViewport *pViewports);

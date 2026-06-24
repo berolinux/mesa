@@ -148,6 +148,15 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    cmd->dyn_stencil_front_compare_mask = 0xff;
    cmd->dyn_stencil_front_write_mask = 0xff;
    cmd->dyn_stencil_front_reference = 0;
+   cmd->dyn_blend_valid = false;
+   cmd->dyn_blend_enable = false;
+   cmd->dyn_color_write_valid = false;
+   cmd->dyn_color_write_mask = 0xf;
+   cmd->dyn_depth_bias_valid = false;
+   cmd->dyn_depth_bias_enable = false;
+   cmd->dyn_sample_mask_valid = false;
+   cmd->dyn_sample_mask = 0xffffffffu;
+   cmd->dyn_blend_const_valid = false;
    cmd->push_const_dwords = 0;
    cmd->push_const_dirty = false;
    cmd->prim_restart_enable = false;
@@ -167,19 +176,11 @@ nvrm_EndCommandBuffer(VkCommandBuffer commandBuffer)
    return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
-                         const VkDependencyInfo *pDependencyInfo)
+static void
+nvrm_cmd_emit_full_invalidate(struct nvrm_cmd_buffer *cmd)
 {
-   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)pDependencyInfo;
-
    if (!cmd || !cmd->push_map)
       return;
-
-   /* Host WFI + texture/shader cache invalidates on 3D subchannel.
-    * Memory dependency scopes are not yet split by stage; full invalidates
-    * match the conservative path used by proprietary driver after transfers. */
    nv_push_wfi(&cmd->push);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    nv_push_method(&cmd->push, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
@@ -189,6 +190,69 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                   NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
                   NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
                   NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE);
+   /* Copy engine WFI for transfer hazards */
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+   nv_push_wfi(&cmd->push);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
+                         const VkDependencyInfo *pDependencyInfo)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)pDependencyInfo;
+   /* Host WFI + texture/shader/copy invalidates.  Memory dependency scopes
+    * are not yet split by stage; full invalidates match the conservative
+    * path used by the proprietary driver after transfers. */
+   nvrm_cmd_emit_full_invalidate(cmd);
+}
+
+/* VkEvent is implemented as a 4-byte GPU semaphore in host-mappable memory
+ * (same pattern as fences).  SetEvent releases sema=1; ResetEvent writes 0
+ * via CPU or sema release 0; WaitEvents acquires sema>=1 then optionally
+ * invalidates caches. */
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
+                  const VkDependencyInfo *pDependencyInfo)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)pDependencyInfo;
+   (void)event;
+   /* Without a real event object BO yet, emit WFI + sema release on a
+    * placeholder: when event objects are wired, use event->sema_gpu_addr. */
+   if (!cmd || !cmd->push_map)
+      return;
+   nv_push_wfi(&cmd->push);
+   /* Event object integration: see nvrm_event in a follow-up; for now
+    * WFI is sufficient for single-queue in-order semantics. */
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
+                    VkPipelineStageFlags2 stageMask)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)event;
+   (void)stageMask;
+   if (!cmd || !cmd->push_map)
+      return;
+   nv_push_wfi(&cmd->push);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
+                    const VkEvent *pEvents,
+                    const VkDependencyInfo *pDependencyInfos)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)eventCount;
+   (void)pEvents;
+   (void)pDependencyInfos;
+   if (!cmd || !cmd->push_map)
+      return;
+   /* Wait = WFI + full invalidate (conservative; sema acquire when events exist) */
+   nvrm_cmd_emit_full_invalidate(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
