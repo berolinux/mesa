@@ -278,6 +278,15 @@ int nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
                              uint32_t *notify_index_out, uint32_t *info32_out,
                              uint16_t *info16_out, uint32_t *more_out);
 
+/**
+ * tick94: Bind channel error CTXDMA to channel (NVOS49) if h_error_ctxdma set.
+ * Called best-effort after create; also invocable explicitly.
+ */
+int nv_channel_bind_error_ctxdma(struct nv_channel *ch);
+/** NVOS30 single-channel idle (spin+pb default flags if flags==0). */
+int nv_channel_idle_rm(struct nv_channel *ch, uint32_t flags,
+                       uint32_t timeout_us);
+
 /** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
 void
 nv_channel_notifier_reset(struct nv_channel *ch);

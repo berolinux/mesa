@@ -483,6 +483,38 @@ nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
    return nv_rm_get_event_data(ch->rm, h_object_out, notify_index_out,
                                info32_out, info16_out, more_out);
 }
+
+int
+nv_channel_bind_error_ctxdma(struct nv_channel *ch)
+{
+   if (!ch || !ch->rm || !ch->h_channel || !ch->h_error_ctxdma)
+      return -EINVAL;
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!ch->rm->nvdev)
+      return -ENODEV;
+   return nvidia_rm_bind_context_dma(ch->rm->nvdev, ch->h_channel,
+                                     ch->h_error_ctxdma);
+#else
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_channel_idle_rm(struct nv_channel *ch, uint32_t flags, uint32_t timeout_us)
+{
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!ch->rm->nvdev)
+      return -ENODEV;
+   return nvidia_rm_idle_channel(ch->rm->nvdev, ch->h_channel, flags,
+                                 timeout_us);
+#else
+   (void)flags;
+   (void)timeout_us;
+   return -ENOSYS;
+#endif
+}
 #endif /* HAVE_LIBDRM_NVIDIA */
 
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -619,6 +651,22 @@ nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
    (void)info32_out;
    (void)info16_out;
    (void)more_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_bind_error_ctxdma(struct nv_channel *ch)
+{
+   (void)ch;
+   return -ENOSYS;
+}
+
+int
+nv_channel_idle_rm(struct nv_channel *ch, uint32_t flags, uint32_t timeout_us)
+{
+   (void)ch;
+   (void)flags;
+   (void)timeout_us;
    return -ENOSYS;
 }
 #endif
