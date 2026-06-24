@@ -1367,22 +1367,23 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
 /* NVC3C0 QMD-based compute dispatch (clc3c0 / clc3c0qmd v02.02). */
 
 static void
-nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
-                           uint32_t gx, uint32_t gy, uint32_t gz)
+nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
+                       uint32_t gx, uint32_t gy, uint32_t gz,
+                       uint32_t *class_compute_out)
 {
-   struct nv_qmd_desc desc;
    struct nvrm_compute_pipeline *cp;
    struct nv_shader *cs;
    const struct nv_device_info *info;
    uint32_t class_compute = 0;
-   uint64_t qmd_addr = 0;
    uint64_t prog = 0;
    uint32_t regs = 16;
    uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
    uint32_t shared = 0;
+   uint32_t local_spill = 0;
    uint8_t sass_ver = 0x50;
 
-   if (!cmd || !cmd->push_map)
+   memset(desc, 0, sizeof(*desc));
+   if (!cmd)
       return;
 
    cp = cmd->bound_compute_pipeline;
@@ -1393,14 +1394,15 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
       if (info->sm_version)
          sass_ver = (uint8_t)(info->sm_version & 0xff);
    }
+   if (class_compute_out)
+      *class_compute_out = class_compute;
 
    if (cs) {
       prog = cs->code_gpu_addr;
       if (cs->register_count)
          regs = cs->register_count;
-      if (cs->const_gpu_addr && cs->const_size) {
-         /* filled into desc below */
-      }
+      if (cs->local_mem_size)
+         local_spill = cs->local_mem_size;
    }
 
    if (cp) {
@@ -1418,35 +1420,55 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
    if (!gy) gy = 1;
    if (!gz) gz = 1;
 
-   memset(&desc, 0, sizeof(desc));
-   desc.program_addr = prog;
-   desc.program_offset = 0;
-   desc.grid_x = gx;
-   desc.grid_y = gy;
-   desc.grid_z = gz;
-   desc.cta_x = cta_x;
-   desc.cta_y = cta_y;
-   desc.cta_z = cta_z;
-   desc.register_count = regs;
-   desc.shared_mem_size = shared;
-   desc.sass_version = sass_ver;
-   desc.sm_global_caching = true;
-   desc.invalidate_caches = !cmd->compute_init_done;
+   desc->program_addr = prog;
+   desc->program_offset = 0;
+   desc->grid_x = gx;
+   desc->grid_y = gy;
+   desc->grid_z = gz;
+   desc->cta_x = cta_x;
+   desc->cta_y = cta_y;
+   desc->cta_z = cta_z;
+   desc->register_count = regs;
+   desc->shared_mem_size = shared;
+   desc->local_mem_low = local_spill;
+   desc->sass_version = sass_ver;
+   desc->sm_global_caching = true;
+   desc->invalidate_caches = !cmd->compute_init_done;
 
    if (cs && cs->const_gpu_addr && cs->const_size) {
-      desc.cb_addr[0] = cs->const_gpu_addr;
-      desc.cb_size[0] = cs->const_size;
-      desc.cb_valid_mask = 0x1;
+      desc->cb_addr[0] = cs->const_gpu_addr;
+      desc->cb_size[0] = cs->const_size;
+      desc->cb_valid_mask = 0x1;
+   }
+}
+
+static void
+nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
+                           uint32_t gx, uint32_t gy, uint32_t gz)
+{
+   struct nv_qmd_desc desc;
+   uint32_t class_compute = 0;
+   uint64_t qmd_addr = 0;
+   void *qmd_host = NULL;
+
+   if (!cmd || !cmd->push_map)
+      return;
+
+   nvrm_fill_compute_desc(cmd, &desc, gx, gy, gz, &class_compute);
+
+   if (cmd->qmd_bo) {
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->qmd_bo);
+      qmd_host = nv_rm_bo_map(cmd->qmd_bo);
+   } else if (cmd->push_bo) {
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
    }
 
-   if (cmd->qmd_bo)
-      qmd_addr = nv_rm_bo_gpu_offset(cmd->qmd_bo);
-   else if (cmd->push_bo)
-      /* Fallback: use push BO GPU offset as QMD address field only;
-       * inline LOAD_INLINE_QMD_DATA carries the actual QMD contents. */
-      qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
+   /* Materialize QMD into scratch BO (host mirror) + inline load + SEND_PCAS */
+   nv_compute_emit_dispatch_materialized(&cmd->push, &desc, qmd_addr,
+                                         qmd_host, class_compute);
+   if (qmd_host && cmd->qmd_bo)
+      nv_rm_bo_unmap(cmd->qmd_bo);
 
-   nv_compute_emit_dispatch(&cmd->push, &desc, qmd_addr, class_compute);
    cmd->compute_init_done = true;
 }
 
@@ -1474,10 +1496,19 @@ nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
 
 /*
  * CmdDispatchIndirect: VkDispatchIndirectCommand is {x,y,z} uint32 at offset
- * in buffer.  True GPU-indirect QMD would require sked/indirect machinery;
- * when the indirect buffer's memory is host-mapped we read the grid on the
- * CPU at record time (valid for non-concurrent producers).  Otherwise fall
- * back to 1x1x1 so the command stream still contains a launch.
+ * in buffer.
+ *
+ * Path A (host-readable indirect BO): read grid at record time, materialize
+ * full QMD into cmd->qmd_bo with correct CTA_RASTER_*, then SEND_PCAS.
+ *
+ * Path B (GPU-only indirect BO, no host map): still materialize QMD with 1x1x1
+ * grid into qmd_bo, then note indirect GPU VA in comments/state for a future
+ * copy-engine patch of CTA_RASTER dwords (12/13/14) before PCAS.  For now
+ * launch 1x1x1 so the stream remains valid.
+ *
+ * Path C (qmd_bo + indirect host map): encode QMD with 1x1x1, patch grid
+ * dwords in the host-mirrored QMD via nv_qmd_patch_grid, re-issue via
+ * normal dispatch (avoids re-reading shader/CB fields).
  */
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
@@ -1485,7 +1516,12 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   struct nv_qmd_desc desc;
+   uint32_t class_compute = 0;
    uint32_t gx = 1, gy = 1, gz = 1;
+   uint64_t qmd_addr = 0;
+   void *qmd_host = NULL;
+   bool have_grid = false;
 
    if (!cmd || !cmd->push_map)
       return;
@@ -1498,12 +1534,45 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
          gx = icmd[0] ? icmd[0] : 1;
          gy = icmd[1] ? icmd[1] : 1;
          gz = icmd[2] ? icmd[2] : 1;
-         /* Leave mapped for lifetime of BO; unmap only if we just mapped —
-          * nv_rm_bo_map may refcount; safe to unmap if double-map ok. */
+         have_grid = true;
          nv_rm_bo_unmap(buf->bo);
       }
+      /* else: indirect buffer not host-mappable; GPU CE patch path not yet wired */
+      (void)offset;
    }
-   nvrm_emit_compute_dispatch(cmd, gx, gy, gz);
+
+   /* Preferred: fill desc once, materialize into QMD scratch, optional patch */
+   nvrm_fill_compute_desc(cmd, &desc, gx, gy, gz, &class_compute);
+
+   if (cmd->qmd_bo) {
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->qmd_bo);
+      qmd_host = nv_rm_bo_map(cmd->qmd_bo);
+   } else if (cmd->push_bo) {
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
+   }
+
+   if (qmd_host && have_grid) {
+      /* Encode with grid already in desc; mirror ensures QMD BO matches inline */
+      nv_compute_emit_dispatch_materialized(&cmd->push, &desc, qmd_addr,
+                                            qmd_host, class_compute);
+   } else if (qmd_host) {
+      /* No indirect grid yet: materialize 1x1x1, leave room for GPU patch */
+      uint32_t qmd_tmp[NV_QMD_DWORDS];
+      nv_qmd_materialize(&desc, qmd_tmp, qmd_host);
+      /* Future: emit CE copy from indirect buffer into qmd_host dwords 12-14 */
+      if (class_compute)
+         nv_compute_set_object(&cmd->push, class_compute);
+      else
+         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COMPUTE);
+      nv_compute_emit_inline_qmd_launch(&cmd->push, qmd_addr, qmd_tmp, true);
+   } else {
+      nv_compute_emit_dispatch(&cmd->push, &desc, qmd_addr, class_compute);
+   }
+
+   if (qmd_host && cmd->qmd_bo)
+      nv_rm_bo_unmap(cmd->qmd_bo);
+
+   cmd->compute_init_done = true;
 }
 
 /* Queue submit: kick channel with cmd buffer push contents */

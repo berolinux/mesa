@@ -359,6 +359,75 @@ nv_compute_emit_dispatch(struct nv_push *p, const struct nv_qmd_desc *desc,
    nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
 }
 
+/**
+ * Encode QMD into caller buffer and optionally mirror into host-mapped QMD BO.
+ * When qmd_host is non-NULL, the 256-byte QMD is written there so the GPU VA
+ * at qmd_gpu_addr contains the same contents as the inline LOAD path — this
+ * matches the proprietary driver's "materialize QMD then SEND_PCAS" model and
+ * is the prerequisite for GPU-side indirect grid patching (copy indirect
+ * {x,y,z} into CTA_RASTER_* MW fields before PCAS).
+ */
+static inline void
+nv_qmd_materialize(const struct nv_qmd_desc *desc, uint32_t qmd_out[NV_QMD_DWORDS],
+                   void *qmd_host)
+{
+   if (!desc || !qmd_out)
+      return;
+   nv_qmd_encode(desc, qmd_out);
+   if (qmd_host)
+      memcpy(qmd_host, qmd_out, NV_QMD_BYTES);
+}
+
+/**
+ * Dispatch using materialised QMD: encode, optionally host-mirror, then launch.
+ * Preferred over nv_compute_emit_dispatch when a dedicated QMD scratch BO
+ * exists and may be reused across launches in the same command buffer.
+ */
+static inline void
+nv_compute_emit_dispatch_materialized(struct nv_push *p,
+                                      const struct nv_qmd_desc *desc,
+                                      uint64_t qmd_gpu_addr,
+                                      void *qmd_host,
+                                      uint32_t class_compute)
+{
+   uint32_t qmd[NV_QMD_DWORDS];
+
+   if (!p || !desc)
+      return;
+
+   nv_qmd_materialize(desc, qmd, qmd_host);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+}
+
+/**
+ * Patch CTA raster (grid) dimensions into an already-encoded QMD dword array.
+ * Used when indirect dispatch reads {x,y,z} at record time (or later, when
+ * a copy engine path writes these fields from a GPU indirect buffer).
+ */
+static inline void
+nv_qmd_patch_grid(uint32_t qmd[NV_QMD_DWORDS],
+                  uint32_t gx, uint32_t gy, uint32_t gz)
+{
+   if (!qmd)
+      return;
+   if (!gx) gx = 1;
+   if (!gy) gy = 1;
+   if (!gz) gz = 1;
+   /* Clear then set MW fields (zero whole QMD words overlapping raster bits) */
+   /* CTA_RASTER_WIDTH 415:384 spans dwords 12..12 (bits 0..31 of dw12) */
+   /* CTA_RASTER_HEIGHT 431:416 spans dwords 13 (bits 0..15) */
+   /* CTA_RASTER_DEPTH 463:448 spans dwords 14 (bits 0..15) */
+   qmd[12] = gx; /* bits 384..415 fully within dword 12 */
+   qmd[13] = (qmd[13] & 0xffff0000u) | (gy & 0xffffu);
+   qmd[14] = (qmd[14] & 0xffff0000u) | (gz & 0xffffu);
+}
+
 #ifdef __cplusplus
 }
 #endif
