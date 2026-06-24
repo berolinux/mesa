@@ -77,6 +77,8 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdDrawIndexed, nvrm_CmdDrawIndexed);
    NVRM_SET(CmdDrawIndirect, nvrm_CmdDrawIndirect);
    NVRM_SET(CmdDrawIndexedIndirect, nvrm_CmdDrawIndexedIndirect);
+   NVRM_SET(CmdDrawIndirectCount, nvrm_CmdDrawIndirectCount);
+   NVRM_SET(CmdDrawIndexedIndirectCount, nvrm_CmdDrawIndexedIndirectCount);
    NVRM_SET(CmdSetViewport, nvrm_CmdSetViewport);
    NVRM_SET(CmdSetScissor, nvrm_CmdSetScissor);
    NVRM_SET(CmdSetPrimitiveRestartEnable, nvrm_CmdSetPrimitiveRestartEnable);
@@ -113,6 +115,9 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdSetProvokingVertexModeEXT, nvrm_CmdSetProvokingVertexModeEXT);
    NVRM_SET(CmdSetPrimitiveTopology, nvrm_CmdSetPrimitiveTopology);
    NVRM_SET(CmdSetSampleMaskEXT, nvrm_CmdSetSampleMaskEXT);
+   NVRM_SET(CmdSetDepthClampEnableEXT, nvrm_CmdSetDepthClampEnable);
+   NVRM_SET(CmdSetAlphaToCoverageEnableEXT, nvrm_CmdSetAlphaToCoverageEnableEXT);
+   NVRM_SET(CmdSetRasterizationSamplesEXT, nvrm_CmdSetRasterizationSamplesEXT);
    NVRM_SET(CmdFillBuffer, nvrm_CmdFillBuffer);
    NVRM_SET(CmdUpdateBuffer, nvrm_CmdUpdateBuffer);
    NVRM_SET(CmdBlitImage2, nvrm_CmdBlitImage2);

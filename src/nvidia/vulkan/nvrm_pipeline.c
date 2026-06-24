@@ -2034,6 +2034,26 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
    cmd->render_height = h;
    cmd->in_render_pass = true;
    cmd->render_color_count = pRenderingInfo->colorAttachmentCount;
+   cmd->render_has_depth = have_zt;
+   cmd->render_has_stencil = have_zt;
+   cmd->render_depth_image = NULL;
+   cmd->render_stencil_image = NULL;
+   if (pRenderingInfo->pDepthAttachment &&
+       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(nvrm_image_view, dv,
+                     pRenderingInfo->pDepthAttachment->imageView);
+      if (dv && dv->image)
+         cmd->render_depth_image = dv->image;
+   }
+   if (pRenderingInfo->pStencilAttachment &&
+       pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(nvrm_image_view, sv,
+                     pRenderingInfo->pStencilAttachment->imageView);
+      if (sv && sv->image)
+         cmd->render_stencil_image = sv->image;
+   } else if (cmd->render_depth_image) {
+      cmd->render_stencil_image = cmd->render_depth_image;
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2043,6 +2063,10 @@ nvrm_CmdEndRendering(VkCommandBuffer commandBuffer)
    if (cmd->push_map)
       nv_push_wfi(&cmd->push);
    cmd->in_render_pass = false;
+   cmd->render_has_depth = false;
+   cmd->render_has_stencil = false;
+   cmd->render_depth_image = NULL;
+   cmd->render_stencil_image = NULL;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2275,21 +2299,13 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    if (!base && buf)
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);
-   for (d = 0; d < drawCount; d++) {
-      uint32_t vertex_count = 0, instance_count = 1;
-      uint32_t first_vertex = 0, first_instance = 0;
-      if (base) {
-         const uint32_t *rec = (const uint32_t *)((const uint8_t *)base +
-                                                  (size_t)d * rec_stride);
-         /* VkDrawIndirectCommand: vertexCount, instanceCount, firstVertex, firstInstance */
-         vertex_count = rec[0];
-         instance_count = rec[1] ? rec[1] : 1;
-         first_vertex = rec[2];
-         first_instance = rec[3];
-      }
-      nv_3d_emit_draw_vertex_array_instanced(&cmd->push, topo, first_vertex,
-                                             vertex_count, instance_count,
-                                             first_instance);
+   if (base) {
+      nv_3d_emit_draw_indirect_multi(&cmd->push, topo, base, drawCount,
+                                     rec_stride);
+   } else {
+      /* No CPU access and no shadow: emit zero-vertex draws (safe no-op) */
+      for (d = 0; d < drawCount; d++)
+         nv_3d_emit_draw_vertex_array_instanced(&cmd->push, topo, 0, 0, 1, 0);
    }
    nvrm_unmap_indirect(unmap);
 }
@@ -2327,6 +2343,12 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    if (!base && buf)
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);
+   if (base) {
+      nv_3d_emit_draw_indexed_indirect_multi(&cmd->push, topo, base, drawCount,
+                                             rec_stride);
+      nvrm_unmap_indirect(unmap);
+      return;
+   }
    for (d = 0; d < drawCount; d++) {
       uint32_t index_count = 0, instance_count = 1;
       uint32_t first_index = 0, first_instance = 0;
@@ -3286,5 +3308,97 @@ nvrm_CmdSetColorWriteEnableEXT(VkCommandBuffer commandBuffer,
          nv_3d_emit_color_write_mask(&cmd->push, i,
                                      pColorWriteEnables[i] ? 0xf : 0);
    }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthClampEnable(VkCommandBuffer commandBuffer,
+                            VkBool32 depthClampEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_clamp_enable = depthClampEnable;
+   cmd->dyn_depth_clamp_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_depth_clamp_enable(&cmd->push, depthClampEnable);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetAlphaToCoverageEnableEXT(VkCommandBuffer commandBuffer,
+                                    VkBool32 alphaToCoverageEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_alpha_to_coverage = alphaToCoverageEnable;
+   cmd->dyn_alpha_to_coverage_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_alpha_to_coverage(&cmd->push, alphaToCoverageEnable);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetRasterizationSamplesEXT(VkCommandBuffer commandBuffer,
+                                   VkSampleCountFlagBits rasterizationSamples)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t samples = (uint32_t)rasterizationSamples;
+   if (!samples)
+      samples = 1;
+   cmd->dyn_rasterization_samples = samples;
+   cmd->dyn_rasterization_samples_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_msaa(&cmd->push, samples, cmd->dyn_alpha_to_coverage);
+   }
+}
+
+/* Indirect count: host-read count buffer (path A), clamp to maxDrawCount */
+static uint32_t
+nvrm_read_draw_count(struct nvrm_cmd_buffer *cmd, VkBuffer countBuffer,
+                     VkDeviceSize countBufferOffset, uint32_t maxDrawCount)
+{
+   VK_FROM_HANDLE(nvrm_buffer, cbuf, countBuffer);
+   void *unmap = NULL;
+   const uint32_t *p;
+   uint32_t n = maxDrawCount;
+   if (!cbuf)
+      return maxDrawCount;
+   p = nvrm_try_map_indirect_u32(cbuf, countBufferOffset, 4, &unmap);
+   if (!p)
+      p = nvrm_indirect_path_b_shadow(cmd, cbuf, countBufferOffset, 4, &unmap);
+   if (p) {
+      n = p[0];
+      if (n > maxDrawCount)
+         n = maxDrawCount;
+   }
+   nvrm_unmap_indirect(unmap);
+   return n;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
+                          VkBuffer buffer, VkDeviceSize offset,
+                          VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+                          uint32_t maxDrawCount, uint32_t stride)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t n = nvrm_read_draw_count(cmd, countBuffer, countBufferOffset,
+                                     maxDrawCount);
+   if (n)
+      nvrm_CmdDrawIndirect(commandBuffer, buffer, offset, n, stride);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
+                                 VkBuffer buffer, VkDeviceSize offset,
+                                 VkBuffer countBuffer,
+                                 VkDeviceSize countBufferOffset,
+                                 uint32_t maxDrawCount, uint32_t stride)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t n = nvrm_read_draw_count(cmd, countBuffer, countBufferOffset,
+                                     maxDrawCount);
+   if (n)
+      nvrm_CmdDrawIndexedIndirect(commandBuffer, buffer, offset, n, stride);
 }
 

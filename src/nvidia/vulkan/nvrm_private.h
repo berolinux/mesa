@@ -177,6 +177,17 @@ struct nvrm_cmd_buffer {
    uint32_t render_width;
    uint32_t render_height;
    uint32_t render_color_count; /* active MRT count in current pass */
+   /* Depth/stencil attachment tracked for standalone clears / barriers */
+   struct nvrm_image *render_depth_image;
+   struct nvrm_image *render_stencil_image;
+   bool render_has_depth;
+   bool render_has_stencil;
+   bool dyn_depth_clamp_enable;
+   bool dyn_depth_clamp_valid;
+   bool dyn_alpha_to_coverage;
+   bool dyn_alpha_to_coverage_valid;
+   uint32_t dyn_rasterization_samples;
+   bool dyn_rasterization_samples_valid;
    /* Default local workgroup size when pipeline does not specify */
    uint32_t compute_local_x, compute_local_y, compute_local_z;
    /* Bound descriptor sets (graphics + compute share slots; bind point tracked) */
@@ -514,6 +525,22 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyQueryPoolResults(VkCommandBuffer commandB
                                                         uint32_t firstQuery, uint32_t queryCount,
                                                         VkBuffer dstBuffer, VkDeviceSize dstOffset,
                                                         VkDeviceSize stride, VkQueryResultFlags flags);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthClampEnable(VkCommandBuffer commandBuffer,
+                                                       VkBool32 depthClampEnable);
+/* Wired as CmdSetDepthClampEnableEXT in entrypoints */
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetAlphaToCoverageEnableEXT(VkCommandBuffer commandBuffer,
+                                                               VkBool32 alphaToCoverageEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetRasterizationSamplesEXT(VkCommandBuffer commandBuffer,
+                                                              VkSampleCountFlagBits rasterizationSamples);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
+                                                     VkBuffer buffer, VkDeviceSize offset,
+                                                     VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+                                                     uint32_t maxDrawCount, uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
+                                                            VkBuffer buffer, VkDeviceSize offset,
+                                                            VkBuffer countBuffer,
+                                                            VkDeviceSize countBufferOffset,
+                                                            uint32_t maxDrawCount, uint32_t stride);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                                              const VkDependencyInfo *pDependencyInfo);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,

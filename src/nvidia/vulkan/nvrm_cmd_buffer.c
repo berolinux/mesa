@@ -789,6 +789,8 @@ nvrm_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image,
    uint32_t class_3d, r;
    float depth = pDepthStencil ? pDepthStencil->depth : 1.0f;
    uint32_t stencil = pDepthStencil ? pDepthStencil->stencil : 0;
+   uint64_t addr = 0;
+   uint32_t w = 1, h = 1, pitch = 0, zt_fmt = NVC597_SET_ZT_FORMAT_V_Z24S8;
 
    (void)imageLayout;
    if (!cmd || !cmd->push_map)
@@ -800,17 +802,43 @@ nvrm_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image,
    else
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
 
-   /* Inside render pass: use CLEAR_SURFACE depth/stencil bits.
-    * Standalone image: still emit clear surface (target must be bound by caller
-    * via prior BeginRendering in full path; here emit methods for when zeta set). */
-   for (r = 0; r < (rangeCount ? rangeCount : 1); r++) {
-      unsigned buffers = 0;
-      (void)pRanges;
-      buffers |= 0x1; /* depth */
-      buffers |= 0x2; /* stencil */
-      nv_3d_emit_clear_surface(&cmd->push, buffers, NULL, depth, stencil);
+   if (img) {
+      addr = (img->bo ? nv_rm_bo_gpu_offset(img->bo) : 0) + img->gpu_offset;
+      w = img->vk.extent.width ? img->vk.extent.width : 1;
+      h = img->vk.extent.height ? img->vk.extent.height : 1;
+      pitch = img->row_pitch ? img->row_pitch : (w * (img->bpp ? img->bpp : 4));
+      /* Map common depth formats via pipe-like numbers from vk_format bits */
+      if (img->bpp == 2)
+         zt_fmt = NVC597_SET_ZT_FORMAT_V_Z16;
+      else if (img->bpp == 4)
+         zt_fmt = NVC597_SET_ZT_FORMAT_V_Z24S8;
+      else if (img->bpp == 8)
+         zt_fmt = NVC597_SET_ZT_FORMAT_V_ZF32_X24S8;
    }
-   (void)img;
+
+   for (r = 0; r < (rangeCount ? rangeCount : 1); r++) {
+      unsigned buffers = 0x1 | 0x2; /* depth + stencil */
+      VkImageAspectFlags aspects = VK_IMAGE_ASPECT_DEPTH_BIT |
+                                   VK_IMAGE_ASPECT_STENCIL_BIT;
+      if (pRanges && r < rangeCount)
+         aspects = pRanges[r].aspectMask;
+      buffers = 0;
+      if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
+         buffers |= 0x1;
+      if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
+         buffers |= 0x2;
+      if (!buffers)
+         buffers = 0x1 | 0x2;
+
+      if (addr && !cmd->in_render_pass) {
+         /* Bind zeta from image then clear (standalone CmdClearDepthStencilImage) */
+         nv_3d_bind_and_clear_zeta(&cmd->push, addr, w, h, pitch, zt_fmt,
+                                   buffers, depth, stencil);
+      } else {
+         /* Already in render pass with zeta bound: clear only */
+         nv_3d_emit_clear_surface(&cmd->push, buffers, NULL, depth, stencil);
+      }
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
