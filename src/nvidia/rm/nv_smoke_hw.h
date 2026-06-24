@@ -39,6 +39,8 @@
  *   - USERD GPPut published before doorbell (libdrm nvidia_gpfifo_submit_one)
  *   - GP entry wait uses SYNC_WAIT bit 31 (not LEVEL_SUBROUTINE bit 9)
  *   - nv_channel_submit_preflight() before G1 reports schedule/USERD/doorbell state
+ *   - g1_host_sema_rc: NVC36F host sema only (kickoff works iff this succeeds)
+ *   - g1_userd_gp_get/put vs g1_hput: ring consumption after failed G1
  *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
@@ -87,17 +89,22 @@ struct nv_smoke_hw_result {
    int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
    int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
    int g1_remap_fill_rc; /* tertiary: REMAP fill+sema if copy+sema_only both fail or copy fails */
+   int g1_host_sema_rc;  /* quaternary: NVC36F host sema only (kickoff probe) */
    int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */
    int g1_preflight_detail; /* 0 ok, 1=GPPut-only (no doorbell token), else errno */
    int g1_schedule_rc;  /* channel->schedule_rc from last GPFIFO_SCHEDULE attempt */
    uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
    uint32_t g1_class_copy;    /* class used (0 if unknown) */
    uint32_t g1_fill_observed; /* dst_cpu[0] after remap-fill probe (if run) */
+   uint32_t g1_userd_gp_get;  /* USERD GPGet after G1 attempts */
+   uint32_t g1_userd_gp_put;  /* USERD GPPut after G1 attempts */
+   uint32_t g1_host_gpfifo_put; /* ch->gpfifo_put after G1 attempts */
    bool g1_had_doorbell;      /* work_submit_token + usermode map at G1 start */
    bool g1_was_scheduled;     /* channel scheduled at G1 start */
    /* G2 phase detail */
    int g2_submit_rc;
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
+   int g2_preflight_rc;
    uint32_t g2_store_observed; /* dst_cpu[0] after G2 when mapped */
    uint32_t g2_class_compute;
    uint64_t g2_prog_gpu;

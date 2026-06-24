@@ -920,6 +920,70 @@ nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
 }
 
 int
+nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 16;
+   int pre;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
+   nv_push_init(&push, map, need);
+   nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+   nv_push_host_semaphore_release(&push, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+void
+nv_channel_userd_snapshot(struct nv_channel *ch,
+                          uint32_t *gp_get_out, uint32_t *gp_put_out,
+                          uint32_t *host_put_out)
+{
+   if (gp_get_out)
+      *gp_get_out = 0;
+   if (gp_put_out)
+      *gp_put_out = 0;
+   if (host_put_out)
+      *host_put_out = 0;
+   if (!ch)
+      return;
+   if (host_put_out)
+      *host_put_out = ch->gpfifo_put;
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (ch->userd)
+      (void)nvidia_userd_snapshot(ch->userd, gp_get_out, gp_put_out, NULL, NULL);
+#else
+   (void)gp_get_out;
+   (void)gp_put_out;
+#endif
+}
+
+int
 nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
                                            uint32_t class_compute,
                                            const struct nv_qmd_desc *desc,
@@ -940,11 +1004,16 @@ nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
    /* SET_OBJECT + SPA/CWD + invalidate + 64x LOAD_INLINE_QMD + PCAS ~ 200 dwords */
    uint32_t need = 256;
    uint32_t cc;
+   int pre;
 
    if (!ch || !desc || !qmd_gpu_addr)
       return -EINVAL;
    if (!sema_payload && sema_gpu_addr)
       sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
 
    cc = nv_channel_resolve_class_compute(ch, class_compute);
 

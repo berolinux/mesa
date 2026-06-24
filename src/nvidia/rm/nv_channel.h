@@ -247,6 +247,25 @@ nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
                                         bool check_notifier);
 
 /**
+ * G1 quaternary probe: host/GPFIFO NVC36F SEMAPHORE* release only (no CE/3D/compute
+ * SET_OBJECT).  If this succeeds, kickoff/GPPut/doorbell works and failure is in
+ * engine methods/class; if it fails, fix schedule/doorbell/USERD first.
+ */
+int
+nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier);
+
+/** Snapshot USERD GPGet/GPPut and host gpfifo_put index (0 if unavailable). */
+void nv_channel_userd_snapshot(struct nv_channel *ch,
+                               uint32_t *gp_get_out, uint32_t *gp_put_out,
+                               uint32_t *host_put_out);
+
+/**
  * G2 vertical slice (hardware path): compute SET_OBJECT + SPA/CWD init
  * (optional) + invalidate + smoke QMD materialize + SEND_PCAS with QMD sema
  * release0, then submit_wait_sema.
