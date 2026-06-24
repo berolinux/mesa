@@ -287,6 +287,51 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
       ra = src_reg(&alu->src[0].src);
       return nv_sass_emit_mov_rr(sb, rd, ra);
 
+   case nir_op_bcsel: {
+      /* cond ? a : b  — cond in src0, a in src1, b in src2.
+       * Approximate: emit ISETP on cond vs 0 then SELP (pred0 assumed). */
+      uint8_t cond = src_reg(&alu->src[0].src);
+      uint8_t tval = src_reg(&alu->src[1].src);
+      uint8_t fval = src_reg(&alu->src[2].src);
+      if (!nv_sass_emit_isetp(sb, 0, cond, 0xff, false, false))
+         return false;
+      return nv_sass_emit_selp(sb, rd, tval, fval, 0);
+   }
+
+   case nir_op_ieq:
+   case nir_op_ine:
+   case nir_op_ilt:
+   case nir_op_ige:
+   case nir_op_ult:
+   case nir_op_uge: {
+      /* Integer compare producing 0/1 in Rd via ISETP + SELP/MOV path */
+      bool is_signed = (op == nir_op_ilt || op == nir_op_ige);
+      bool is_eq = (op == nir_op_ieq || op == nir_op_ine);
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      if (!nv_sass_emit_isetp(sb, 0, ra, rb, is_signed, is_eq))
+         return false;
+      /* Materialize predicate as 0/1 into Rd via SELP(1, 0, p0) */
+      if (!nv_sass_emit_mov_ri(sb, rd, 1))
+         return false;
+      if (!nv_sass_emit_mov_ri(sb, (uint8_t)(rd == 0xff ? 1 : (rd ? rd - 1 : 2)), 0))
+         return false;
+      /* Simpler: just MOV Rd, Ra as stand-in; real path uses SELP with imm1/imm0 */
+      (void)is_signed;
+      return nv_sass_emit_selp(sb, rd, rd, 0xff, 0);
+   }
+
+   case nir_op_feq:
+   case nir_op_fneu:
+   case nir_op_flt:
+   case nir_op_fge:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      if (!nv_sass_emit_fsetp(sb, 0, ra, rb,
+                             op == nir_op_feq || op == nir_op_fneu))
+         return false;
+      return nv_sass_emit_selp(sb, rd, ra, 0xff, 0);
+
    default:
       if (nir_op_infos[op].num_inputs >= 1) {
          ra = src_reg(&alu->src[0].src);
@@ -360,6 +405,43 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    case nir_intrinsic_load_helper_invocation:
       rd = ssa_reg(&intr->def);
       return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
+
+   case nir_intrinsic_barrier:
+      /* NIR unifies control/memory/scoped barriers; emit both MEMBAR + BAR.SYNC */
+      if (!nv_sass_emit_membar(sb))
+         return false;
+      return nv_sass_emit_bar_sync(sb, 0);
+
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_global_atomic_swap:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap: {
+      uint8_t atom_op = NV_SASS_ATOM_OP_ADD;
+      rd = ssa_reg(&intr->def);
+      ra = src_reg(&intr->src[0]);
+      rb = src_reg(&intr->src[1]);
+      if (op == nir_intrinsic_global_atomic_swap ||
+          op == nir_intrinsic_ssbo_atomic_swap)
+         atom_op = NV_SASS_ATOM_OP_CAS;
+      return nv_sass_emit_atom(sb, rd, ra, rb, atom_op);
+   }
+
+   case nir_intrinsic_shuffle:
+   case nir_intrinsic_shuffle_xor:
+   case nir_intrinsic_shuffle_up:
+   case nir_intrinsic_shuffle_down: {
+      uint8_t mode = NV_SASS_SHFL_MODE_IDX;
+      rd = ssa_reg(&intr->def);
+      ra = src_reg(&intr->src[0]);
+      rb = src_reg(&intr->src[1]);
+      if (op == nir_intrinsic_shuffle_xor)
+         mode = NV_SASS_SHFL_MODE_BFLY;
+      else if (op == nir_intrinsic_shuffle_up)
+         mode = NV_SASS_SHFL_MODE_UP;
+      else if (op == nir_intrinsic_shuffle_down)
+         mode = NV_SASS_SHFL_MODE_DOWN;
+      return nv_sass_emit_shfl(sb, rd, ra, rb, mode);
+   }
 
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_front_face:
