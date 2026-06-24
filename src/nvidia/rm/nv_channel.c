@@ -395,6 +395,15 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
             ch->has_work_submit_token = true;
          }
       }
+      /* Best-effort: set default notifier index for token (non-fatal) */
+      if (ch->has_work_submit_token) {
+         NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
+         memset(&nip, 0, sizeof(nip));
+         nip.index = NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN;
+         (void)nv_rm_control(rm, ch->h_channel,
+                             NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
+                             &nip, sizeof(nip));
+      }
    }
 
    /* Ensure VAS mappings for ring/push/userd (may refine gpu_addr after alloc) */
@@ -914,15 +923,12 @@ nv_channel_kickoff(struct nv_channel *ch)
       return r;
 
    /*
-    * Extra doorbell ring if submit_one did not (no token at submit time) but
-    * we obtained token+map mid-submit — rare race with ensure_submit_ready.
-    * Second ring is harmless and helps if first ring raced GPPut visibility.
+    * If submit_one did not ring (no token at call time) but we have token+map
+    * now, ring once.  Avoid double-ring when submit_one already rang (RE: one
+    * write to usermode+0x90 after GPPut is the normal kick).
     */
-   if (ch->usermode_map && ch->has_work_submit_token) {
-      if (!ring_doorbell)
-         nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
+   if (!ring_doorbell && ch->usermode_map && ch->has_work_submit_token)
       nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
-   }
 
    ch->push_dw_base = ch->push_dw_used;
    return 0;

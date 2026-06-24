@@ -347,16 +347,33 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          res.g1_submit_rc = -EINVAL;
          r = res.g1_rc;
       } else {
+         /*
+          * G1 order (610.43.02 RE / HW_MODEL_DEEP_DISASM): host sema first
+          * isolates kickoff (schedule/GPPut/doorbell) from CE methods.
+          * Then CE copy; on CE fail, sema_only + remap diagnose engine path.
+          */
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         nv_channel_notifier_reset(ch);
+         if (res.g1_preflight_rc == -EAGAIN) {
+            res.g1_host_sema_rc = -EAGAIN;
+         } else {
+            res.g1_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
+               ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+               check_notifier);
+            if (sc->sema_cpu)
+               res.g1_sema_observed = sc->sema_cpu[0];
+         }
+
          if (sc->src_cpu)
             memset(sc->src_cpu, 0xa5, 256);
          if (sc->dst_cpu)
             memset(sc->dst_cpu, 0, 256);
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
-         /*
-          * Multi-class + optional PIPELINED LAUNCH_DMA (try_pipelined=true).
-          * First success updates class_copy_bound for later sema_only/remap probes.
-          */
+         nv_channel_notifier_reset(ch);
+
+         /* Multi-class + optional PIPELINED LAUNCH_DMA (try_pipelined=true). */
          res.g1_used_class_try = true;
          res.g1_submit_rc = nv_channel_g1_ce_copy_sema_submit_try_classes(
             ch, sc->src_gpu, sc->dst_gpu, 256, sc->sema_gpu, sc->sema_cpu,
@@ -382,9 +399,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
              * Secondary: sema-only CE fence.  Tertiary: REMAP fill+sema (no src).
              * sema_only ok + remap ok + copy fail => pitch/src issue
              * sema_only ok + remap fail => CE class/REMAP methods
-             * all fail => schedule/doorbell/GPPut not executing methods
-             * Reset notifier between probes so a stale channel error does not
-             * poison later wait_check results.
+             * host_sema ok + all CE fail => CE class/methods (kickoff works)
+             * host_sema fail => schedule/doorbell/GPPut (not CE)
              */
             nv_channel_notifier_reset(ch);
             if (sc->sema_cpu)
@@ -410,20 +426,9 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g1_sema_observed = sc->sema_cpu[0];
             if (sc->dst_cpu)
                res.g1_fill_observed = ((const uint32_t *)sc->dst_cpu)[0];
-
-            /* Quaternary: host/GPFIFO sema (no CE) — isolates kickoff vs CE */
-            nv_channel_notifier_reset(ch);
-            if (sc->sema_cpu)
-               sc->sema_cpu[0] = 0;
-            res.g1_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
-               ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
-               check_notifier);
-            if (sc->sema_cpu && res.g1_host_sema_rc == 0)
-               res.g1_sema_observed = sc->sema_cpu[0];
          } else if (res.g1_submit_rc == -EAGAIN) {
             res.g1_sema_only_rc = -EAGAIN;
             res.g1_remap_fill_rc = -EAGAIN;
-            res.g1_host_sema_rc = -EAGAIN;
          }
          nv_channel_userd_snapshot(ch, &res.g1_userd_gp_get, &res.g1_userd_gp_put,
                                    &res.g1_host_gpfifo_put);
@@ -587,6 +592,8 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
    /*
     * Try requested gpu_index, then 0, then -1 (first/default).  Agents often
     * pass gpu=0 while only ctl/device path works with -1.
+    * If drm_fd is a DRM render node only, also retry with fd=-1 so libdrm_nvidia
+    * opens /dev/nvidiactl internally (renderD128 alone cannot speak NVOS).
     */
    for (try_gpu = 0; try_gpu < 3 && !rm; try_gpu++) {
       int gi = (try_gpu == 0) ? gpu_index : (try_gpu == 1) ? 0 : -1;
@@ -596,12 +603,27 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
       res.standalone_gpu_tried = gi;
       rm = nv_rm_device_open(drm_fd, gi);
    }
+   if (!rm && drm_fd >= 0) {
+      for (try_gpu = 0; try_gpu < 3 && !rm; try_gpu++) {
+         int gi = (try_gpu == 0) ? gpu_index : (try_gpu == 1) ? 0 : -1;
+         if (try_gpu > 0 && gi == gpu_index)
+            continue;
+         open_gi = gi;
+         res.standalone_gpu_tried = gi;
+         rm = nv_rm_device_open(-1, gi);
+      }
+      if (rm && (nv_smoke_hw_env_verbose() || getenv("NV_SMOKE_HW_VERBOSE")))
+         fprintf(stderr,
+                 "nv_smoke_hw_run_standalone: opened via internal /dev/nvidiactl "
+                 "(fd=-1) after drm_fd=%d failed\n", drm_fd);
+   }
    if (!rm) {
       res.standalone_open_rc = -ENODEV;
       if (nv_smoke_hw_env_verbose() || true)
          fprintf(stderr,
                  "nv_smoke_hw_run_standalone: nv_rm_device_open(fd=%d,gpu=%d) failed "
-                 "(need nvidia.ko + /dev/nvidia* + libdrm_nvidia; tried gpu %d/0/-1)\n",
+                 "(need nvidia.ko + /dev/nvidiactl + /dev/nvidiaN + libdrm_nvidia; "
+                 "tried gpu %d/0/-1 and fd=-1 fallback)\n",
                  drm_fd, gpu_index, gpu_index);
       if (result_out)
          *result_out = res;
