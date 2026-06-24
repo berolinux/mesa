@@ -75,6 +75,8 @@ extern "C" {
 #define NV_QMD_F_SEMAPHORE_RELEASE_ENABLE1             139, 139
 #define NV_QMD_F_REQUIRE_SCHEDULING_PCAS               140, 140
 #define NV_QMD_F_DEPENDENT_QMD_SCHEDULE_ENABLE         141, 141
+#define NV_QMD_F_DEPENDENT_QMD_TYPE                    142, 142
+#define NV_QMD_F_DEPENDENT_QMD_FIELD_COPY              143, 143
 #define NV_QMD_F_INVALIDATE_TEXTURE_HEADER_CACHE       186, 186
 #define NV_QMD_F_INVALIDATE_TEXTURE_SAMPLER_CACHE      187, 187
 #define NV_QMD_F_INVALIDATE_TEXTURE_DATA_CACHE         188, 188
@@ -92,6 +94,8 @@ extern "C" {
 #define NV_QMD_F_CTA_RASTER_WIDTH                      415, 384
 #define NV_QMD_F_CTA_RASTER_HEIGHT                     431, 416
 #define NV_QMD_F_CTA_RASTER_DEPTH                      463, 448
+/* DEPENDENT_QMD_POINTER: QMD VA >> 8 (32-bit field) — NVC3C0_QMDV02_02 */
+#define NV_QMD_F_DEPENDENT_QMD_POINTER                 511, 480
 #define NV_QMD_F_SHARED_MEMORY_SIZE                    561, 544
 #define NV_QMD_F_MIN_SM_CONFIG_SHARED_MEM_SIZE         568, 562
 #define NV_QMD_F_MAX_SM_CONFIG_SHARED_MEM_SIZE         575, 569
@@ -103,6 +107,21 @@ extern "C" {
 #define NV_QMD_F_CONSTANT_BUFFER_VALID_BASE            640
 #define NV_QMD_F_REGISTER_COUNT_V                      656, 648
 #define NV_QMD_F_TARGET_SM_CONFIG_SHARED_MEM_SIZE      663, 657
+/* RELEASE0 sema: address + payload (clc3c0qmd.h NVC3C0_QMDV02_02_RELEASE0_*) */
+#define NV_QMD_F_RELEASE0_ADDRESS_LOWER                767, 736
+#define NV_QMD_F_RELEASE0_ADDRESS_UPPER                775, 768
+#define NV_QMD_F_RELEASE0_REDUCTION_OP                 790, 788
+#define NV_QMD_F_RELEASE0_REDUCTION_FORMAT             793, 792
+#define NV_QMD_F_RELEASE0_REDUCTION_ENABLE             794, 794
+#define NV_QMD_F_RELEASE0_STRUCTURE_SIZE               799, 799
+#define NV_QMD_F_RELEASE0_PAYLOAD                      831, 800
+#define NV_QMD_F_RELEASE1_ADDRESS_LOWER                863, 832
+#define NV_QMD_F_RELEASE1_ADDRESS_UPPER                871, 864
+#define NV_QMD_F_RELEASE1_REDUCTION_OP                 886, 884
+#define NV_QMD_F_RELEASE1_REDUCTION_FORMAT             889, 888
+#define NV_QMD_F_RELEASE1_REDUCTION_ENABLE             890, 890
+#define NV_QMD_F_RELEASE1_STRUCTURE_SIZE               895, 895
+#define NV_QMD_F_RELEASE1_PAYLOAD                      927, 896
 #define NV_QMD_F_BARRIER_COUNT                         959, 955
 #define NV_QMD_F_SHADER_LOCAL_MEMORY_LOW_SIZE          951, 928
 #define NV_QMD_F_SHADER_LOCAL_MEMORY_HIGH_SIZE         983, 960
@@ -111,6 +130,13 @@ extern "C" {
 #define NV_QMD_F_SASS_VERSION                          1023, 1016
 #define NV_QMD_F_PROGRAM_ADDRESS_LOWER                 1567, 1536
 #define NV_QMD_F_PROGRAM_ADDRESS_UPPER                 1584, 1568
+
+/* RELEASE0_STRUCTURE_SIZE values */
+#define NV_QMD_RELEASE_STRUCT_FOUR_WORDS               0u
+#define NV_QMD_RELEASE_STRUCT_ONE_WORD                 1u
+/* DEPENDENT_QMD_TYPE */
+#define NV_QMD_DEPENDENT_TYPE_QUEUE                    0u
+#define NV_QMD_DEPENDENT_TYPE_GRID                     1u
 
 /* Per-CB fields start at bit offset; slot i uses base + i*64 */
 #define NV_QMD_CB_ADDR_LOWER_BASE   1024
@@ -473,39 +499,91 @@ nv_qmd_patch_grid(uint32_t qmd[NV_QMD_DWORDS],
 #define NV_QMD_OFF_CTA_RASTER_DEPTH_DW   (14u * 4u)  /* low 16 of bits 463:448 */
 
 /**
- * QMD completion semaphore release (v02.02 SEMAPHORE_RELEASE_ENABLE0 + address).
- * Proprietary driver chains dependent QMDs via DEPENDENT_QMD_POINTER; we expose
- * a single release slot so CPU/GPU can wait on dispatch completion.
+ * QMD completion semaphore release (v02.02 SEMAPHORE_RELEASE_ENABLE0 + RELEASE0_*).
+ * Field layout from NVC3C0_QMDV02_02_RELEASE0_* in class/clc3c0qmd.h (also in
+ * mesa/src/nouveau/headers/nvidia/classes/clc3c0qmd.h — NVIDIA class headers).
  *
- * sema_gpu_addr: 16-byte aligned semaphore structure VA (payload in low dword).
- * sema_value: value written on completion (RELEASE_REDUCTION add/set in full driver).
+ * sema_gpu_addr: semaphore structure VA (one-word or four-word report sema).
+ * sema_value: payload written on completion (non-reduction release = set payload).
+ * one_word: true => RELEASE0_STRUCTURE_SIZE_ONE_WORD (single dword sema).
  */
+static inline void
+nv_qmd_set_semaphore_release0_ex(uint32_t qmd[NV_QMD_DWORDS],
+                                 uint64_t sema_gpu_addr, uint32_t sema_value,
+                                 bool one_word, bool reduction_enable)
+{
+   if (!qmd || !sema_gpu_addr)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0, 1);
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE0_ADDRESS_LOWER,
+              (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE0_ADDRESS_UPPER,
+              (uint32_t)((sema_gpu_addr >> 32) & 0xffu));
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE0_PAYLOAD, sema_value);
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE0_STRUCTURE_SIZE,
+              one_word ? NV_QMD_RELEASE_STRUCT_ONE_WORD
+                       : NV_QMD_RELEASE_STRUCT_FOUR_WORDS);
+   if (reduction_enable) {
+      nv_qmd_set(qmd, NV_QMD_F_RELEASE0_REDUCTION_ENABLE, 1);
+      nv_qmd_set(qmd, NV_QMD_F_RELEASE0_REDUCTION_FORMAT, 0); /* U32 */
+      nv_qmd_set(qmd, NV_QMD_F_RELEASE0_REDUCTION_OP, 0);     /* RED_ADD */
+   }
+}
+
 static inline void
 nv_qmd_set_semaphore_release0(uint32_t qmd[NV_QMD_DWORDS],
                               uint64_t sema_gpu_addr, uint32_t sema_value)
 {
    if (!qmd)
       return;
-   nv_qmd_set(qmd, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0, 1);
-   /* Semaphore0 address lower/upper MW fields — approximate dword placement
-    * from clc3c0qmd: often around bits 576+; store in reserved high dwords
-    * used by our materialize path until exact MW is validated. */
-   qmd[20] = (uint32_t)(sema_gpu_addr & 0xffffffffu);
-   qmd[21] = (uint32_t)(sema_gpu_addr >> 32);
-   qmd[22] = sema_value;
+   nv_qmd_set_semaphore_release0_ex(qmd, sema_gpu_addr, sema_value,
+                                    true /* one_word */, false /* reduction */);
 }
 
-/** Enable dependent QMD schedule (pointer in qmd[23..24] as QMD VA >> 8). */
+/** Second sema release slot (SEMAPHORE_RELEASE_ENABLE1 / RELEASE1_*). */
+static inline void
+nv_qmd_set_semaphore_release1(uint32_t qmd[NV_QMD_DWORDS],
+                              uint64_t sema_gpu_addr, uint32_t sema_value,
+                              bool one_word)
+{
+   if (!qmd || !sema_gpu_addr)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE1, 1);
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE1_ADDRESS_LOWER,
+              (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE1_ADDRESS_UPPER,
+              (uint32_t)((sema_gpu_addr >> 32) & 0xffu));
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE1_PAYLOAD, sema_value);
+   nv_qmd_set(qmd, NV_QMD_F_RELEASE1_STRUCTURE_SIZE,
+              one_word ? NV_QMD_RELEASE_STRUCT_ONE_WORD
+                       : NV_QMD_RELEASE_STRUCT_FOUR_WORDS);
+}
+
+/**
+ * Enable dependent QMD schedule: DEPENDENT_QMD_POINTER = next_qmd_gpu_addr >> 8
+ * (MW 511:480).  type_grid selects DEPENDENT_QMD_TYPE_GRID vs QUEUE.
+ */
+static inline void
+nv_qmd_set_dependent_qmd_ex(uint32_t qmd[NV_QMD_DWORDS],
+                            uint64_t next_qmd_gpu_addr,
+                            uint32_t type_grid_or_queue,
+                            bool field_copy)
+{
+   if (!qmd || !next_qmd_gpu_addr)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_SCHEDULE_ENABLE, 1);
+   nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_TYPE, type_grid_or_queue ? 1 : 0);
+   if (field_copy)
+      nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_FIELD_COPY, 1);
+   nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_POINTER,
+              (uint32_t)(next_qmd_gpu_addr >> 8));
+}
+
 static inline void
 nv_qmd_set_dependent_qmd(uint32_t qmd[NV_QMD_DWORDS], uint64_t next_qmd_gpu_addr)
 {
-   uint32_t shift8;
-   if (!qmd)
-      return;
-   nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_SCHEDULE_ENABLE, 1);
-   shift8 = (uint32_t)(next_qmd_gpu_addr >> 8);
-   qmd[23] = shift8;
-   qmd[24] = 0;
+   nv_qmd_set_dependent_qmd_ex(qmd, next_qmd_gpu_addr,
+                               NV_QMD_DEPENDENT_TYPE_GRID, false);
 }
 
 /**
