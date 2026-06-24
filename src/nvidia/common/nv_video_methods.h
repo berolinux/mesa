@@ -590,6 +590,161 @@ nv_nvdec_av1_pic_setup_pack(const struct nv_nvdec_av1_pic_setup *ps,
       dst[i] = src[i];
 }
 
+/* ---- SPS/PPS bitstream-derived helpers (host-side; fill pic_setup fields) ---- */
+
+/**
+ * Apply H.264 SPS/PPS subset into pic_setup (fields commonly needed by NVDEC).
+ * sps/pps are logical bitstream values (not NAL bytes); driver copies into
+ * proprietary pic_setup dword layout via existing pack path.
+ */
+static inline void
+nv_nvdec_h264_apply_sps_pps(struct nv_nvdec_h264_pic_setup *ps,
+                            uint32_t pic_width_in_mbs,
+                            uint32_t pic_height_in_map_units,
+                            uint32_t frame_mbs_only_flag,
+                            uint32_t mb_adaptive_frame_field_flag,
+                            uint32_t direct_8x8_inference_flag,
+                            uint32_t chroma_format_idc,
+                            uint32_t log2_max_frame_num_minus4,
+                            uint32_t pic_order_cnt_type,
+                            uint32_t log2_max_pic_order_cnt_lsb_minus4,
+                            uint32_t delta_pic_order_always_zero_flag,
+                            uint32_t entropy_coding_mode_flag,
+                            uint32_t pic_order_present_flag,
+                            uint32_t num_ref_idx_l0_default_active_minus1,
+                            uint32_t num_ref_idx_l1_default_active_minus1,
+                            uint32_t weighted_pred_flag,
+                            uint32_t weighted_bipred_idc,
+                            uint32_t pic_init_qp_minus26,
+                            uint32_t chroma_qp_index_offset,
+                            uint32_t second_chroma_qp_index_offset,
+                            uint32_t deblocking_filter_control_present_flag,
+                            uint32_t constrained_intra_pred_flag,
+                            uint32_t redundant_pic_cnt_present_flag,
+                            uint32_t transform_8x8_mode_flag)
+{
+   if (!ps)
+      return;
+   ps->width_mb = pic_width_in_mbs;
+   ps->height_mb = pic_height_in_map_units;
+   ps->frame_mbs_only_flag = frame_mbs_only_flag;
+   ps->mbaff_frame_flag = mb_adaptive_frame_field_flag;
+   ps->direct_8x8_inference_flag = direct_8x8_inference_flag;
+   ps->chroma_format_idc = chroma_format_idc;
+   ps->log2_max_frame_num_minus4 = log2_max_frame_num_minus4;
+   ps->pic_order_cnt_type = pic_order_cnt_type;
+   ps->log2_max_pic_order_cnt_lsb_minus4 = log2_max_pic_order_cnt_lsb_minus4;
+   ps->delta_pic_order_always_zero_flag = delta_pic_order_always_zero_flag;
+   ps->entropy_coding_mode_flag = entropy_coding_mode_flag;
+   ps->pic_order_present_flag = pic_order_present_flag;
+   ps->num_ref_idx_l0_active_minus1 = num_ref_idx_l0_default_active_minus1;
+   ps->num_ref_idx_l1_active_minus1 = num_ref_idx_l1_default_active_minus1;
+   ps->weighted_pred_flag = weighted_pred_flag;
+   ps->weighted_bipred_idc = weighted_bipred_idc;
+   ps->pic_init_qp_minus26 = pic_init_qp_minus26;
+   ps->chroma_qp_index_offset = chroma_qp_index_offset;
+   ps->second_chroma_qp_index_offset = second_chroma_qp_index_offset;
+   ps->deblocking_filter_control_present_flag =
+      deblocking_filter_control_present_flag;
+   ps->constrained_intra_pred_flag = constrained_intra_pred_flag;
+   ps->redundant_pic_cnt_present_flag = redundant_pic_cnt_present_flag;
+   ps->transform_8x8_mode_flag = transform_8x8_mode_flag;
+   ps->l0_ref_count = num_ref_idx_l0_default_active_minus1 + 1;
+   ps->l1_ref_count = num_ref_idx_l1_default_active_minus1 + 1;
+}
+
+/** Set H.264 DPB reference VA for slot (luma/chroma top/bot; 0 clears). */
+static inline void
+nv_nvdec_h264_set_dpb_ref(struct nv_nvdec_h264_pic_setup *ps, unsigned slot,
+                          uint64_t luma_top, uint64_t luma_bot,
+                          uint64_t chroma_top, uint64_t chroma_bot)
+{
+   if (!ps || slot >= 16)
+      return;
+   ps->dpb_luma_top[slot] = luma_top;
+   ps->dpb_luma_bot[slot] = luma_bot;
+   ps->dpb_chroma_top[slot] = chroma_top;
+   ps->dpb_chroma_bot[slot] = chroma_bot;
+}
+
+/**
+ * Apply HEVC SPS/PPS subset (VPS/SPS/PPS logical fields) into pic_setup.
+ */
+static inline void
+nv_nvdec_hevc_apply_sps_pps(struct nv_nvdec_hevc_pic_setup *ps,
+                            uint32_t pic_width_in_luma_samples,
+                            uint32_t pic_height_in_luma_samples,
+                            uint32_t chroma_format_idc,
+                            uint32_t bit_depth_luma_minus8,
+                            uint32_t bit_depth_chroma_minus8,
+                            uint32_t log2_min_luma_coding_block_size_minus3,
+                            uint32_t log2_diff_max_min_luma_coding_block_size,
+                            uint32_t log2_min_transform_block_size_minus2,
+                            uint32_t log2_diff_max_min_transform_block_size,
+                            uint32_t max_transform_hierarchy_depth_intra,
+                            uint32_t max_transform_hierarchy_depth_inter,
+                            uint32_t amp_enabled_flag,
+                            uint32_t sample_adaptive_offset_enabled_flag,
+                            uint32_t pcm_enabled_flag,
+                            uint32_t pcm_loop_filter_disabled_flag,
+                            uint32_t strong_intra_smoothing_enabled_flag,
+                            uint32_t temporal_mvp_enabled_flag,
+                            uint32_t log2_max_pic_order_cnt_lsb_minus4,
+                            uint32_t num_short_term_ref_pic_sets,
+                            uint32_t num_long_term_ref_pics_sps,
+                            uint32_t num_ref_idx_l0_default_active_minus1,
+                            uint32_t num_ref_idx_l1_default_active_minus1,
+                            uint32_t init_qp_minus26,
+                            uint32_t dependent_slice_segments_enabled_flag,
+                            uint32_t sign_data_hiding_enabled_flag)
+{
+   if (!ps)
+      return;
+   ps->pic_width_in_luma_samples = pic_width_in_luma_samples;
+   ps->pic_height_in_luma_samples = pic_height_in_luma_samples;
+   ps->chroma_format_idc = chroma_format_idc;
+   ps->bit_depth_luma_minus8 = bit_depth_luma_minus8;
+   ps->bit_depth_chroma_minus8 = bit_depth_chroma_minus8;
+   ps->log2_min_luma_coding_block_size_minus3 =
+      log2_min_luma_coding_block_size_minus3;
+   ps->log2_diff_max_min_luma_coding_block_size =
+      log2_diff_max_min_luma_coding_block_size;
+   ps->log2_min_transform_block_size_minus2 =
+      log2_min_transform_block_size_minus2;
+   ps->log2_diff_max_min_transform_block_size =
+      log2_diff_max_min_transform_block_size;
+   ps->max_transform_hierarchy_depth_intra = max_transform_hierarchy_depth_intra;
+   ps->max_transform_hierarchy_depth_inter = max_transform_hierarchy_depth_inter;
+   ps->amp_enabled_flag = amp_enabled_flag;
+   ps->sample_adaptive_offset_enabled_flag = sample_adaptive_offset_enabled_flag;
+   ps->pcm_enabled_flag = pcm_enabled_flag;
+   ps->pcm_loop_filter_disabled_flag = pcm_loop_filter_disabled_flag;
+   ps->strong_intra_smoothing_enabled_flag = strong_intra_smoothing_enabled_flag;
+   ps->temporal_mvp_enabled_flag = temporal_mvp_enabled_flag;
+   ps->log2_max_pic_order_cnt_lsb_minus4 = log2_max_pic_order_cnt_lsb_minus4;
+   ps->num_short_term_ref_pic_sets = num_short_term_ref_pic_sets;
+   ps->num_long_term_ref_pics_sps = num_long_term_ref_pics_sps;
+   ps->num_ref_idx_l0_default_active_minus1 =
+      num_ref_idx_l0_default_active_minus1;
+   ps->num_ref_idx_l1_default_active_minus1 =
+      num_ref_idx_l1_default_active_minus1;
+   ps->init_qp_minus26 = init_qp_minus26;
+   ps->dependent_slice_segments_enabled_flag =
+      dependent_slice_segments_enabled_flag;
+   ps->sign_data_hiding_enabled_flag = sign_data_hiding_enabled_flag;
+}
+
+/** Set HEVC DPB reference slot luma/chroma VA. */
+static inline void
+nv_nvdec_hevc_set_dpb_ref(struct nv_nvdec_hevc_pic_setup *ps, unsigned slot,
+                          uint64_t luma_va, uint64_t chroma_va)
+{
+   if (!ps || slot >= 16)
+      return;
+   ps->dpb_luma[slot] = luma_va;
+   ps->dpb_chroma[slot] = chroma_va;
+}
+
 /* Build frame_setup + write pic_setup BO from codec struct; returns 0 on success */
 static inline int
 nv_nvdec_fill_frame_from_h264(struct nv_nvdec_frame_setup *fs,

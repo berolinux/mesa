@@ -77,6 +77,28 @@ extern "C" {
 #define NVC597_SET_STREAM_OUT_LAYOUT_SELECT(i, j)           (0x2800 + (i) * 128 + (j) * 4)
 #define NVC597_SET_MAX_STREAM_OUTPUT_GS_INSTANCES_PER_TASK  0x0d60
 
+/* Tessellation domain/spacing/output (clce97; offsets stable through Ada) */
+#define NVC597_SET_TESSELLATION_PARAMETERS              0x0320
+#define NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_ISOLINE       0x0
+#define NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_TRIANGLE      0x1
+#define NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_QUAD          0x2
+#define NVC597_SET_TESSELLATION_PARAMETERS_SPACING_INTEGER      0x0
+#define NVC597_SET_TESSELLATION_PARAMETERS_SPACING_FRAC_ODD     0x1
+#define NVC597_SET_TESSELLATION_PARAMETERS_SPACING_FRAC_EVEN    0x2
+#define NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_POINTS        0x0
+#define NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_LINES         0x1
+#define NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CW        0x2
+#define NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CCW       0x3
+#define NVC597_SET_TESSELLATION_LOD_U0_OR_DENSITY        0x0324
+#define NVC597_SET_TESSELLATION_LOD_V0_OR_DETAIL         0x0328
+#define NVC597_SET_TESSELLATION_LOD_U1_OR_W0             0x032c
+#define NVC597_SET_TESSELLATION_LOD_V1                   0x0330
+#define NVC597_SET_TESSELLATION_CUT_HEIGHT               0x1008
+
+/* Geometry shader output topology / max vertices (subset) */
+#define NVC597_SET_GS_OUTPUT_PRIMITIVE_TOPOLOGY         0x0a0c
+#define NVC597_SET_GS_MAX_OUTPUT_VERTEX_COUNT           0x0a10
+
 #define NVC597_SET_VERTEX_ATTRIBUTE_A(i)        (0x1160 + (i) * 4)
 #define NVC597_SET_VERTEX_ATTRIBUTE_A_STREAM_SHIFT            0
 #define NVC597_SET_VERTEX_ATTRIBUTE_A_SOURCE_INACTIVE         (1u << 6)
@@ -1199,11 +1221,97 @@ nv_3d_emit_memory_barrier(struct nv_push *p,
    nv_3d_invalidate_texture_caches(p, tex_sampler, tex_header, tex_data);
 }
 
+/**
+ * Barrier from coarse access categories (closer to proprietary stage matrix).
+ * Call after optional WFI; sets only the cache invs required by the transition.
+ *
+ * @param after_shader_write   src wrote shader storage / SSBO / image
+ * @param after_transfer       src wrote via CE/copy/blit/clear
+ * @param after_color_write    src wrote color attachment
+ * @param after_depth_write    src wrote depth/stencil
+ * @param after_xfb_write      src wrote transform feedback
+ * @param before_shader_read   dst reads shader storage / UBO / indirect
+ * @param before_tex_sample    dst samples textures / input attachments
+ * @param before_shader_code   dst executes newly uploaded shader code
+ */
+static inline void
+nv_3d_emit_barrier_from_access(struct nv_push *p,
+                               bool after_shader_write,
+                               bool after_transfer,
+                               bool after_color_write,
+                               bool after_depth_write,
+                               bool after_xfb_write,
+                               bool before_shader_read,
+                               bool before_tex_sample,
+                               bool before_shader_code)
+{
+   bool si = before_shader_code;
+   bool sd = after_shader_write || after_xfb_write || before_shader_read ||
+             after_transfer;
+   bool sc = before_shader_read || before_shader_code;
+   bool ts = before_tex_sample || after_color_write || after_depth_write ||
+             after_transfer;
+   bool th = ts;
+   bool td = ts || after_color_write || after_depth_write || after_transfer;
+   if (!si && !sd && !sc && !ts && !th && !td) {
+      /* Execution-only: light data inv keeps later indirect/reads coherent */
+      sd = sc = true;
+   }
+   nv_3d_emit_memory_barrier(p, si, sd, sc, ts, th, td);
+}
+
 /** Texture barrier only (GL textureBarrier / VK fragment-feedback loop). */
 static inline void
 nv_3d_emit_texture_barrier(struct nv_push *p)
 {
    nv_3d_invalidate_texture_caches(p, true, true, true);
+}
+
+/** Program tessellation domain/spacing/output prim (domain 0=iso 1=tri 2=quad). */
+static inline void
+nv_3d_set_tessellation_parameters(struct nv_push *p, unsigned domain,
+                                  unsigned spacing, unsigned output_prim)
+{
+   uint32_t v = (domain & 0x3) |
+                ((spacing & 0x3) << 4) |
+                ((output_prim & 0x3) << 8);
+   nv_push_method(p, NVC597_SET_TESSELLATION_PARAMETERS, v);
+}
+
+/** Default outer/inner tess levels (float bits as uint32). */
+static inline void
+nv_3d_set_tessellation_lod(struct nv_push *p,
+                           uint32_t lod_u0, uint32_t lod_v0,
+                           uint32_t lod_u1, uint32_t lod_v1)
+{
+   nv_push_method(p, NVC597_SET_TESSELLATION_LOD_U0_OR_DENSITY, lod_u0);
+   nv_push_method(p, NVC597_SET_TESSELLATION_LOD_V0_OR_DETAIL, lod_v0);
+   nv_push_method(p, NVC597_SET_TESSELLATION_LOD_U1_OR_W0, lod_u1);
+   nv_push_method(p, NVC597_SET_TESSELLATION_LOD_V1, lod_v1);
+}
+
+/** Enable tess with triangle domain, integer spacing, CCW tri output (common GL). */
+static inline void
+nv_3d_tess_enable_defaults(struct nv_push *p)
+{
+   const uint32_t one_f = 0x3f800000u; /* 1.0f */
+   nv_3d_set_tessellation_parameters(p,
+      NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_TRIANGLE,
+      NVC597_SET_TESSELLATION_PARAMETERS_SPACING_INTEGER,
+      NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CCW);
+   nv_3d_set_tessellation_lod(p, one_f, one_f, one_f, one_f);
+   nv_push_method(p, NVC597_SET_TESSELLATION_CUT_HEIGHT, 0);
+}
+
+/** Geometry shader output topology (reuse NVC597_TOPOLOGY_* values) + max verts. */
+static inline void
+nv_3d_set_geometry_shader_output(struct nv_push *p, uint32_t topology_nv,
+                                 uint32_t max_output_vertices)
+{
+   nv_push_method(p, NVC597_SET_GS_OUTPUT_PRIMITIVE_TOPOLOGY, topology_nv);
+   if (max_output_vertices)
+      nv_push_method(p, NVC597_SET_GS_MAX_OUTPUT_VERTEX_COUNT,
+                     max_output_vertices & 0x3ff);
 }
 
 /** Disable conditional rendering (always render). */
@@ -1417,6 +1525,100 @@ nv_3d_stream_out_setup_simple(struct nv_push *p, unsigned buf_idx,
       }
       nv_3d_set_stream_out_layout_dword(p, buf_idx, di, attrs);
    }
+}
+
+/**
+ * Emit full SO layout from Gallium pipe_stream_output_info (per-buffer).
+ * strides[] are in bytes; attrs are register_index (8-bit) per component.
+ */
+static inline void
+nv_3d_stream_out_emit_from_pipe_info(struct nv_push *p,
+                                     const uint8_t *output_register,
+                                     const uint8_t *output_buffer,
+                                     const uint8_t *output_dst_offset,
+                                     const uint8_t *output_num_components,
+                                     const uint8_t *output_stream,
+                                     unsigned num_outputs,
+                                     const unsigned *strides,
+                                     unsigned num_buffers,
+                                     const uint64_t *buf_addrs,
+                                     const uint32_t *buf_sizes,
+                                     unsigned append_mask)
+{
+   unsigned b, o, k;
+   unsigned comp_count[4] = { 0, 0, 0, 0 };
+   uint8_t layout[4][128];
+   unsigned layout_len[4] = { 0, 0, 0, 0 };
+
+   memset(layout, 0xff, sizeof(layout));
+
+   for (o = 0; o < num_outputs && o < 128; o++) {
+      unsigned buf = output_buffer ? output_buffer[o] : 0;
+      unsigned ncomp = output_num_components ? output_num_components[o] : 1;
+      unsigned reg = output_register ? output_register[o] : o;
+      unsigned stream = output_stream ? output_stream[o] : 0;
+      unsigned dst_off = output_dst_offset ? output_dst_offset[o] : 0;
+      unsigned slot_base;
+      (void)stream;
+      if (buf >= 4 || ncomp == 0)
+         continue;
+      slot_base = dst_off;
+      for (k = 0; k < ncomp && k < 4; k++) {
+         unsigned slot = slot_base + k;
+         if (slot < 128)
+            layout[buf][slot] = (uint8_t)(reg + k);
+      }
+      if (slot_base + ncomp > comp_count[buf])
+         comp_count[buf] = slot_base + ncomp;
+      if (slot_base + ncomp > layout_len[buf])
+         layout_len[buf] = slot_base + ncomp;
+   }
+
+   for (b = 0; b < 4 && b < num_buffers; b++) {
+      uint32_t stride = strides ? (uint32_t)strides[b] : 0;
+      uint64_t addr = buf_addrs ? buf_addrs[b] : 0;
+      uint32_t sz = buf_sizes ? buf_sizes[b] : 0;
+      unsigned dwords, di2;
+      uint8_t attrs[4];
+
+      if (!addr || !sz) {
+         nv_3d_set_stream_out_buffer(p, b, 0, 0);
+         continue;
+      }
+      if (!stride && comp_count[b])
+         stride = comp_count[b] * 4u;
+      if (!stride)
+         stride = 16;
+      if (!comp_count[b])
+         comp_count[b] = stride / 4u;
+      if (!comp_count[b])
+         comp_count[b] = 4;
+
+      nv_3d_set_stream_out_buffer(p, b, addr, sz);
+      if (!(append_mask & (1u << b)))
+         nv_3d_set_stream_out_buffer_write_pointer(p, b, 0);
+      nv_3d_set_stream_out_control(p, b, 0, comp_count[b] & 0xff, stride);
+
+      dwords = (layout_len[b] + 3u) / 4u;
+      if (!dwords)
+         dwords = (comp_count[b] + 3u) / 4u;
+      if (dwords > 32)
+         dwords = 32;
+      for (di2 = 0; di2 < dwords; di2++) {
+         for (k = 0; k < 4; k++) {
+            unsigned idx = di2 * 4 + k;
+            if (idx < layout_len[b] && layout[b][idx] != 0xff)
+               attrs[k] = layout[b][idx];
+            else if (idx < comp_count[b])
+               attrs[k] = (uint8_t)idx;
+            else
+               attrs[k] = 0xff;
+         }
+         nv_3d_set_stream_out_layout_dword(p, b, di2, attrs);
+      }
+   }
+   for (; b < 4; b++)
+      nv_3d_set_stream_out_buffer(p, b, 0, 0);
 }
 
 /** One-time channel defaults (subset of nvidia-3d fermi initChannel). */

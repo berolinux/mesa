@@ -254,63 +254,45 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       return;
    }
 
-   /* Writes from shader / transfer / color / depth / compute */
-   if (src_access & (VK_ACCESS_2_SHADER_WRITE_BIT |
+   /* Classify access for stage-matrix-style barrier (proprietary-class granularity) */
+   bool after_shader_write = !!(src_access & (VK_ACCESS_2_SHADER_WRITE_BIT |
                      VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
-                     VK_ACCESS_2_TRANSFER_WRITE_BIT |
-                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                     VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT |
-                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)) {
-      need_wfi = true;
-      need_shader = true;
-      shader_data = true;
-      shader_const = true;
-   }
-   if (src_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
-                     VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
-                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-                     VK_ACCESS_2_TRANSFER_WRITE_BIT |
-                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) {
-      need_tex = true;
-      tex_s = tex_h = tex_d = true;
-   }
-   if (dst_access & (VK_ACCESS_2_SHADER_READ_BIT |
-                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR));
+   bool after_transfer = !!(src_access & (VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                                          VK_ACCESS_2_TRANSFER_READ_BIT));
+   bool after_color = !!(src_access & VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+   bool after_depth = !!(src_access &
+                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+   bool after_xfb = !!(src_access & VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT);
+   bool before_shader_read = !!(dst_access & (VK_ACCESS_2_SHADER_READ_BIT |
                      VK_ACCESS_2_UNIFORM_READ_BIT |
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                     VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT |
+                     VK_ACCESS_2_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT));
+   bool before_tex = !!(dst_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
                      VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
                      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
-                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                     VK_ACCESS_2_TRANSFER_READ_BIT |
-                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+   bool before_code = false;
+
+   if (after_shader_write || after_transfer || after_color || after_depth ||
+       after_xfb || before_shader_read || before_tex)
       need_wfi = true;
-      if (dst_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
-                        VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
-                        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
-                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT)) {
-         need_tex = true;
-         tex_s = tex_h = tex_d = true;
-      }
-      if (dst_access & (VK_ACCESS_2_UNIFORM_READ_BIT |
-                        VK_ACCESS_2_SHADER_READ_BIT |
-                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
-                        VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT)) {
-         need_shader = true;
-         shader_data = true;
-         shader_const = true;
-      }
-   }
+   if (need_tex)
+      before_tex = true; /* layout transition */
+
    /* Shader code / pipeline bind after upload */
    if ((src | dst) & (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
                       VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) {
-      if (src_access & VK_ACCESS_2_SHADER_WRITE_BIT) {
-         need_shader = true;
-         shader_instr = true;
-         shader_data = true;
-      }
+      if (src_access & (VK_ACCESS_2_SHADER_WRITE_BIT |
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT))
+         before_code = true;
    }
    /* Host access or execution dependency only */
    if ((src | dst) & VK_PIPELINE_STAGE_2_HOST_BIT)
@@ -321,20 +303,31 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                       VK_PIPELINE_STAGE_2_CLEAR_BIT |
                       VK_PIPELINE_STAGE_2_RESOLVE_BIT)) {
       need_wfi = true;
-      need_tex = true;
-      tex_h = tex_d = true;
+      after_transfer = true;
+      before_tex = true;
    }
+   /* GS / tess / draw indirect stages need shader data inv when used as dst */
+   if ((dst) & (VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+                VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+                VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT))
+      before_shader_read = true;
+
+   (void)need_shader;
+   (void)shader_instr;
+   (void)shader_data;
+   (void)shader_const;
+   (void)tex_s;
+   (void)tex_h;
+   (void)tex_d;
 
    if (need_wfi)
       nv_push_wfi(&cmd->push);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   if (need_shader || need_tex)
-      nv_3d_emit_memory_barrier(&cmd->push,
-                                shader_instr, shader_data, shader_const,
-                                tex_s, tex_h, tex_d);
-   else
-      /* Execution-only: still invalidate lightly for safety on first bring-up */
-      nv_3d_emit_memory_barrier(&cmd->push, false, true, true, false, false, false);
+   nv_3d_emit_barrier_from_access(&cmd->push,
+                                  after_shader_write, after_transfer,
+                                  after_color, after_depth, after_xfb,
+                                  before_shader_read, before_tex, before_code);
 }
 
 /* ---- VkEvent / VkQueryPool object management + cmd recording ---- */
@@ -1042,17 +1035,56 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
       uint32_t dh = (uint32_t)(dy1 > dy0 ? dy1 - dy0 : dy0 - dy1);
       uint64_t saddr = (src->bo ? nv_rm_bo_gpu_offset(src->bo) : 0) + src->gpu_offset;
       uint64_t daddr = (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0) + dst->gpu_offset;
-      uint32_t spitch = src->row_pitch ? src->row_pitch
-         : (src->bpp * (src->vk.extent.width ? src->vk.extent.width : 1));
-      uint32_t dpitch = dst->row_pitch ? dst->row_pitch
-         : (dst->bpp * (dst->vk.extent.width ? dst->vk.extent.width : 1));
+      uint32_t smip = b->srcSubresource.mipLevel;
+      uint32_t dmip = b->dstSubresource.mipLevel;
+      uint32_t sbase_w = src->vk.extent.width ? src->vk.extent.width : 1;
+      uint32_t sbase_h = src->vk.extent.height ? src->vk.extent.height : 1;
+      uint32_t dbase_w = dst->vk.extent.width ? dst->vk.extent.width : 1;
+      uint32_t dbase_h = dst->vk.extent.height ? dst->vk.extent.height : 1;
+      uint32_t smip_w = sbase_w >> smip; if (!smip_w) smip_w = 1;
+      uint32_t smip_h = sbase_h >> smip; if (!smip_h) smip_h = 1;
+      uint32_t dmip_w = dbase_w >> dmip; if (!dmip_w) dmip_w = 1;
+      uint32_t dmip_h = dbase_h >> dmip; if (!dmip_h) dmip_h = 1;
       uint32_t sbpp = src->bpp ? src->bpp : 4;
       uint32_t dbpp = dst->bpp ? dst->bpp : 4;
+      uint32_t spitch = src->row_pitch ? src->row_pitch : (sbpp * smip_w);
+      uint32_t dpitch = dst->row_pitch ? dst->row_pitch : (dbpp * dmip_w);
       uint32_t w, h, line_len;
       uint64_t soff, doff;
+      uint32_t ml;
 
       if (!saddr || !daddr)
          continue;
+      /* Mip level byte offset: sum of full-level sizes (linear approximation) */
+      for (ml = 0; ml < smip; ml++) {
+         uint32_t lw = sbase_w >> ml; if (!lw) lw = 1;
+         uint32_t lh = sbase_h >> ml; if (!lh) lh = 1;
+         saddr += (uint64_t)lw * lh * sbpp *
+            (src->vk.array_layers ? src->vk.array_layers : 1);
+      }
+      for (ml = 0; ml < dmip; ml++) {
+         uint32_t lw = dbase_w >> ml; if (!lw) lw = 1;
+         uint32_t lh = dbase_h >> ml; if (!lh) lh = 1;
+         daddr += (uint64_t)lw * lh * dbpp *
+            (dst->vk.array_layers ? dst->vk.array_layers : 1);
+      }
+      /* Array / depth layer from subresource baseArrayLayer + z offset */
+      {
+         uint32_t s_layer = b->srcSubresource.baseArrayLayer;
+         uint32_t d_layer = b->dstSubresource.baseArrayLayer;
+         int32_t sz0 = b->srcOffsets[0].z;
+         int32_t dz0 = b->dstOffsets[0].z;
+         uint64_t layer_stride_s = (uint64_t)spitch * smip_h;
+         uint64_t layer_stride_d = (uint64_t)dpitch * dmip_h;
+         if (s_layer)
+            saddr += (uint64_t)s_layer * layer_stride_s;
+         if (d_layer)
+            daddr += (uint64_t)d_layer * layer_stride_d;
+         if (sz0 > 0)
+            saddr += (uint64_t)sz0 * layer_stride_s;
+         if (dz0 > 0)
+            daddr += (uint64_t)dz0 * layer_stride_d;
+      }
       if (sw == 0) sw = 1;
       if (sh == 0) sh = 1;
       if (dw == 0) dw = 1;
@@ -1060,19 +1092,6 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
       /* Unscaled CE pitch/BL blit; scaled/LINEAR filter needs 3D/TEX later */
       w = sw < dw ? sw : dw;
       h = sh < dh ? sh : dh;
-      /* Layer/depth offset: treat z offset as layer * full 2D size when array */
-      {
-         int32_t sz0 = b->srcOffsets[0].z;
-         int32_t dz0 = b->dstOffsets[0].z;
-         uint64_t layer_stride_s = (uint64_t)spitch *
-            (src->vk.extent.height ? src->vk.extent.height : 1);
-         uint64_t layer_stride_d = (uint64_t)dpitch *
-            (dst->vk.extent.height ? dst->vk.extent.height : 1);
-         if (sz0 > 0)
-            saddr += (uint64_t)sz0 * layer_stride_s;
-         if (dz0 > 0)
-            daddr += (uint64_t)dz0 * layer_stride_d;
-      }
       soff = saddr + (uint64_t)sy0 * spitch + (uint64_t)sx0 * sbpp;
       doff = daddr + (uint64_t)dy0 * dpitch + (uint64_t)dx0 * dbpp;
       line_len = w * (sbpp < dbpp ? sbpp : dbpp);
@@ -1093,7 +1112,8 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
    nv_push_wfi(&cmd->push);
    /* Invalidate tex caches so subsequent samples see blit dst */
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_3d_emit_texture_barrier(&cmd->push);
+   nv_3d_emit_barrier_from_access(&cmd->push, false, true, true, false, false,
+                                  false, true, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL

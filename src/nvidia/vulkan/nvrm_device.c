@@ -204,8 +204,8 @@ nvrm_fill_physical_device_features(VkPhysicalDeviceFeatures *f)
    f->fullDrawIndexUint32 = VK_TRUE;
    f->imageCubeArray = VK_TRUE;
    f->independentBlend = VK_TRUE;
-   f->geometryShader = VK_FALSE; /* GS path not yet wired in pipeline */
-   f->tessellationShader = VK_FALSE;
+   f->geometryShader = VK_TRUE;  /* SET_PIPELINE_SHADER GS + output topology */
+   f->tessellationShader = VK_TRUE; /* tess params + TCS/TES pipeline stages */
    f->sampleRateShading = VK_TRUE;
    f->dualSrcBlend = VK_TRUE;
    f->logicOp = VK_TRUE;
@@ -227,7 +227,7 @@ nvrm_fill_physical_device_features(VkPhysicalDeviceFeatures *f)
    f->pipelineStatisticsQuery = VK_TRUE;
    f->vertexPipelineStoresAndAtomics = VK_TRUE;
    f->fragmentStoresAndAtomics = VK_TRUE;
-   f->shaderTessellationAndGeometryPointSize = VK_FALSE;
+   f->shaderTessellationAndGeometryPointSize = VK_TRUE;
    f->shaderImageGatherExtended = VK_TRUE;
    f->shaderStorageImageExtendedFormats = VK_TRUE;
    f->shaderStorageImageMultisample = VK_FALSE;

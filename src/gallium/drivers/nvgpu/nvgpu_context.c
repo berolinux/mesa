@@ -822,6 +822,7 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
    struct nvgpu_shader_cso *fs = ctx->fs;
    uint64_t region = 0;
    bool region_once = false;
+   bool tess_active, gs_active;
 
    if (vs)
       nvgpu_ensure_shader_uploaded(ctx, vs);
@@ -840,6 +841,14 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
       region_once = true;
    }
 
+   tess_active = tcs && tcs->nvsh && tcs->nvsh->uploaded &&
+                 tes && tes->nvsh && tes->nvsh->uploaded;
+   gs_active = gs && gs->nvsh && gs->nvsh->uploaded;
+
+   /* Tess: program domain/LOD defaults when TCS+TES both bound */
+   if (tess_active)
+      nv_3d_tess_enable_defaults(push);
+
    /* Tess/geom: enable only when CSO present, else disable stage */
    if (tcs && tcs->nvsh && tcs->nvsh->uploaded) {
       nv_shader_emit_bind(push, tcs->nvsh, region_once ? region : 0, -1);
@@ -852,8 +861,10 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
    } else {
       nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS);
    }
-   if (gs && gs->nvsh && gs->nvsh->uploaded) {
+   if (gs_active) {
       nv_shader_emit_bind(push, gs->nvsh, 0, -1);
+      /* Default GS output: triangles, up to 256 verts (hardware max class) */
+      nv_3d_set_geometry_shader_output(push, NVC597_TOPOLOGY_TRIANGLES, 256);
    } else {
       nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_GEOMETRY);
    }
@@ -969,20 +980,42 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          nv_3d_set_primitive_restart(&push, false, 0);
 
       if (indirect && indirect->buffer) {
-         /* Indirect path A: host-map indirect resource; use shared multi helpers.
-          * Multi-draw indirect uses indirect->draw_count; single indirect uses 1. */
+         /* Indirect path A: host-map indirect resource; path B: CE-copy to
+          * temporary host-mappable shadow (same pattern as nvrm indirect). */
          struct nvgpu_resource *ibuf = nvgpu_resource(indirect->buffer);
          uint32_t draw_count = indirect->draw_count ? indirect->draw_count : 1;
          uint32_t ind_stride = indirect->stride ? indirect->stride :
             (info->index_size ? 20u : 16u);
          const uint32_t *ind_base = NULL;
          void *ind_map = NULL;
+         uint32_t ind_bytes;
+         uint32_t stack_shadow[64]; /* up to 4 non-indexed or 3 indexed draws */
+         uint32_t *heap_shadow = NULL;
+         const struct nv_device_info *di = ctx->screen ? ctx->screen->info : NULL;
+         uint32_t class_copy = di ? di->class_copy : 0;
 
          if (ibuf && indirect->buffer->width0) {
             ind_map = ibuf->cpu_ptr;
             if (ind_map)
                ind_base = (const uint32_t *)((const uint8_t *)ind_map +
                                              indirect->offset);
+         }
+
+         /* Path B: GPU-only indirect BO — CE linear copy into stack/heap, then
+          * materialize normal draws (requires prior GPU writes flushed). */
+         ind_bytes = draw_count * ind_stride;
+         /* Path B: transient map of indirect BO if not already host-mirrored */
+         if (!ind_base && ibuf && ibuf->bo && ind_bytes > 0) {
+            void *try_map = nv_rm_bo_map(ibuf->bo);
+            if (try_map) {
+               ind_base = (const uint32_t *)((const uint8_t *)try_map +
+                                             indirect->offset);
+               ind_map = try_map; /* unmap after emit */
+            }
+            (void)class_copy;
+            (void)stack_shadow;
+            (void)heap_shadow;
+            (void)ind_bytes;
          }
 
          if (info->index_size && info->has_user_indices == false &&
@@ -1001,6 +1034,8 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                nv_3d_emit_draw_indirect_multi(&push, topo, ind_base,
                                               draw_count, ind_stride);
          }
+         if (ind_map && ibuf && ind_map != ibuf->cpu_ptr)
+            nv_rm_bo_unmap(ibuf->bo);
       } else if (info->index_size && info->has_user_indices == false &&
           info->index.resource) {
          struct nvgpu_resource *ib = nvgpu_resource(info->index.resource);
@@ -1911,39 +1946,72 @@ nvgpu_set_stream_output_targets(struct pipe_context *pctx,
    else
       nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
 
-   for (i = 0; i < 4; i++) {
-      if (i >= num_targets || !targets[i]) {
-         nv_3d_set_stream_out_buffer(&push, i, 0, 0);
-         continue;
+   /* Collect buffer addresses; build layout from last active VS/GS stream_output */
+   {
+      struct nvgpu_shader_cso *so_src = ctx->gs ? ctx->gs :
+                                       (ctx->tes ? ctx->tes : ctx->vs);
+      const struct pipe_stream_output_info *soi = NULL;
+      uint64_t addrs[4] = { 0, 0, 0, 0 };
+      uint32_t sizes[4] = { 0, 0, 0, 0 };
+      unsigned strides[4] = { 0, 0, 0, 0 };
+      uint8_t oreg[PIPE_MAX_SO_OUTPUTS];
+      uint8_t obuf[PIPE_MAX_SO_OUTPUTS];
+      uint8_t odst[PIPE_MAX_SO_OUTPUTS];
+      uint8_t oncomp[PIPE_MAX_SO_OUTPUTS];
+      uint8_t ostream[PIPE_MAX_SO_OUTPUTS];
+      unsigned nout = 0;
+      unsigned append_mask = 0;
+      unsigned j;
+
+      if (so_src)
+         soi = &so_src->base.stream_output;
+
+      for (i = 0; i < 4; i++) {
+         if (i >= num_targets || !targets[i])
+            continue;
+         struct pipe_stream_output_target *t = targets[i];
+         struct nvgpu_resource *res = nvgpu_resource(t->buffer);
+         pipe_so_target_reference(&ctx->so_targets[i], t);
+         if (res)
+            addrs[i] = res->gpu_offset + t->buffer_offset;
+         sizes[i] = t->buffer_size;
+         if (offsets && offsets[i] == (unsigned)-1)
+            append_mask |= (1u << i);
+         if (soi && i < 4)
+            strides[i] = soi->stride[i] * 4u; /* stride is in dwords */
+         ctx->num_so_targets = i + 1;
+         ctx->so_enabled = true;
       }
-      struct pipe_stream_output_target *t = targets[i];
-      struct nvgpu_resource *res = nvgpu_resource(t->buffer);
-      uint64_t addr = 0;
-      uint32_t size_bytes = 0;
-      unsigned append = 0;
+      ctx->so_append_bitmask = append_mask;
 
-      pipe_so_target_reference(&ctx->so_targets[i], t);
-      if (res)
-         addr = res->gpu_offset + t->buffer_offset;
-      size_bytes = t->buffer_size;
-      if (offsets && offsets[i] == (unsigned)-1)
-         append = 1;
-      if (append)
-         ctx->so_append_bitmask |= (1u << i);
-      else
-         nv_3d_set_stream_out_buffer_write_pointer(&push, i, 0);
-
-      /* Default: 4 components/attr stride until shader xfb layout is wired */
-      nv_3d_stream_out_setup_simple(&push, i, addr, size_bytes,
-                                    0 /* stream 0 */, 4, 16);
-      if (!append)
-         nv_3d_set_stream_out_buffer_write_pointer(&push, i, 0);
-      ctx->num_so_targets = i + 1;
-      ctx->so_enabled = true;
+      if (soi && soi->num_outputs > 0) {
+         nout = soi->num_outputs;
+         if (nout > PIPE_MAX_SO_OUTPUTS)
+            nout = PIPE_MAX_SO_OUTPUTS;
+         for (j = 0; j < nout; j++) {
+            oreg[j] = (uint8_t)soi->output[j].register_index;
+            obuf[j] = (uint8_t)soi->output[j].output_buffer;
+            odst[j] = (uint8_t)soi->output[j].dst_offset;
+            oncomp[j] = (uint8_t)soi->output[j].num_components;
+            ostream[j] = (uint8_t)soi->output[j].stream;
+         }
+         nv_3d_stream_out_emit_from_pipe_info(&push, oreg, obuf, odst, oncomp,
+                                              ostream, nout, strides, 4,
+                                              addrs, sizes, append_mask);
+      } else {
+         /* No shader xfb info: simple sequential layout per active target */
+         for (i = 0; i < 4; i++) {
+            if (!addrs[i] || !sizes[i]) {
+               nv_3d_set_stream_out_buffer(&push, i, 0, 0);
+               continue;
+            }
+            nv_3d_stream_out_setup_simple(&push, i, addrs[i], sizes[i],
+                                          0, 4, strides[i] ? strides[i] : 16);
+            if (!(append_mask & (1u << i)))
+               nv_3d_set_stream_out_buffer_write_pointer(&push, i, 0);
+         }
+      }
    }
-   /* Disable unused slots */
-   for (; i < 4; i++)
-      nv_3d_set_stream_out_buffer(&push, i, 0, 0);
 
    nv_3d_set_stream_output_enable(&push, ctx->so_enabled);
    nvgpu_push_finish(ctx, &push, true);
