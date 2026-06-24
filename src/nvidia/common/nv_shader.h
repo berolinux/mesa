@@ -79,6 +79,11 @@ nv_shader_fill_stage_defaults(struct nv_shader *sh);
 int
 nv_shader_compile_nir_stub(struct nv_shader *sh);
 
+/** Compile NIR via idep_nvidia_compiler (SPH+SASS object upload). */
+struct nir_shader;
+int
+nv_shader_compile_nir(struct nv_shader *sh, const struct nir_shader *nir);
+
 #ifdef __cplusplus
 }
 #endif

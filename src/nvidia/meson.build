@@ -10,6 +10,7 @@ if not dep_libdrm_nvidia.found()
 endif
 
 subdir('common')
+subdir('compiler')
 subdir('rm')
 
 if with_nvrm_vk

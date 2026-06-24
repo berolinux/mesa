@@ -8,6 +8,8 @@
 #include "nv_rm.h"
 #include "nv_sph.h"
 
+/* Optional NIR compiler (linked when idep_nvidia_compiler available) */
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -195,6 +197,7 @@ nv_shader_upload_code(struct nv_shader *sh, const void *code, uint32_t code_size
  * Compile path entry: when NIR is attached, eventually lower to SASS.
  * Currently falls back to SPH+EXIT stub (same as upload_code NULL path).
  */
+
 int
 nv_shader_compile_nir_stub(struct nv_shader *sh)
 {
@@ -202,53 +205,8 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
       return -1;
    if (sh->uploaded)
       return 0;
+   /* Prefer external nv_shader_compile_nir from idep_nvidia_compiler when NIR set */
+   if (sh->nir)
+      return nv_shader_compile_nir(sh, (const struct nir_shader *)sh->nir);
    return nv_shader_upload_code(sh, NULL, 0, sh->register_count ? sh->register_count : 8);
-}
-
-int
-nv_shader_upload_constants(struct nv_shader *sh, const void *data, uint32_t size)
-{
-   struct nv_rm_bo *bo;
-   uint64_t gpu = 0;
-
-   if (!sh || !sh->rm || !size)
-      return -1;
-
-   if (sh->const_bo) {
-      nv_rm_bo_unmap(sh->const_bo);
-      nv_rm_bo_free(sh->const_bo);
-      sh->const_bo = NULL;
-   }
-
-   bo = nv_shader_alloc_upload_bo(sh->rm, data, size, 256, &gpu);
-   if (!bo)
-      return -1;
-
-   sh->const_bo = bo;
-   sh->const_gpu_addr = gpu;
-   sh->const_size = size;
-   return 0;
-}
-
-void
-nv_shader_emit_bind(struct nv_push *p, const struct nv_shader *sh,
-                    uint64_t program_region_base, int const_shader_slot)
-{
-   if (!p || !sh || !sh->uploaded || !sh->code_gpu_addr)
-      return;
-
-   if (program_region_base)
-      nv_3d_set_program_region(p, program_region_base);
-
-   nv_3d_load_pipeline_shader(p, sh->pipeline_stage, sh->pipeline_type,
-                              sh->code_gpu_addr, sh->register_count,
-                              sh->bind_group);
-
-   if (sh->const_bo && sh->const_gpu_addr && sh->const_size &&
-       const_shader_slot >= 0) {
-      uint32_t padded = (sh->const_size + 255u) & ~255u;
-      nv_3d_set_constant_buffer_selector(p, padded, sh->const_gpu_addr);
-      nv_3d_bind_group_constant_buffer(p, sh->bind_group,
-                                       (unsigned)const_shader_slot, true);
-   }
 }

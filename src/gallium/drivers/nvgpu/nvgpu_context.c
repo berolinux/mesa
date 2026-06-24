@@ -20,6 +20,7 @@
 #include "nv_fence.h"
 #include "nv_tex.h"
 #include "nv_sph.h"
+#include "nv_nir.h"
 
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -238,12 +239,14 @@ nvgpu_ensure_shader_uploaded(struct nvgpu_context *ctx,
    if (!scso || !scso->nvsh || scso->nvsh->uploaded)
       return;
 
-   /* NIR->ISA not implemented yet: upload zero placeholder so hardware
-    * pipeline bind methods are exercised.  Compiler will replace this. */
-   if (nv_shader_compile_nir_stub(scso->nvsh) == 0) {
-      if (!ctx->program_region_base && scso->nvsh->code_gpu_addr)
-         ctx->program_region_base = scso->nvsh->code_gpu_addr;
-   }
+   /* NIR->SPH+SASS via nvidia compiler (EXIT stub until full ISel); falls
+    * back to trivial SPH if no NIR attached. */
+   if (scso->nvsh->nir)
+      nv_shader_compile_nir(scso->nvsh, scso->nvsh->nir);
+   else
+      nv_shader_compile_nir_stub(scso->nvsh);
+   if (scso->nvsh->uploaded && !ctx->program_region_base && scso->nvsh->code_gpu_addr)
+      ctx->program_region_base = scso->nvsh->code_gpu_addr;
 }
 
 static void *

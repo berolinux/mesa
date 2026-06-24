@@ -87,6 +87,8 @@ struct nvrm_image {
    uint64_t gpu_offset;
 };
 
+struct nvrm_graphics_pipeline; /* defined in nvrm_pipeline.c */
+
 struct nvrm_cmd_buffer {
    struct vk_command_buffer vk;
    struct nvrm_device *device;
@@ -95,6 +97,12 @@ struct nvrm_cmd_buffer {
    uint32_t push_dw_cap;
    uint32_t push_dw_used;
    struct nv_push push;
+   /* Recording state for graphics */
+   struct nvrm_graphics_pipeline *bound_gfx_pipeline;
+   bool channel_init_done;
+   bool in_render_pass;
+   uint32_t render_width;
+   uint32_t render_height;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
