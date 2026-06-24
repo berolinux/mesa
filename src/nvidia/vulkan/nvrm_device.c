@@ -6,6 +6,7 @@
 #include "nvrm_private.h"
 #include "nvrm_wsi.h"
 #include "nv_tex.h"
+#include "nv_shader.h"
 #include "nv_fence.h"
 
 #include "vk_common_entrypoints.h"
@@ -670,12 +671,21 @@ nvrm_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    VK_FROM_HANDLE(nvrm_device, device, _device);
    if (!device)
       return;
+   if (device->meta_blit_vs) {
+      nv_shader_destroy(device->meta_blit_vs);
+      device->meta_blit_vs = NULL;
+   }
+   if (device->meta_blit_fs) {
+      nv_shader_destroy(device->meta_blit_fs);
+      device->meta_blit_fs = NULL;
+   }
+   device->meta_blit_ready = false;
    if (device->queue) {
       if (device->tex_pool) {
-      nv_tex_pool_destroy(device->tex_pool);
-      device->tex_pool = NULL;
-   }
-   nvrm_queue_finish(device->queue);
+         nv_tex_pool_destroy(device->tex_pool);
+         device->tex_pool = NULL;
+      }
+      nvrm_queue_finish(device->queue);
       vk_free(&device->vk.alloc, device->queue);
    }
    vk_device_finish(&device->vk);

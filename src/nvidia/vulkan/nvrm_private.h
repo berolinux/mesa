@@ -58,6 +58,11 @@ struct nvrm_device {
    const struct nv_device_info *info;
    struct nvrm_queue *queue;
    struct nv_tex_pool *tex_pool; /* sampler+header pool for descriptors */
+   /* Meta blit/resolve: trivial SPH+EXIT VS/FS until TEX sample shaders land */
+   struct nv_shader *meta_blit_vs;
+   struct nv_shader *meta_blit_fs;
+   int meta_blit_tex_slot;       /* fixed tex_pool slot for blit source (-1 unset) */
+   bool meta_blit_ready;
 };
 
 struct nvrm_queue {

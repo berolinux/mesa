@@ -2308,6 +2308,48 @@ nv_3d_emit_blit_fullscreen_draw(struct nv_push *p, uint32_t topology_nv)
 }
 
 /**
+ * Bind destination as colour target 0 for a meta blit pass (pitch or
+ * blocklinear).  ct_format: NVC597_SET_COLOR_TARGET_FORMAT_V_* value.
+ */
+static inline void
+nv_3d_emit_blit_dst_color_target(struct nv_push *p, uint64_t dst_gpu,
+                                 uint32_t dst_w, uint32_t dst_h,
+                                 uint32_t ct_format, bool blocklinear,
+                                 uint32_t pitch_bytes)
+{
+   struct nv_3d_surface s;
+   uint8_t targets[8] = { 0 };
+   (void)pitch_bytes;
+   if (!p || !dst_gpu)
+      return;
+   memset(&s, 0, sizeof(s));
+   s.enabled = true;
+   s.gpu_addr = dst_gpu;
+   s.width = dst_w ? dst_w : 1;
+   s.height = dst_h ? dst_h : 1;
+   s.format = ct_format ? ct_format : NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   s.block_linear = blocklinear;
+   nv_3d_set_color_target(p, 0, &s);
+   nv_3d_set_ct_select(p, 1, targets);
+}
+
+/**
+ * Pick CT format from bytes-per-pixel (coarse; full VkFormat map is elsewhere).
+ */
+static inline uint32_t
+nv_3d_ct_format_from_bpp(uint32_t bpp)
+{
+   switch (bpp) {
+   case 1:  return NVC597_SET_COLOR_TARGET_FORMAT_V_R8;
+   case 2:  return NVC597_SET_COLOR_TARGET_FORMAT_V_R16;
+   case 8:  return NVC597_SET_COLOR_TARGET_FORMAT_V_R16_G16_B16_A16;
+   case 16: return NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32_BF32_AF32;
+   case 4:
+   default: return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   }
+}
+
+/**
  * CE-assisted MSAA resolve: when full 3D resolve shaders are unavailable,
  * copy sample-0 plane with pitch layout (linear approximation).  For
  * blocklinear multisample surfaces the proprietary driver uses 3D/TEX;

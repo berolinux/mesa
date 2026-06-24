@@ -9,8 +9,122 @@
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
 #include "nv_shader.h"
+#include "nv_tex.h"
 #include "nv_qmd.h"
 #include "nv_rm.h"
+
+/* Lazy-init device meta blit VS/FS (SPH+EXIT until TEX sample shaders exist). */
+static bool
+nvrm_device_ensure_meta_blit(struct nvrm_device *dev)
+{
+   if (!dev || !dev->rm)
+      return false;
+   if (dev->meta_blit_ready && dev->meta_blit_vs && dev->meta_blit_fs)
+      return true;
+   if (!dev->meta_blit_vs) {
+      dev->meta_blit_vs = nv_shader_create(dev->rm, NV_SHADER_KIND_VERTEX);
+      if (dev->meta_blit_vs)
+         (void)nv_shader_compile_nir_stub(dev->meta_blit_vs);
+   }
+   if (!dev->meta_blit_fs) {
+      dev->meta_blit_fs = nv_shader_create(dev->rm, NV_SHADER_KIND_FRAGMENT);
+      if (dev->meta_blit_fs)
+         (void)nv_shader_compile_nir_stub(dev->meta_blit_fs);
+   }
+   if (!dev->tex_pool)
+      dev->tex_pool = nv_tex_pool_create(dev->rm, 256);
+   if (dev->meta_blit_tex_slot < 0)
+      dev->meta_blit_tex_slot = 0;
+   dev->meta_blit_ready =
+      (dev->meta_blit_vs && dev->meta_blit_vs->uploaded &&
+       dev->meta_blit_fs && dev->meta_blit_fs->uploaded &&
+       dev->tex_pool != NULL);
+   return dev->meta_blit_ready;
+}
+
+/**
+ * Emit 3D meta blit path: CT0 = dst, tex_pool[slot] = src pitch/BL header,
+ * bind meta VS/FS, fullscreen triangle-strip.  Returns true if 3D path ran
+ * (caller may still CE-copy as fallback when shaders are trivial EXIT stubs).
+ */
+static bool
+nvrm_cmd_emit_meta_blit_3d(struct nvrm_cmd_buffer *cmd,
+                           struct nvrm_image *src, struct nvrm_image *dst,
+                           uint64_t soff, uint64_t doff,
+                           uint32_t sw, uint32_t sh, uint32_t dw, uint32_t dh,
+                           uint32_t spitch, uint32_t sbpp,
+                           uint32_t dx0, uint32_t dy0,
+                           bool linear_filter)
+{
+   struct nvrm_device *dev;
+   struct nv_tex_desc desc;
+   struct nv_tex_entry entry;
+   struct nv_tex_pool *pool;
+   int slot;
+   uint32_t ct_fmt;
+   uint64_t region = 0;
+
+   if (!cmd || !cmd->device || !src || !dst || !soff || !doff)
+      return false;
+   dev = cmd->device;
+   if (!nvrm_device_ensure_meta_blit(dev))
+      return false;
+   pool = dev->tex_pool;
+
+   memset(&desc, 0, sizeof(desc));
+   desc.gpu_addr = soff;
+   desc.width = sw ? sw : 1;
+   desc.height = sh ? sh : 1;
+   desc.pitch = spitch ? spitch : (sw * (sbpp ? sbpp : 4));
+   if (desc.pitch < 32)
+      desc.pitch = 32;
+   desc.pitch &= ~31u;
+   desc.components = NV_TEX_COMP_A8B8G8R8;
+   desc.data_type = NV_TEX_DT_UNORM;
+   desc.texture_type = NV_TEX_TEXTURE_TYPE_2D;
+   desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.mag_filt = linear_filter ? NV_TEX_SAMP_FILT_LINEAR
+                                 : NV_TEX_SAMP_FILT_NEAREST;
+   desc.min_filt = desc.mag_filt;
+   desc.mip_filt = NV_TEX_SAMP_FILT_NEAREST;
+   if (src->is_blocklinear) {
+      /* Blocklinear headers need gobs; fall back to pitch encode at soff */
+   }
+   memset(&entry, 0, sizeof(entry));
+   nv_tex_encode_pitch_2d(&desc, &entry);
+   slot = nv_tex_pool_set_entry(pool, dev->meta_blit_tex_slot, &entry);
+   if (slot < 0)
+      slot = nv_tex_pool_set_entry(pool, -1, &entry);
+   if (slot < 0)
+      return false;
+   dev->meta_blit_tex_slot = slot;
+
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   if (src->vk.samples > 1)
+      nv_3d_emit_msaa_resolve_state(&cmd->push,
+                                    src->vk.samples ? src->vk.samples : 1,
+                                    1, NV_3D_RESOLVE_MODE_AVERAGE);
+   nv_3d_emit_blit_pass_state(&cmd->push, dx0, dy0, dw, dh, true);
+
+   ct_fmt = nv_3d_ct_format_from_bpp(dst->bpp ? dst->bpp : 4);
+   nv_3d_emit_blit_dst_color_target(&cmd->push, doff,
+                                    dw ? dw : 1, dh ? dh : 1,
+                                    ct_fmt, dst->is_blocklinear,
+                                    dst->row_pitch);
+
+   nv_tex_pool_emit_bind(&cmd->push, pool);
+
+   if (dev->meta_blit_vs->code_gpu_addr)
+      region = dev->meta_blit_vs->code_gpu_addr & ~0xfffull;
+   nv_shader_emit_bind(&cmd->push, dev->meta_blit_vs, region, -1);
+   nv_shader_emit_bind(&cmd->push, dev->meta_blit_fs, 0, -1);
+
+   nv_3d_emit_blit_fullscreen_draw(&cmd->push, 0 /* TRIANGLE_STRIP */);
+   nv_3d_emit_texture_barrier(&cmd->push);
+   return true;
+}
 
 #define NVRM_CMD_PUSH_DWORDS (32 * 1024)
 #define NVRM_QMD_SCRATCH_SIZE  4096  /* 256B QMD + padding, 256B aligned */
@@ -1112,28 +1226,29 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
       /*
        * Path selection (kernel/binary driver patterns):
        *  - 1:1 NEAREST, non-MSAA: CE pitch/blocklinear blit
-       *  - scaled or LINEAR filter or MSAA src: emit 3D blit-pass state then
-       *    fall back to CE min(w,h) sample0 copy until full TEX meta shaders
-       *    are wired (state is correct for a subsequent 3D full-screen pass)
+       *  - scaled or LINEAR filter or MSAA src: 3D meta blit (CT + tex pool +
+       *    VS/FS bind + fullscreen draw), then CE min(w,h) as safety net while
+       *    meta FS is still SPH+EXIT (no sample yet)
        */
-      if (nv_3d_blit_needs_3d_filter(sw, sh, dw, dh,
-                                     pBlitImageInfo->filter == VK_FILTER_LINEAR,
-                                     src->vk.samples ? src->vk.samples : 1)) {
-         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-         if (src->vk.samples > 1)
-            nv_3d_emit_msaa_resolve_state(&cmd->push,
-                                          src->vk.samples ? src->vk.samples : 1,
-                                          1, NV_3D_RESOLVE_MODE_AVERAGE);
-         nv_3d_emit_blit_pass_state(&cmd->push,
-                                    (uint32_t)(dx0 > 0 ? dx0 : 0),
-                                    (uint32_t)(dy0 > 0 ? dy0 : 0),
-                                    dw, dh, true);
-         if (class_copy)
-            nv_copy_set_object(&cmd->push, class_copy);
-         else
-            nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+      {
+         bool need_3d = nv_3d_blit_needs_3d_filter(sw, sh, dw, dh,
+            pBlitImageInfo->filter == VK_FILTER_LINEAR,
+            src->vk.samples ? src->vk.samples : 1);
+         bool did_3d = false;
+         if (need_3d) {
+            did_3d = nvrm_cmd_emit_meta_blit_3d(cmd, src, dst, soff, doff,
+               sw, sh, dw, dh, spitch, sbpp,
+               (uint32_t)(dx0 > 0 ? dx0 : 0),
+               (uint32_t)(dy0 > 0 ? dy0 : 0),
+               pBlitImageInfo->filter == VK_FILTER_LINEAR);
+            if (class_copy)
+               nv_copy_set_object(&cmd->push, class_copy);
+            else
+               nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+            (void)did_3d;
+         }
       }
-      /* CE path: min extent (scaled 3D incomplete — still copies overlapping rect) */
+      /* CE path: min extent (covers 1:1 and interim scaled while meta FS exits) */
       w = sw < dw ? sw : dw;
       h = sh < dh ? sh : dh;
       line_len = w * (sbpp < dbpp ? sbpp : dbpp);
