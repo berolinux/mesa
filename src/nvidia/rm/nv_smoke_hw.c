@@ -139,7 +139,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            " g1_notif=0x%x/0x%x"
            " g1_svram=%d g1_bvram=%d g1_sgpu=0x%llx g1_dgpu=0x%llx"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
-           " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_store=%d"
+           " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_qmd_hs=%d g2_store=%d"
            " g2_host_sema=%d g2_hs_mode=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx g2_had_prog=%d"
            " g3_pre=%d g3_submit=%d g3_sema_only=%d g3_host_sema=%d g3_hs_mode=%d g3_class=0x%x"
            " g3_h_3d=0x%x\n",
@@ -166,8 +166,8 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            (unsigned)res->g1_host_gpfifo_put,
            res->g2_preflight_rc, res->g2_engine_alloc_rc,
            (unsigned)res->g2_h_obj_compute,
-           res->g2_submit_rc, res->g2_store_rc, res->g2_host_sema_rc,
-           res->g2_host_sema_mode,
+           res->g2_submit_rc, res->g2_qmd_host_sema_rc, res->g2_store_rc,
+           res->g2_host_sema_rc, res->g2_host_sema_mode,
            (unsigned)res->g2_store_observed,
            (unsigned)res->g2_class_compute,
            (unsigned long long)res->g2_prog_gpu,
@@ -397,6 +397,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g2_host_sema_mode = -1;
    res.g3_host_sema_mode = -1;
    res.g1_ce_host_sema_rc = -1;
+   res.g2_qmd_host_sema_rc = -1;
    res.g1_fault_method_rc = -1;
    res.g1_rc = 1;
    res.g2_rc = 1;
@@ -658,6 +659,43 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             } else {
                res.g2_store_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G2;
+            }
+         } else if (res.g2_submit_rc != 0 && res.g2_submit_rc != -EAGAIN &&
+                    res.g2_host_sema_rc == 0) {
+            /*
+             * Tick85: kickoff works (host sema ok) but QMD sema failed —
+             * try QMD/PCAS without QMD sema, complete via host sema (G1 ce_hs analog).
+             */
+            int qhs_mode = -1;
+            uint32_t qhs_class = 0;
+
+            nv_channel_notifier_reset(ch);
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            if (sc->dst_cpu)
+               memset(sc->dst_cpu, 0, 256);
+            res.g2_qmd_host_sema_rc =
+               nv_channel_g2_compute_smoke_then_host_sema_submit(
+                  ch, 0, prog, regs, sass, sc->qmd_gpu, sc->qmd_cpu,
+                  sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true,
+                  true, true, to, check_notifier, &qhs_mode, &qhs_class);
+            if (sc->dst_cpu)
+               res.g2_store_observed = ((volatile uint32_t *)sc->dst_cpu)[0];
+            if (res.g2_qmd_host_sema_rc == 0) {
+               if (qhs_mode >= 0)
+                  res.g2_host_sema_mode = qhs_mode;
+               if (qhs_class)
+                  res.g2_class_compute = qhs_class;
+               if (expect_store && store_gpu && sc->dst_cpu &&
+                   ((volatile uint32_t *)sc->dst_cpu)[0] != store_imm) {
+                  res.g2_store_rc = -EIO;
+                  res.g2_rc = -EIO;
+               } else {
+                  res.g2_store_rc = 0;
+                  res.g2_submit_rc = 0;
+                  res.g2_rc = 0;
+                  res.slices_ok |= NV_SMOKE_HW_G2;
+               }
             }
          }
          if (nv_smoke_hw_env_verbose())

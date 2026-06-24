@@ -135,6 +135,7 @@ struct nv_smoke_hw_result {
    uint64_t g1_dst_gpu;
    /* G2 phase detail */
    int g2_submit_rc;
+   int g2_qmd_host_sema_rc; /* tick85: QMD/PCAS + host sema (no QMD sema); -1 n/a */
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
    int g2_preflight_rc;
    int g2_host_sema_rc; /* host/GPFIFO sema (run before compute; kickoff gate) */

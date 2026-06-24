@@ -391,7 +391,7 @@ nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
                                         bool check_notifier);
 
 /**
- * G2 smoke submit trying class_compute alternates (bound/info/C7C0/C6C0/...).
+ * G2 smoke submit trying class_compute alternates (bound/info/CCC0..C3C0 pass8).
  * On success sets class_compute_bound and *class_used_out if non-NULL.
  */
 int
@@ -410,6 +410,29 @@ nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
                                                     uint64_t wait_timeout_ns,
                                                     bool check_notifier,
                                                     uint32_t *class_used_out);
+
+/**
+ * G2: QMD/PCAS without QMD sema; completion via host sema (tick85, mirrors G1 ce_hs).
+ * Use when host sema ok but QMD sema path fails.
+ */
+int
+nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
+                                                  uint32_t class_compute,
+                                                  uint64_t program_gpu_addr,
+                                                  uint32_t register_count,
+                                                  uint8_t sass_version,
+                                                  uint64_t qmd_gpu_addr,
+                                                  void *qmd_host,
+                                                  uint64_t sema_gpu_addr,
+                                                  volatile uint32_t *sema_cpu,
+                                                  uint32_t sema_payload,
+                                                  bool sema_reset,
+                                                  bool emit_init_state,
+                                                  bool method_invalidate,
+                                                  uint64_t wait_timeout_ns,
+                                                  bool check_notifier,
+                                                  int *host_sema_mode_out,
+                                                  uint32_t *class_used_out);
 
 /**
  * G2 with caller-filled nv_qmd_desc (e.g. store-imm smoke shader params).

@@ -1962,10 +1962,11 @@ nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
                                                     bool check_notifier,
                                                     uint32_t *class_used_out)
 {
-   uint32_t classes[6];
+   /* Pass8: glcore/cuda/vksc imm counts include C7C0..CCC0 family; try newest-first */
+   uint32_t classes[14];
    unsigned n = 0, i;
    int last = -EINVAL;
-   uint32_t tried[6];
+   uint32_t tried[14];
    unsigned nt = 0;
 
    if (!ch || !qmd_gpu_addr)
@@ -1980,9 +1981,15 @@ nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
    if (ch->info && ch->info->class_compute)
       classes[n++] = ch->info->class_compute;
    classes[n++] = nv_channel_resolve_class_compute(ch, 0);
+   classes[n++] = 0x0000ccc0u;
+   classes[n++] = 0x0000cbc0u;
+   classes[n++] = 0x0000cac0u;
+   classes[n++] = 0x0000c9c0u;
+   classes[n++] = 0x0000c8c0u;
    classes[n++] = 0x0000c7c0u;
    classes[n++] = 0x0000c6c0u;
    classes[n++] = 0x0000c5c0u;
+   classes[n++] = 0x0000c4c0u;
    classes[n++] = 0x0000c3c0u;
 
    for (i = 0; i < n; i++) {
@@ -1996,7 +2003,7 @@ nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
             break;
       if (t < nt)
          continue;
-      if (nt < 6)
+      if (nt < 14)
          tried[nt++] = cc;
 
       r = nv_channel_g2_compute_smoke_sema_submit(ch, cc, program_gpu_addr,
@@ -2013,6 +2020,203 @@ nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
             *class_used_out = cc;
          if (!ch->class_compute_bound)
             ch->class_compute_bound = cc;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+/*
+ * Pass8/tick85: QMD/PCAS dispatch without QMD sema, completion via host sema
+ * (mirrors G1 ce_hs when engine sema fails but kickoff works).
+ * Tries: single push (compute methods + host sema WFI), then two-kick.
+ */
+int
+nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
+                                                  uint32_t class_compute,
+                                                  uint64_t program_gpu_addr,
+                                                  uint32_t register_count,
+                                                  uint8_t sass_version,
+                                                  uint64_t qmd_gpu_addr,
+                                                  void *qmd_host,
+                                                  uint64_t sema_gpu_addr,
+                                                  volatile uint32_t *sema_cpu,
+                                                  uint32_t sema_payload,
+                                                  bool sema_reset,
+                                                  bool emit_init_state,
+                                                  bool method_invalidate,
+                                                  uint64_t wait_timeout_ns,
+                                                  bool check_notifier,
+                                                  int *host_sema_mode_out,
+                                                  uint32_t *class_used_out)
+{
+   struct nv_push push;
+   struct nv_qmd_desc desc, local;
+   uint32_t *map;
+   uint32_t need = 96;
+   uint32_t classes[14];
+   unsigned n = 0, i, nt = 0;
+   uint32_t tried[14];
+   int pre, last = -EINVAL;
+   enum nv_host_sema_mode sema_modes_try[NV_HOST_SEMA_MODE_COUNT];
+   unsigned n_sm = 0, si, mi;
+
+   if (!ch || !qmd_gpu_addr || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (host_sema_mode_out)
+      *host_sema_mode_out = -1;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (class_compute)
+      classes[n++] = class_compute;
+   if (ch->class_compute_bound)
+      classes[n++] = ch->class_compute_bound;
+   if (ch->info && ch->info->class_compute)
+      classes[n++] = ch->info->class_compute;
+   classes[n++] = nv_channel_resolve_class_compute(ch, 0);
+   classes[n++] = 0x0000ccc0u;
+   classes[n++] = 0x0000cbc0u;
+   classes[n++] = 0x0000cac0u;
+   classes[n++] = 0x0000c9c0u;
+   classes[n++] = 0x0000c8c0u;
+   classes[n++] = 0x0000c7c0u;
+   classes[n++] = 0x0000c6c0u;
+   classes[n++] = 0x0000c5c0u;
+   classes[n++] = 0x0000c3c0u;
+
+   if (ch->host_sema_mode_pref >= 0 &&
+       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
+   {
+      static const enum nv_host_sema_mode def_order[] = {
+         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
+         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
+         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
+         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+      };
+      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
+         enum nv_host_sema_mode m = def_order[mi];
+         unsigned j;
+         bool dup = false;
+         for (j = 0; j < n_sm; j++) {
+            if (sema_modes_try[j] == m) {
+               dup = true;
+               break;
+            }
+         }
+         if (!dup)
+            sema_modes_try[n_sm++] = m;
+      }
+   }
+
+   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count, sass_version,
+                          0, 0); /* no QMD sema — host sema completes */
+
+   for (i = 0; i < n; i++) {
+      uint32_t cc = classes[i];
+      unsigned t;
+      int r;
+
+      if (!cc)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == cc)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 14)
+         tried[nt++] = cc;
+
+      local = desc;
+
+      /* Phase 1: single push compute + host sema */
+      for (si = 0; si < n_sm; si++) {
+         enum nv_host_sema_mode sm = sema_modes_try[si];
+
+         if (sema_reset && sema_cpu)
+            sema_cpu[0] = 0;
+
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+
+         nv_push_init(&push, map, need);
+         if (emit_init_state)
+            nv_compute_emit_init_state(&push, cc, 0, 0);
+         else
+            nv_compute_set_object(&push, cc);
+         nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr,
+                                            qmd_host, 0, 0, 0,
+                                            method_invalidate);
+         nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+         nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr,
+                                                 sema_payload, true, sm);
+         nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                         wait_timeout_ns, check_notifier);
+         if (host_sema_mode_out)
+            *host_sema_mode_out = (int)sm;
+         if (r == 0) {
+            ch->host_sema_mode_pref = (int)sm;
+            if (!ch->class_compute_bound)
+               ch->class_compute_bound = cc;
+            if (class_used_out)
+               *class_used_out = cc;
+            return 0;
+         }
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+      }
+
+      /* Phase 2: two kicks — compute then host sema ladder */
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      if (emit_init_state)
+         nv_compute_emit_init_state(&push, cc, 0, 0);
+      else
+         nv_compute_set_object(&push, cc);
+      nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr, qmd_host,
+                                         0, 0, 0, method_invalidate);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_kickoff(ch);
+      if (r) {
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+         continue;
+      }
+
+      r = nv_channel_gpfifo_host_sema_submit_ex(ch, sema_gpu_addr, sema_cpu,
+                                                sema_payload, false,
+                                                wait_timeout_ns,
+                                                check_notifier,
+                                                host_sema_mode_out);
+      if (r == 0) {
+         if (!ch->class_compute_bound)
+            ch->class_compute_bound = cc;
+         if (class_used_out)
+            *class_used_out = cc;
          return 0;
       }
       last = r;
