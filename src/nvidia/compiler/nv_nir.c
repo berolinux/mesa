@@ -697,13 +697,14 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_image_size:
    case nir_intrinsic_bindless_image_size:
+      /* TXQ returns texture/image dimensions from header (binding 0 default) */
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_mov_ri(sb, rd, 0); /* size from descriptor TBD */
+      ok = nv_sass_emit_txq(sb, rd, 0, NV_SASS_TXQ_DIMS);
       break;
 
    case nir_intrinsic_image_samples:
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      ok = nv_sass_emit_txq(sb, rd, 0, NV_SASS_TXQ_TYPE);
       break;
 
    case nir_intrinsic_demote:
@@ -801,16 +802,19 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
       ok = nv_sass_emit_tld(sb, rd, ra, tex_idx);
       break;
    case nir_texop_txs:
+      ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_DIMS);
+      break;
    case nir_texop_query_levels:
+      ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_LOD);
+      break;
    case nir_texop_texture_samples:
-      /* Texture query: return placeholder; full query needs TLD4/TXQ class */
-      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_TYPE);
       break;
    case nir_texop_lod:
-      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_SAMPLER_LOD);
       break;
    case nir_texop_tg4:
-      /* Gather4: use TEX class (gather mode TBD in encoding) */
+      /* Gather4: TEX with gather semantics (component select refined later) */
       ok = nv_sass_emit_tex(sb, rd, ra, tex_idx);
       break;
    case nir_texop_tex:

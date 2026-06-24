@@ -110,9 +110,20 @@ extern "C" {
 /* LDC — load from constant bank c[bank][offset] (Maxwell/Pascal style) */
 #define NV_SASS_LDC_HI_BASE     0xef900000u
 
-/* TEX / TLD — texture fetch / texture load (binding index in instr) */
+/* TEX / TLD / TXQ — texture fetch / load / query (binding index in instr) */
 #define NV_SASS_TEX_HI_BASE     0x86180000u
 #define NV_SASS_TLD_HI_BASE     0x86100000u
+#define NV_SASS_TXQ_HI_BASE     0x86e00000u  /* texture query (dims/levels) */
+/* TXQ query type in instruction low bits (Maxwell/Pascal style approximations) */
+#define NV_SASS_TXQ_DIMS        0  /* width/height/depth */
+#define NV_SASS_TXQ_TYPE        1  /* texture type */
+#define NV_SASS_TXQ_SAMPLE_POS  2
+#define NV_SASS_TXQ_BORDER      3
+#define NV_SASS_TXQ_SAMPLER_POS 4
+#define NV_SASS_TXQ_LOD         5  /* num mip levels */
+#define NV_SASS_TXQ_SAMPLER_LOD 6
+#define NV_SASS_TXQ_SIZE        7  /* size at LOD */
+#define NV_SASS_TXQ_TEX_HEADER  8
 
 /* FSET / ISET — compare producing predicate/register result (approx) */
 #define NV_SASS_FSET_HI_BASE    0x58080000u
@@ -249,6 +260,7 @@ bool nv_sass_emit_mufu(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t mu
 bool nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank, uint16_t offset_dwords);
 bool nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
 bool nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
+bool nv_sass_emit_txq(struct nv_sass_buf *b, uint8_t rd, uint8_t tex_idx, uint8_t query_type);
 bool nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 
 /* Predicated select / compare / control / atomics / barriers */

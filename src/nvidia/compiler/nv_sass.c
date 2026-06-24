@@ -476,6 +476,19 @@ nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
 }
 
 bool
+nv_sass_emit_txq(struct nv_sass_buf *b, uint8_t rd, uint8_t tex_idx,
+                 uint8_t query_type)
+{
+   nv_sass_note_reg(b, rd);
+   b->has_tex = true;
+   /* TXQ Rd, tex#, query — returns width/height/depth/levels depending on type */
+   return nv_sass_emit_raw(b,
+                           (uint32_t)rd | ((uint32_t)(query_type & 0xf) << 8) |
+                           ((uint32_t)tex_idx << 24),
+                           NV_SASS_TXQ_HI_BASE);
+}
+
+bool
 nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
                          uint8_t rb)
 {
