@@ -87,6 +87,13 @@ struct nv_smoke_hw_result {
    int g1_rc;   /* 0 ok, negative errno/fail; 1 = skipped */
    int g2_rc;
    int g3_rc;
+   /* standalone path only (0 = n/a or ok; set by nv_smoke_hw_run_standalone) */
+   int standalone_open_rc;    /* -ENODEV if nv_rm_device_open failed */
+   int standalone_channel_rc; /* -EIO if nv_channel_create failed */
+   int standalone_buf_va_rc;  /* nv_channel_ensure_buffers_gpu_va */
+   int standalone_submit_ready_rc; /* nv_channel_ensure_submit_ready */
+   int standalone_engine_rc;  /* nv_channel_ensure_engine_objects */
+   int standalone_gpu_tried;  /* last gpu_index tried for open */
    uint32_t slices_run;
    uint32_t slices_ok;
    /* G1 phase detail for bring-up (0 = n/a or success path) */

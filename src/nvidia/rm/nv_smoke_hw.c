@@ -161,6 +161,8 @@ smoke_alloc_mapped_bo(struct nv_rm_device *rm, uint64_t size, uint64_t align,
       req.map_gpu_va = true;
       bo = nv_rm_bo_alloc(rm, &req);
       if (bo) {
+         /* Reinforce NVOS46 VAS map (alloc may have kept phys-only on failure) */
+         (void)nv_rm_bo_map_gpu_va(bo);
          if (vram_out)
             *vram_out = vram;
          return bo;
@@ -560,50 +562,96 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
    struct nv_rm_device *rm = NULL;
    struct nv_channel *ch = NULL;
    struct nv_smoke_hw_result res;
-   int r, run_r = -ENODEV;
+   int run_r = -ENODEV;
+   int try_gpu;
+   int open_gi = gpu_index;
+   int buf_va_rc = 0, eng_rc = 0, sready_rc = 0;
 
    memset(&res, 0, sizeof(res));
    res.g1_rc = 1;
    res.g2_rc = 1;
    res.g3_rc = 1;
+   res.standalone_gpu_tried = gpu_index;
 
    if (!slices)
       slices = nv_smoke_hw_env_slices();
    if (!timeout_ns)
       timeout_ns = NV_SMOKE_HW_DEFAULT_TIMEOUT_NS;
 
-   rm = nv_rm_device_open(drm_fd, gpu_index);
+   /*
+    * Try requested gpu_index, then 0, then -1 (first/default).  Agents often
+    * pass gpu=0 while only ctl/device path works with -1.
+    */
+   for (try_gpu = 0; try_gpu < 3 && !rm; try_gpu++) {
+      int gi = (try_gpu == 0) ? gpu_index : (try_gpu == 1) ? 0 : -1;
+      if (try_gpu > 0 && gi == gpu_index)
+         continue;
+      open_gi = gi;
+      res.standalone_gpu_tried = gi;
+      rm = nv_rm_device_open(drm_fd, gi);
+   }
    if (!rm) {
-      if (nv_smoke_hw_env_verbose())
+      res.standalone_open_rc = -ENODEV;
+      if (nv_smoke_hw_env_verbose() || true)
          fprintf(stderr,
                  "nv_smoke_hw_run_standalone: nv_rm_device_open(fd=%d,gpu=%d) failed "
-                 "(need nvidia.ko + /dev/nvidia* / libdrm_nvidia)\n",
-                 drm_fd, gpu_index);
+                 "(need nvidia.ko + /dev/nvidia* + libdrm_nvidia; tried gpu %d/0/-1)\n",
+                 drm_fd, gpu_index, gpu_index);
       if (result_out)
          *result_out = res;
       return -ENODEV;
    }
+   res.standalone_open_rc = 0;
+   res.standalone_gpu_tried = open_gi;
+
+   (void)nv_rm_device_ensure_vaspace(rm);
+   (void)nv_rm_device_ensure_usermode(rm);
 
    /* engine_type 0 => nv_channel_create defaults to GRAPHICS (0x1) */
    ch = nv_channel_create(rm, 0, 0, 0);
    if (!ch) {
-      if (nv_smoke_hw_env_verbose())
-         fprintf(stderr, "nv_smoke_hw_run_standalone: nv_channel_create failed\n");
+      res.standalone_channel_rc = -EIO;
+      fprintf(stderr, "nv_smoke_hw_run_standalone: nv_channel_create failed "
+                      "(schedule/USERD/GPFIFO/engine alloc — see channel code; "
+                      "gpu_index=%d)\n", open_gi);
       nv_rm_device_close(rm);
       if (result_out)
          *result_out = res;
       return -EIO;
    }
+   res.standalone_channel_rc = 0;
+
+   /* Bring-up ladder: VA map channel buffers → engines → schedule/doorbell */
+   buf_va_rc = nv_channel_ensure_buffers_gpu_va(ch);
+   eng_rc = nv_channel_ensure_engine_objects(ch);
+   sready_rc = nv_channel_ensure_submit_ready(ch);
+   res.standalone_buf_va_rc = buf_va_rc;
+   res.standalone_engine_rc = eng_rc;
+   res.standalone_submit_ready_rc = sready_rc;
+   if (nv_smoke_hw_env_verbose() && (buf_va_rc || eng_rc || sready_rc))
+      fprintf(stderr,
+              "nv_smoke_hw_run_standalone: post-create buf_va_rc=%d eng_rc=%d "
+              "submit_ready_rc=%d (non-fatal; G1 preflight may retry)\n",
+              buf_va_rc, eng_rc, sready_rc);
 
    run_r = nv_smoke_hw_run_oneshot(rm, ch, slices, NULL, timeout_ns,
                                    check_notifier, &res);
-   if (result_out)
-      *result_out = res;
-   if (nv_smoke_hw_env_verbose() || run_r != 0)
-      nv_smoke_hw_log_result(&res, "nv_smoke_hw_standalone");
+   /* preserve standalone phase codes in result (oneshot overwrites via stack res) */
+   {
+      struct nv_smoke_hw_result out = res;
+      out.standalone_open_rc = 0;
+      out.standalone_channel_rc = 0;
+      out.standalone_buf_va_rc = buf_va_rc;
+      out.standalone_engine_rc = eng_rc;
+      out.standalone_submit_ready_rc = sready_rc;
+      out.standalone_gpu_tried = open_gi;
+      if (result_out)
+         *result_out = out;
+      if (nv_smoke_hw_env_verbose() || run_r != 0)
+         nv_smoke_hw_log_result(&out, "nv_smoke_hw_standalone");
+   }
 
    nv_channel_destroy(ch);
    nv_rm_device_close(rm);
-   (void)r;
    return run_r;
 }

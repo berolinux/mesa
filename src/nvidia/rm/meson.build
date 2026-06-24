@@ -25,5 +25,5 @@ libnvidia_rm = static_library(
 idep_nvidia_rm = declare_dependency(
   link_with : libnvidia_rm,
   include_directories : include_directories('.', '../common'),
-  dependencies : nv_rm_deps,
+  dependencies : nv_rm_deps + [idep_nvidia_common],
 )
