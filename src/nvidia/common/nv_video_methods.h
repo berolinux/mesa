@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "nv_push.h"
 
@@ -273,6 +274,257 @@ nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *
    nv_push_method(p, NV_NVENC_EXECUTE,
                   fs->execute_flags ? fs->execute_flags : 1u);
    nv_push_wfi(p);
+}
+
+
+
+
+/* ---- Codec picture-setup BO layouts (CPU-filled, GPU-read by NVDEC) ----
+ * Layouts mirror fields the proprietary driver writes before EXECUTE; sizes
+ * and offsets refined incrementally from class traces / binary driver RE.
+ * All multi-byte fields are little-endian; GPU addresses are absolute VA.
+ */
+
+#define NV_NVDEC_H264_PIC_SETUP_DWORDS   64
+#define NV_NVDEC_HEVC_PIC_SETUP_DWORDS   96
+#define NV_NVDEC_AV1_PIC_SETUP_DWORDS    128
+#define NV_NVDEC_MAX_PIC_SETUP_BYTES     (NV_NVDEC_AV1_PIC_SETUP_DWORDS * 4)
+
+/* H.264 picture parameter block (subset; first 64 dwords) */
+struct nv_nvdec_h264_pic_setup {
+   uint32_t width_mb;            /* pic width in macroblocks */
+   uint32_t height_mb;
+   uint32_t frame_num;
+   uint32_t field_pic_flag;      /* 0=frame, 1=field */
+   uint32_t bottom_field_flag;
+   uint32_t mbaff_frame_flag;
+   uint32_t ref_pic_flag;
+   uint32_t constrained_intra_pred_flag;
+   uint32_t weighted_pred_flag;
+   uint32_t weighted_bipred_idc;
+   uint32_t frame_mbs_only_flag;
+   uint32_t transform_8x8_mode_flag;
+   uint32_t chroma_format_idc;
+   uint32_t l0_ref_count;        /* active L0 refs */
+   uint32_t l1_ref_count;
+   uint32_t log2_max_frame_num_minus4;
+   uint32_t pic_order_cnt_type;
+   uint32_t log2_max_pic_order_cnt_lsb_minus4;
+   uint32_t delta_pic_order_always_zero_flag;
+   uint32_t direct_8x8_inference_flag;
+   uint32_t entropy_coding_mode_flag;
+   uint32_t pic_order_present_flag;
+   uint32_t deblocking_filter_control_present_flag;
+   uint32_t redundant_pic_cnt_present_flag;
+   uint32_t num_slice_groups_minus1;
+   uint32_t slice_group_map_type;
+   uint32_t num_ref_idx_l0_active_minus1;
+   uint32_t num_ref_idx_l1_active_minus1;
+   uint32_t pic_init_qp_minus26;
+   uint32_t chroma_qp_index_offset;
+   uint32_t second_chroma_qp_index_offset;
+   uint32_t curr_pic_idx;        /* DPB slot for current picture */
+   uint32_t dpb_luma_pitch;
+   uint32_t dpb_chroma_pitch;
+   uint64_t dpb_luma_top[16];    /* reference frame VAs (top field) */
+   uint64_t dpb_luma_bot[16];
+   uint64_t dpb_chroma_top[16];
+   uint64_t dpb_chroma_bot[16];
+   uint32_t reserved[8];
+};
+
+/* HEVC picture parameter block (subset) */
+struct nv_nvdec_hevc_pic_setup {
+   uint32_t pic_width_in_luma_samples;
+   uint32_t pic_height_in_luma_samples;
+   uint32_t log2_min_luma_coding_block_size_minus3;
+   uint32_t log2_diff_max_min_luma_coding_block_size;
+   uint32_t log2_min_transform_block_size_minus2;
+   uint32_t log2_diff_max_min_transform_block_size;
+   uint32_t max_transform_hierarchy_depth_intra;
+   uint32_t max_transform_hierarchy_depth_inter;
+   uint32_t pcm_enabled_flag;
+   uint32_t separate_colour_plane_flag;
+   uint32_t chroma_format_idc;
+   uint32_t bit_depth_luma_minus8;
+   uint32_t bit_depth_chroma_minus8;
+   uint32_t log2_max_pic_order_cnt_lsb_minus4;
+   uint32_t num_short_term_ref_pic_sets;
+   uint32_t num_long_term_ref_pics_sps;
+   uint32_t num_ref_idx_l0_default_active_minus1;
+   uint32_t num_ref_idx_l1_default_active_minus1;
+   uint32_t init_qp_minus26;
+   uint32_t dependent_slice_segments_enabled_flag;
+   uint32_t sign_data_hiding_enabled_flag;
+   uint32_t amp_enabled_flag;
+   uint32_t sample_adaptive_offset_enabled_flag;
+   uint32_t pcm_loop_filter_disabled_flag;
+   uint32_t strong_intra_smoothing_enabled_flag;
+   uint32_t temporal_mvp_enabled_flag;
+   uint32_t curr_pic_idx;
+   uint32_t dpb_luma_pitch;
+   uint32_t dpb_chroma_pitch;
+   uint64_t dpb_luma[16];
+   uint64_t dpb_chroma[16];
+   uint32_t reserved[16];
+};
+
+/* AV1 picture parameter block (subset) */
+struct nv_nvdec_av1_pic_setup {
+   uint32_t width;
+   uint32_t height;
+   uint32_t superres_denom;
+   uint32_t use_128x128_superblock;
+   uint32_t intra_only;
+   uint32_t allow_high_precision_mv;
+   uint32_t allow_warped_motion;
+   uint32_t enable_cdef;
+   uint32_t enable_restoration;
+   uint32_t enable_superres;
+   uint32_t bit_depth_minus8;
+   uint32_t mono_chrome;
+   uint32_t subsampling_x;
+   uint32_t subsampling_y;
+   uint32_t frame_type;
+   uint32_t show_frame;
+   uint32_t error_resilient_mode;
+   uint32_t disable_cdf_update;
+   uint32_t allow_screen_content_tools;
+   uint32_t force_integer_mv;
+   uint32_t coded_lossless;
+   uint32_t use_superres;
+   uint32_t refresh_frame_flags;
+   uint32_t curr_pic_idx;
+   uint32_t primary_ref_frame;
+   uint32_t order_hint;
+   uint32_t dpb_luma_pitch;
+   uint32_t dpb_chroma_pitch;
+   uint64_t dpb_luma[8];
+   uint64_t dpb_chroma[8];
+   uint64_t film_grain_params_addr; /* optional sideband BO */
+   uint32_t reserved[24];
+};
+
+/* Serialise H.264 setup into a dword array (host endian) for CPU map/upload */
+static inline void
+nv_nvdec_h264_pic_setup_pack(const struct nv_nvdec_h264_pic_setup *ps,
+                             uint32_t *dst, uint32_t dst_dwords)
+{
+   uint32_t i, n = NV_NVDEC_H264_PIC_SETUP_DWORDS;
+   const uint32_t *src;
+   if (!ps || !dst || !dst_dwords)
+      return;
+   if (n > dst_dwords)
+      n = dst_dwords;
+   src = (const uint32_t *)ps;
+   for (i = 0; i < n; i++)
+      dst[i] = src[i];
+}
+
+static inline void
+nv_nvdec_hevc_pic_setup_pack(const struct nv_nvdec_hevc_pic_setup *ps,
+                             uint32_t *dst, uint32_t dst_dwords)
+{
+   uint32_t i, n = NV_NVDEC_HEVC_PIC_SETUP_DWORDS;
+   const uint32_t *src;
+   if (!ps || !dst || !dst_dwords)
+      return;
+   if (n > dst_dwords)
+      n = dst_dwords;
+   src = (const uint32_t *)ps;
+   for (i = 0; i < n; i++)
+      dst[i] = src[i];
+}
+
+static inline void
+nv_nvdec_av1_pic_setup_pack(const struct nv_nvdec_av1_pic_setup *ps,
+                            uint32_t *dst, uint32_t dst_dwords)
+{
+   uint32_t i, n = NV_NVDEC_AV1_PIC_SETUP_DWORDS;
+   const uint32_t *src;
+   if (!ps || !dst || !dst_dwords)
+      return;
+   if (n > dst_dwords)
+      n = dst_dwords;
+   src = (const uint32_t *)ps;
+   for (i = 0; i < n; i++)
+      dst[i] = src[i];
+}
+
+/* Build frame_setup + write pic_setup BO from codec struct; returns 0 on success */
+static inline int
+nv_nvdec_fill_frame_from_h264(struct nv_nvdec_frame_setup *fs,
+                              const struct nv_nvdec_h264_pic_setup *ps,
+                              uint64_t pic_setup_gpu_addr,
+                              void *pic_setup_cpu_map,
+                              uint32_t pic_setup_map_bytes,
+                              uint64_t bitstream_gpu_addr,
+                              uint32_t bitstream_size,
+                              uint32_t picture_index)
+{
+   if (!fs || !ps)
+      return -1;
+   memset(fs, 0, sizeof(*fs));
+   fs->app_id = NV_NVDEC_APP_ID_H264;
+   fs->picture_index = picture_index;
+   fs->pic_setup_gpu_addr = pic_setup_gpu_addr;
+   fs->bitstream_gpu_addr = bitstream_gpu_addr;
+   fs->bitstream_size = bitstream_size;
+   fs->execute_flags = 1;
+   if (pic_setup_cpu_map && pic_setup_map_bytes >= NV_NVDEC_H264_PIC_SETUP_DWORDS * 4)
+      nv_nvdec_h264_pic_setup_pack(ps, (uint32_t *)pic_setup_cpu_map,
+                                   pic_setup_map_bytes / 4);
+   return 0;
+}
+
+static inline int
+nv_nvdec_fill_frame_from_hevc(struct nv_nvdec_frame_setup *fs,
+                              const struct nv_nvdec_hevc_pic_setup *ps,
+                              uint64_t pic_setup_gpu_addr,
+                              void *pic_setup_cpu_map,
+                              uint32_t pic_setup_map_bytes,
+                              uint64_t bitstream_gpu_addr,
+                              uint32_t bitstream_size,
+                              uint32_t picture_index)
+{
+   if (!fs || !ps)
+      return -1;
+   memset(fs, 0, sizeof(*fs));
+   fs->app_id = NV_NVDEC_APP_ID_HEVC;
+   fs->picture_index = picture_index;
+   fs->pic_setup_gpu_addr = pic_setup_gpu_addr;
+   fs->bitstream_gpu_addr = bitstream_gpu_addr;
+   fs->bitstream_size = bitstream_size;
+   fs->execute_flags = 1;
+   if (pic_setup_cpu_map && pic_setup_map_bytes >= NV_NVDEC_HEVC_PIC_SETUP_DWORDS * 4)
+      nv_nvdec_hevc_pic_setup_pack(ps, (uint32_t *)pic_setup_cpu_map,
+                                   pic_setup_map_bytes / 4);
+   return 0;
+}
+
+static inline int
+nv_nvdec_fill_frame_from_av1(struct nv_nvdec_frame_setup *fs,
+                             const struct nv_nvdec_av1_pic_setup *ps,
+                             uint64_t pic_setup_gpu_addr,
+                             void *pic_setup_cpu_map,
+                             uint32_t pic_setup_map_bytes,
+                             uint64_t bitstream_gpu_addr,
+                             uint32_t bitstream_size,
+                             uint32_t picture_index)
+{
+   if (!fs || !ps)
+      return -1;
+   memset(fs, 0, sizeof(*fs));
+   fs->app_id = NV_NVDEC_APP_ID_AV1;
+   fs->picture_index = picture_index;
+   fs->pic_setup_gpu_addr = pic_setup_gpu_addr;
+   fs->bitstream_gpu_addr = bitstream_gpu_addr;
+   fs->bitstream_size = bitstream_size;
+   fs->execute_flags = 1;
+   if (pic_setup_cpu_map && pic_setup_map_bytes >= NV_NVDEC_AV1_PIC_SETUP_DWORDS * 4)
+      nv_nvdec_av1_pic_setup_pack(ps, (uint32_t *)pic_setup_cpu_map,
+                                  pic_setup_map_bytes / 4);
+   return 0;
 }
 
 
