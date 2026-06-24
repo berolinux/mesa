@@ -46,6 +46,14 @@ extern "C" {
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED     0x1
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED 0x2
 #define NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE                (1u << 2)
+/* LAUNCH_DMA sema type in bits 4:3 (clc6b5.h) */
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_NONE              0x0
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD  (0x1u << 3)
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_FOUR_WORD (0x2u << 3)
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_COND_INTR (0x3u << 3)
+#define NVC6B5_LAUNCH_DMA_INTERRUPT_TYPE_NONE              0x0
+#define NVC6B5_LAUNCH_DMA_INTERRUPT_TYPE_BLOCKING          (0x1u << 5)
+#define NVC6B5_LAUNCH_DMA_INTERRUPT_TYPE_NON_BLOCKING      (0x2u << 5)
 #define NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_BLOCKLINEAR    0
 #define NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH          (1u << 7)
 #define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_BLOCKLINEAR    0
@@ -56,6 +64,8 @@ extern "C" {
 #define NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL                 0
 #define NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL                 0
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE          0x0
+/* sema reduction bits 17:14 / 19 — only needed for reduction sema modes */
+#define NVC6B5_LAUNCH_DMA_SEMAPHORE_REDUCTION_ENABLE_TRUE  (1u << 19)
 
 /* REMAP constant-fill path (clc6b5.h SET_REMAP_*) */
 #define NVC6B5_SET_REMAP_CONST_A            0x0700
@@ -82,6 +92,201 @@ nv_copy_set_object(struct nv_push *p, uint32_t class_copy)
 {
    nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
    nv_push_set_object(p, class_copy);
+}
+
+/**
+ * Program CE semaphore target (SET_SEMAPHORE_A/B + PAYLOAD) for a subsequent
+ * LAUNCH_DMA with SEMAPHORE_TYPE_RELEASE_ONE_WORD (or four-word) set.
+ * sema_gpu_addr is a 4-byte (or 16-byte for four-word) report location in VAS.
+ */
+static inline void
+nv_copy_set_semaphore(struct nv_push *p, uint64_t sema_gpu_addr,
+                      uint32_t payload)
+{
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_push_method(p, NVC6B5_SET_SEMAPHORE_A,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_SET_SEMAPHORE_B,
+                  (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_SET_SEMAPHORE_PAYLOAD, payload);
+}
+
+/** OR sema one-word release into an existing LAUNCH_DMA control dword. */
+static inline uint32_t
+nv_copy_launch_dma_with_sema_one_word(uint32_t launch_dma)
+{
+   return (launch_dma & ~(0x3u << 3)) |
+          NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+}
+
+/**
+ * Emit sema A/B/payload then a no-transfer LAUNCH_DMA that only releases the
+ * semaphore (completion marker without copy). Useful after a prior CE op when
+ * the previous LAUNCH_DMA did not request sema, or as a standalone CE fence.
+ */
+static inline void
+nv_copy_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload)
+{
+   uint32_t launch;
+
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_copy_set_semaphore(p, sema_gpu_addr, payload);
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * Linear 1D buffer copy with CE sema release on the same LAUNCH_DMA (one-word
+ * payload written when DMA completes). Prefer this over copy + host sema for
+ * CE-only vertical-slice bring-up (CPU polls sema dword).
+ */
+static inline void
+nv_copy_emit_buffer_copy_with_sema(struct nv_push *p,
+                                   uint64_t src_gpu_addr,
+                                   uint64_t dst_gpu_addr,
+                                   uint32_t size_bytes,
+                                   uint64_t sema_gpu_addr,
+                                   uint32_t sema_payload)
+{
+   uint32_t launch;
+
+   if (!p || !size_bytes)
+      return;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_one_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/** REMAP u32 fill with optional CE sema on the final LAUNCH_DMA chunk. */
+static inline void
+nv_copy_emit_remap_fill_u32_with_sema(struct nv_push *p,
+                                      uint64_t dst_gpu_addr,
+                                      uint32_t size_bytes,
+                                      uint32_t fill_data,
+                                      uint64_t sema_gpu_addr,
+                                      uint32_t sema_payload)
+{
+   uint32_t launch;
+   uint32_t remain = size_bytes & ~3u;
+   uint64_t addr = dst_gpu_addr;
+
+   if (!p || !remain || !dst_gpu_addr)
+      return;
+
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_A, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_B, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_COMPONENTS, NVC6B5_REMAP_COMPONENTS_FILL_U32);
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   while (remain) {
+      uint32_t chunk = remain > (16u * 1024u * 1024u) ? (16u * 1024u * 1024u) : remain;
+      uint32_t next_remain;
+      bool last;
+
+      chunk &= ~3u;
+      if (!chunk)
+         break;
+      next_remain = remain - chunk;
+      last = (next_remain == 0);
+
+      nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                     (uint32_t)(addr >> 32) & 0x1ffff);
+      nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                     (uint32_t)(addr & 0xffffffffu));
+      nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                     (uint32_t)(addr >> 32) & 0x1ffff);
+      nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                     (uint32_t)(addr & 0xffffffffu));
+      nv_push_method(p, NVC6B5_PITCH_IN, chunk);
+      nv_push_method(p, NVC6B5_PITCH_OUT, chunk);
+      nv_push_method(p, NVC6B5_LINE_LENGTH_IN, chunk);
+      nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+      launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+               NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+               NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+               NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
+               NVC6B5_LAUNCH_DMA_REMAP_ENABLE_TRUE;
+      if (last && sema_gpu_addr)
+         launch = nv_copy_launch_dma_with_sema_one_word(launch);
+      nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+
+      addr += chunk;
+      remain = next_remain;
+   }
+}
+
+/** SET_OBJECT + linear copy + CE sema (no host WFI; sema is the fence). */
+static inline void
+nv_copy_push_buffer_copy_sema(struct nv_push *p, uint32_t class_copy,
+                              uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                              uint32_t size_bytes,
+                              uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_buffer_copy_with_sema(p, src_gpu_addr, dst_gpu_addr,
+                                      size_bytes, sema_gpu_addr, sema_payload);
+}
+
+/** SET_OBJECT + REMAP fill + CE sema on last chunk. */
+static inline void
+nv_copy_push_remap_fill_u32_sema(struct nv_push *p, uint32_t class_copy,
+                                 uint64_t dst_gpu_addr, uint32_t size_bytes,
+                                 uint32_t fill_data,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_remap_fill_u32_with_sema(p, dst_gpu_addr, size_bytes,
+                                         fill_data, sema_gpu_addr,
+                                         sema_payload);
+}
+
+/**
+ * Vertical-slice helper: set CE object, linear copy, sema release payload,
+ * and return without WFI. Caller submits via channel and polls sema_cpu[0].
+ */
+static inline void
+nv_copy_push_smoke_copy_sema(struct nv_push *p, uint32_t class_copy,
+                             uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                             uint32_t size_bytes,
+                             uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_copy_push_buffer_copy_sema(p, class_copy, src_gpu_addr, dst_gpu_addr,
+                                 size_bytes, sema_gpu_addr, sema_payload);
 }
 
 /**

@@ -8,6 +8,7 @@
 #include "nv_fence.h"
 
 #include "nv_3d_methods.h"
+#include "nv_copy_methods.h"
 #include "nv_rm.h"
 
 #include <stdlib.h>
@@ -100,6 +101,29 @@ nv_fence_emit_host_signal(struct nv_fence *f, struct nv_push *p)
    f->seq++;
    f->signaled = false;
    nv_push_host_semaphore_release(p, f->sema_gpu_addr, f->seq);
+   return f->seq;
+}
+
+uint32_t
+nv_fence_alloc_seq(struct nv_fence *f)
+{
+   if (!f)
+      return 0;
+   f->seq++;
+   f->signaled = false;
+   return f->seq;
+}
+
+uint32_t
+nv_fence_emit_ce_signal(struct nv_fence *f, struct nv_push *p)
+{
+   if (!f || !p || !f->sema_gpu_addr)
+      return 0;
+
+   f->seq++;
+   f->signaled = false;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_semaphore_release(p, f->sema_gpu_addr, f->seq);
    return f->seq;
 }
 

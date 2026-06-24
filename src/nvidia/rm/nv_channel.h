@@ -123,6 +123,51 @@ int
 nv_channel_notifier_status(struct nv_channel *ch, uint16_t *status_out,
                            uint32_t *info32_out);
 
+/** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
+void
+nv_channel_notifier_reset(struct nv_channel *ch);
+
+/**
+ * Advance push cursor by dwords written via nv_channel_push_begin() pointer
+ * (or direct writes into the returned region). Call before kickoff/flush.
+ */
+void
+nv_channel_push_advance(struct nv_channel *ch, uint32_t dwords_written);
+
+/** GPFIFO put index (for smoke/debug). */
+static inline uint32_t
+nv_channel_gpfifo_put(const struct nv_channel *ch)
+{
+   return ch ? ch->gpfifo_put : 0;
+}
+
+/**
+ * Kickoff pending push, optionally wait GPFIFO idle, then check error notifier.
+ * wait_timeout_ns: 0 = kick only (no GPFIFO wait); notifier still checked if
+ * check_notifier is true (non-blocking peek).
+ * Returns first error among kick / wait / notifier.
+ */
+int
+nv_channel_submit_wait_check(struct nv_channel *ch, uint64_t wait_timeout_ns,
+                             bool check_notifier, bool clear_notifier_on_ok);
+
+/**
+ * Poll a host-mappable sema dword (GEQ payload). Used after CE sema-release
+ * LAUNCH_DMA when sema BO is CPU-mapped. timeout_ns 0 = try once.
+ */
+int
+nv_channel_wait_sema_cpu(volatile uint32_t *sema_cpu, uint32_t payload,
+                         uint64_t timeout_ns);
+
+/**
+ * Full vertical-slice wait: GPFIFO drain + sema GEQ + optional notifier check.
+ * sema_cpu may be NULL (skip sema wait). payload 0 skips sema wait.
+ */
+int
+nv_channel_submit_wait_sema(struct nv_channel *ch,
+                            volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                            uint64_t wait_timeout_ns, bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

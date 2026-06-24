@@ -48,6 +48,19 @@ nv_fence_emit_3d_signal(struct nv_fence *f, struct nv_push *p);
 uint32_t
 nv_fence_emit_host_signal(struct nv_fence *f, struct nv_push *p);
 
+/**
+ * CE sema release via NVC6B5 SET_SEMAPHORE + LAUNCH_DMA (no-transfer or
+ * caller already programmed copy). Increments fence seq and emits standalone
+ * CE sema-only LAUNCH_DMA; pair with nv_copy_emit_buffer_copy_with_sema when
+ * sema should ride the same DMA as the copy.
+ */
+uint32_t
+nv_fence_emit_ce_signal(struct nv_fence *f, struct nv_push *p);
+
+/** Bump seq and return payload without emitting (for use with copy_with_sema). */
+uint32_t
+nv_fence_alloc_seq(struct nv_fence *f);
+
 int
 nv_fence_wait(struct nv_fence *f, uint32_t seq, uint64_t timeout_ns);
 
@@ -79,6 +92,15 @@ nv_fence_signal_next_host(struct nv_fence *f, struct nv_push *p)
    if (!f || !p)
       return 0;
    return nv_fence_emit_host_signal(f, p);
+}
+
+/** CE sema path for copy-only / CE vertical slice (NVC6B5 sema release). */
+static inline uint32_t
+nv_fence_signal_next_ce(struct nv_fence *f, struct nv_push *p)
+{
+   if (!f || !p)
+      return 0;
+   return nv_fence_emit_ce_signal(f, p);
 }
 
 /**

@@ -423,3 +423,108 @@ nv_channel_check_notifier(struct nv_channel *ch, bool clear_on_ok,
    return nvidia_notifier_wait(ch->error_notifier, clear_on_ok, timeout_ns);
 #endif
 }
+
+void
+nv_channel_notifier_reset(struct nv_channel *ch)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+#else
+   if (!ch || !ch->error_notifier)
+      return;
+   nvidia_notifier_reset(ch->error_notifier);
+#endif
+}
+
+void
+nv_channel_push_advance(struct nv_channel *ch, uint32_t dwords_written)
+{
+   if (!ch || !dwords_written)
+      return;
+   if (ch->push_dw_used + dwords_written > ch->push_dw_size)
+      dwords_written = ch->push_dw_size - ch->push_dw_used;
+   ch->push_dw_used += dwords_written;
+}
+
+int
+nv_channel_submit_wait_check(struct nv_channel *ch, uint64_t wait_timeout_ns,
+                             bool check_notifier, bool clear_notifier_on_ok)
+{
+   int r;
+
+   if (!ch)
+      return -EINVAL;
+
+   r = nv_channel_flush(ch);
+   if (r)
+      return r;
+
+   if (wait_timeout_ns) {
+      r = nv_channel_wait_idle(ch, wait_timeout_ns);
+      if (r)
+         return r;
+   }
+
+   if (check_notifier) {
+      if (wait_timeout_ns)
+         r = nv_channel_check_notifier(ch, clear_notifier_on_ok,
+                                       wait_timeout_ns);
+      else
+         r = nv_channel_notifier_status(ch, NULL, NULL);
+      if (r == -EAGAIN && !wait_timeout_ns)
+         return 0; /* kick-only: in-progress is ok */
+      if (r)
+         return r;
+   }
+   return 0;
+}
+
+int
+nv_channel_wait_sema_cpu(volatile uint32_t *sema_cpu, uint32_t payload,
+                         uint64_t timeout_ns)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)sema_cpu; (void)payload; (void)timeout_ns;
+   return -ENOSYS;
+#else
+   if (!sema_cpu || !payload)
+      return 0;
+   return nvidia_sema_wait_geq(sema_cpu, payload, timeout_ns);
+#endif
+}
+
+int
+nv_channel_submit_wait_sema(struct nv_channel *ch,
+                            volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                            uint64_t wait_timeout_ns, bool check_notifier)
+{
+   int r;
+
+   if (!ch)
+      return -EINVAL;
+
+   nv_channel_notifier_reset(ch);
+
+   r = nv_channel_flush(ch);
+   if (r)
+      return r;
+
+   if (sema_cpu && sema_payload) {
+      r = nv_channel_wait_sema_cpu(sema_cpu, sema_payload, wait_timeout_ns);
+      if (r)
+         return r;
+   } else if (wait_timeout_ns) {
+      r = nv_channel_wait_idle(ch, wait_timeout_ns);
+      if (r)
+         return r;
+   }
+
+   if (check_notifier) {
+      r = nv_channel_notifier_status(ch, NULL, NULL);
+      if (r == -EAGAIN)
+         return 0;
+      if (r)
+         return r;
+   }
+   return 0;
+}

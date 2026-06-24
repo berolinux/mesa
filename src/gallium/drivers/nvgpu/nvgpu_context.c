@@ -1161,9 +1161,18 @@ nvgpu_resource_copy_region(struct pipe_context *pctx,
       size = (uint32_t)src_box->width;
       if (!size)
          return;
-      if (!nvgpu_push_start(ctx, &push, 64))
+      if (!nvgpu_push_start(ctx, &push, 80))
          return;
-      nv_copy_push_buffer_copy(&push, class_copy, saddr, daddr, size);
+      /* CE sema on final LAUNCH_DMA when fence BO exists (CPU can wait seq). */
+      if (ctx->fence && ctx->fence->sema_gpu_addr) {
+         uint32_t payload = nv_fence_alloc_seq(ctx->fence);
+         nv_copy_push_buffer_copy_sema(&push, class_copy, saddr, daddr, size,
+                                       ctx->fence->sema_gpu_addr, payload);
+         ctx->last_fence_seq = payload;
+         nv_push_wfi(&push);
+      } else {
+         nv_copy_push_buffer_copy(&push, class_copy, saddr, daddr, size);
+      }
       nvgpu_push_finish(ctx, &push, true);
       return;
    }
@@ -1261,7 +1270,9 @@ nvgpu_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
          nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
       nv_push_wfi(&push);
       seq = nv_fence_emit_3d_signal(ctx->fence, &push);
-      /* Also host sema as belt-and-suspenders for engines that skip 3D report */
+      /* CE sema if 3D report unavailable; host sema as last resort */
+      if (!seq)
+         seq = nv_fence_emit_ce_signal(ctx->fence, &push);
       if (!seq)
          seq = nv_fence_emit_host_signal(ctx->fence, &push);
       ctx->last_fence_seq = seq ? seq : ctx->fence->seq;

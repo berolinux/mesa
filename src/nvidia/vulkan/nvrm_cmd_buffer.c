@@ -1495,10 +1495,25 @@ nvrm_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
 
    for (i = 0; i < pCopyBufferInfo->regionCount; i++) {
       const VkBufferCopy2 *r = &pCopyBufferInfo->pRegions[i];
-      nv_copy_emit_buffer_copy(&cmd->push,
-                               src_base + r->srcOffset,
-                               dst_base + r->dstOffset,
-                               (uint32_t)r->size, 0, 0, 1);
+      bool last = (i + 1 == pCopyBufferInfo->regionCount);
+      /* Final region: ride CE sema on LAUNCH_DMA when queue submit_fence exists
+       * (vertical-slice completion without host sema / WFI alone). */
+      if (last && cmd->device->queue && cmd->device->queue->submit_fence &&
+          cmd->device->queue->submit_fence->sema_gpu_addr) {
+         struct nv_fence *sf = cmd->device->queue->submit_fence;
+         uint32_t payload = nv_fence_alloc_seq(sf);
+         nv_copy_emit_buffer_copy_with_sema(&cmd->push,
+                                            src_base + r->srcOffset,
+                                            dst_base + r->dstOffset,
+                                            (uint32_t)r->size,
+                                            sf->sema_gpu_addr, payload);
+         cmd->device->queue->submit_seq = payload;
+      } else {
+         nv_copy_emit_buffer_copy(&cmd->push,
+                                  src_base + r->srcOffset,
+                                  dst_base + r->dstOffset,
+                                  (uint32_t)r->size, 0, 0, 1);
+      }
    }
    nv_push_wfi(&cmd->push);
 }
