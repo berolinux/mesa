@@ -584,11 +584,9 @@ nvrm_CmdBeginConditionalRenderingEXT(
    cmd->cond_render_gpu_addr = addr;
    cmd->cond_render_inverted = inverted;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   /* USE_RENDER_ENABLE: hardware compares memory word; inverted uses always-false
-    * when predicate is non-zero is approximated via override (refined later). */
-   nv_3d_set_render_enable_memory(&cmd->push, addr,
-      inverted ? NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_FALSE
-               : NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE);
+   /* Normal: render if *addr != 0 (CONDITIONAL mode).
+    * Inverted: render if *addr == 0 (RENDER_IF_EQUAL with zero compare). */
+   nv_3d_set_conditional_render(&cmd->push, addr, inverted);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -599,9 +597,228 @@ nvrm_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
       return;
    cmd->cond_render_active = false;
    cmd->cond_render_gpu_addr = 0;
+   cmd->cond_render_inverted = false;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_3d_set_render_enable_memory(&cmd->push, 0,
-      NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+   nv_3d_set_conditional_render(&cmd->push, 0, false);
+}
+
+/* ---- Buffer fill / update / blit / resolve via copy engine ---- */
+
+/* Host-side dword pattern fill via indirect_shadow_bo + CE copies (no REMAP
+ * fill class wired yet).  For each 4-byte stride we stage data in shadow BO. */
+static void
+nvrm_cmd_fill_via_shadow(struct nvrm_cmd_buffer *cmd, uint64_t dst_addr,
+                         VkDeviceSize size_bytes, uint32_t data)
+{
+   const struct nv_device_info *info = cmd->device ? cmd->device->info : NULL;
+   uint32_t class_copy = info ? info->class_copy : 0;
+   VkDeviceSize remain = size_bytes & ~3ull;
+   uint64_t addr = dst_addr;
+   uint32_t *shadow;
+   uint32_t chunk_dwords, i;
+   uint64_t shadow_gpu;
+
+   if (!cmd->indirect_shadow_map || !cmd->indirect_shadow_bo || remain < 4)
+      return;
+   shadow = (uint32_t *)cmd->indirect_shadow_map;
+   shadow_gpu = nv_rm_bo_gpu_offset(cmd->indirect_shadow_bo);
+   chunk_dwords = cmd->indirect_shadow_bo_size / 4;
+   if (!chunk_dwords)
+      return;
+   if (class_copy)
+      nv_copy_set_object(&cmd->push, class_copy);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+   while (remain >= 4) {
+      uint32_t n = (uint32_t)(remain / 4);
+      if (n > chunk_dwords)
+         n = chunk_dwords;
+      for (i = 0; i < n; i++)
+         shadow[i] = data;
+      nv_copy_emit_buffer_copy(&cmd->push, shadow_gpu, addr, n * 4, 0, 0, 1);
+      addr += n * 4ull;
+      remain -= n * 4ull;
+   }
+   nv_push_wfi(&cmd->push);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                   VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, dst, dstBuffer);
+   uint64_t addr;
+
+   if (!cmd || !cmd->push_map || !dst)
+      return;
+   addr = (dst->addr ? dst->addr : (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0))
+          + dstOffset;
+   if (!addr)
+      return;
+   if (size == VK_WHOLE_SIZE)
+      size = dst->vk.size > dstOffset ? dst->vk.size - dstOffset : 4;
+   nvrm_cmd_fill_via_shadow(cmd, addr, size, data);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                     VkDeviceSize dstOffset, VkDeviceSize dataSize,
+                     const void *pData)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, dst, dstBuffer);
+   uint64_t addr;
+   const struct nv_device_info *info;
+   uint32_t class_copy;
+
+   if (!cmd || !cmd->push_map || !dst || !pData || !dataSize)
+      return;
+   info = cmd->device ? cmd->device->info : NULL;
+   class_copy = info ? info->class_copy : 0;
+   addr = (dst->addr ? dst->addr : (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0))
+          + dstOffset;
+   if (!addr)
+      return;
+   /* Stage through host-mappable shadow then CE copy (max 64 KiB per Vulkan) */
+   if (cmd->indirect_shadow_map && cmd->indirect_shadow_bo &&
+       dataSize <= cmd->indirect_shadow_bo_size) {
+      uint64_t shadow = nv_rm_bo_gpu_offset(cmd->indirect_shadow_bo);
+      memcpy(cmd->indirect_shadow_map, pData, (size_t)dataSize);
+      if (class_copy)
+         nv_copy_set_object(&cmd->push, class_copy);
+      else
+         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_buffer_copy(&cmd->push, shadow, addr, (uint32_t)dataSize,
+                               0, 0, 1);
+      nv_push_wfi(&cmd->push);
+   } else if (cmd->push_const_map && cmd->push_const_bo &&
+              dataSize <= cmd->push_const_bo_size) {
+      uint64_t shadow = nv_rm_bo_gpu_offset(cmd->push_const_bo);
+      memcpy(cmd->push_const_map, pData, (size_t)dataSize);
+      if (class_copy)
+         nv_copy_set_object(&cmd->push, class_copy);
+      else
+         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_buffer_copy(&cmd->push, shadow, addr, (uint32_t)dataSize,
+                               0, 0, 1);
+      nv_push_wfi(&cmd->push);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
+                   const VkBlitImageInfo2 *pBlitImageInfo)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_image, src, pBlitImageInfo ? pBlitImageInfo->srcImage : VK_NULL_HANDLE);
+   VK_FROM_HANDLE(nvrm_image, dst, pBlitImageInfo ? pBlitImageInfo->dstImage : VK_NULL_HANDLE);
+   const struct nv_device_info *info;
+   uint32_t class_copy;
+   uint32_t r;
+
+   if (!cmd || !cmd->push_map || !pBlitImageInfo || !src || !dst)
+      return;
+   info = cmd->device ? cmd->device->info : NULL;
+   class_copy = info ? info->class_copy : 0;
+   if (class_copy)
+      nv_copy_set_object(&cmd->push, class_copy);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+
+   for (r = 0; r < pBlitImageInfo->regionCount; r++) {
+      const VkImageBlit2 *b = &pBlitImageInfo->pRegions[r];
+      int32_t sx0 = b->srcOffsets[0].x, sy0 = b->srcOffsets[0].y;
+      int32_t sx1 = b->srcOffsets[1].x, sy1 = b->srcOffsets[1].y;
+      int32_t dx0 = b->dstOffsets[0].x, dy0 = b->dstOffsets[0].y;
+      int32_t dx1 = b->dstOffsets[1].x, dy1 = b->dstOffsets[1].y;
+      uint32_t sw = (uint32_t)(sx1 > sx0 ? sx1 - sx0 : sx0 - sx1);
+      uint32_t sh = (uint32_t)(sy1 > sy0 ? sy1 - sy0 : sy0 - sy1);
+      uint32_t dw = (uint32_t)(dx1 > dx0 ? dx1 - dx0 : dx0 - dx1);
+      uint32_t dh = (uint32_t)(dy1 > dy0 ? dy1 - dy0 : dy0 - dy1);
+      uint64_t saddr = (src->bo ? nv_rm_bo_gpu_offset(src->bo) : 0) + src->gpu_offset;
+      uint64_t daddr = (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0) + dst->gpu_offset;
+      uint32_t spitch = src->row_pitch ? src->row_pitch
+         : (src->bpp * (src->vk.extent.width ? src->vk.extent.width : 1));
+      uint32_t dpitch = dst->row_pitch ? dst->row_pitch
+         : (dst->bpp * (dst->vk.extent.width ? dst->vk.extent.width : 1));
+      uint32_t sbpp = src->bpp ? src->bpp : 4;
+      uint32_t dbpp = dst->bpp ? dst->bpp : 4;
+      uint32_t w, h, line_len;
+      uint64_t soff, doff;
+
+      if (!saddr || !daddr)
+         continue;
+      if (sw == 0) sw = 1;
+      if (sh == 0) sh = 1;
+      if (dw == 0) dw = 1;
+      if (dh == 0) dh = 1;
+      /* Unscaled CE pitch blit (scaled/filter needs 3D path later) */
+      w = sw < dw ? sw : dw;
+      h = sh < dh ? sh : dh;
+      soff = saddr + (uint64_t)sy0 * spitch + (uint64_t)sx0 * sbpp;
+      doff = daddr + (uint64_t)dy0 * dpitch + (uint64_t)dx0 * dbpp;
+      line_len = w * (sbpp < dbpp ? sbpp : dbpp);
+      if (src->is_blocklinear || dst->is_blocklinear)
+         nv_copy_emit_image_2d_bl(&cmd->push, soff, doff, w, h, sbpp,
+                                  spitch, dpitch, 0, 0, 0, 0,
+                                  src->is_blocklinear, dst->is_blocklinear,
+                                  src->gobs_width, src->gobs_height,
+                                  dst->gobs_width, dst->gobs_height);
+      else
+         nv_copy_emit_image_2d(&cmd->push, soff, doff, line_len,
+                               spitch, dpitch, h);
+   }
+   nv_push_wfi(&cmd->push);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdResolveImage2(VkCommandBuffer commandBuffer,
+                      const VkResolveImageInfo2 *pResolveImageInfo)
+{
+   /* MSAA resolve: 1:1 CE copy of first sample (full resolve needs 3D). */
+   VkBlitImageInfo2 bi;
+   VkImageBlit2 stack_regions[4];
+   VkImageBlit2 *regions = stack_regions;
+   VkImageBlit2 *heap = NULL;
+   uint32_t i, n;
+
+   if (!pResolveImageInfo || !pResolveImageInfo->regionCount)
+      return;
+   n = pResolveImageInfo->regionCount;
+   if (n > 4) {
+      heap = (VkImageBlit2 *)calloc(n, sizeof(*heap));
+      if (!heap)
+         return;
+      regions = heap;
+   } else {
+      memset(stack_regions, 0, sizeof(stack_regions));
+   }
+   for (i = 0; i < n; i++) {
+      const VkImageResolve2 *r = &pResolveImageInfo->pRegions[i];
+      regions[i].sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
+      regions[i].srcSubresource = r->srcSubresource;
+      regions[i].dstSubresource = r->dstSubresource;
+      regions[i].srcOffsets[0] = r->srcOffset;
+      regions[i].srcOffsets[1].x = r->srcOffset.x + (int32_t)r->extent.width;
+      regions[i].srcOffsets[1].y = r->srcOffset.y + (int32_t)r->extent.height;
+      regions[i].srcOffsets[1].z = r->srcOffset.z + (int32_t)r->extent.depth;
+      regions[i].dstOffsets[0] = r->dstOffset;
+      regions[i].dstOffsets[1].x = r->dstOffset.x + (int32_t)r->extent.width;
+      regions[i].dstOffsets[1].y = r->dstOffset.y + (int32_t)r->extent.height;
+      regions[i].dstOffsets[1].z = r->dstOffset.z + (int32_t)r->extent.depth;
+   }
+   memset(&bi, 0, sizeof(bi));
+   bi.sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
+   bi.srcImage = pResolveImageInfo->srcImage;
+   bi.srcImageLayout = pResolveImageInfo->srcImageLayout;
+   bi.dstImage = pResolveImageInfo->dstImage;
+   bi.dstImageLayout = pResolveImageInfo->dstImageLayout;
+   bi.regionCount = n;
+   bi.pRegions = regions;
+   bi.filter = VK_FILTER_NEAREST;
+   nvrm_CmdBlitImage2(commandBuffer, &bi);
+   free(heap);
 }
 
 VKAPI_ATTR void VKAPI_CALL

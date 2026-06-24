@@ -2897,6 +2897,43 @@ nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,
 
 /* ---- Dynamic depth/stencil/raster state (core 1.3 / EXT_extended_dynamic_state) ---- */
 
+static void
+nvrm_cmd_emit_dyn_stencil(struct nvrm_cmd_buffer *cmd)
+{
+   if (!cmd || !cmd->push_map)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_emit_stencil_state_full(&cmd->push, cmd->dyn_stencil_test_enable,
+      cmd->dyn_stencil_two_sided,
+      (unsigned)cmd->dyn_stencil_front_compare_op,
+      cmd->dyn_stencil_front_compare_mask,
+      cmd->dyn_stencil_front_write_mask,
+      cmd->dyn_stencil_front_reference,
+      (unsigned)cmd->dyn_stencil_front_fail_op,
+      (unsigned)cmd->dyn_stencil_front_zfail_op,
+      (unsigned)cmd->dyn_stencil_front_zpass_op,
+      (unsigned)cmd->dyn_stencil_back_compare_op,
+      cmd->dyn_stencil_back_compare_mask,
+      cmd->dyn_stencil_back_write_mask,
+      cmd->dyn_stencil_back_reference,
+      (unsigned)cmd->dyn_stencil_back_fail_op,
+      (unsigned)cmd->dyn_stencil_back_zfail_op,
+      (unsigned)cmd->dyn_stencil_back_zpass_op);
+}
+
+static void
+nvrm_cmd_emit_dyn_cull_front(struct nvrm_cmd_buffer *cmd)
+{
+   if (!cmd || !cmd->push_map)
+      return;
+   if (!cmd->dyn_cull_mode_valid && !cmd->dyn_front_face_valid)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_emit_cull_front_face(&cmd->push,
+      nv_3d_cull_face_from_vk(cmd->dyn_cull_mode),
+      cmd->dyn_front_ccw);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdSetDepthTestEnable(VkCommandBuffer commandBuffer, VkBool32 depthTestEnable)
 {
@@ -2939,15 +2976,7 @@ nvrm_CmdSetStencilTestEnable(VkCommandBuffer commandBuffer, VkBool32 stencilTest
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    cmd->dyn_stencil_test_enable = stencilTestEnable;
    cmd->dyn_stencil_valid = true;
-   if (cmd->push_map)
-      nv_3d_emit_stencil_state(&cmd->push, stencilTestEnable,
-                               (unsigned)cmd->dyn_stencil_front_compare_op,
-                               cmd->dyn_stencil_front_compare_mask,
-                               cmd->dyn_stencil_front_write_mask,
-                               cmd->dyn_stencil_front_reference,
-                               (unsigned)cmd->dyn_stencil_front_fail_op,
-                               (unsigned)cmd->dyn_stencil_front_zfail_op,
-                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+   nvrm_cmd_emit_dyn_stencil(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2956,20 +2985,29 @@ nvrm_CmdSetStencilOp(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
                      VkCompareOp compareOp)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)faceMask; /* front only for now; back plane mirrors front */
-   cmd->dyn_stencil_front_fail_op = failOp;
-   cmd->dyn_stencil_front_zpass_op = passOp;
-   cmd->dyn_stencil_front_zfail_op = depthFailOp;
-   cmd->dyn_stencil_front_compare_op = compareOp;
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT) {
+      cmd->dyn_stencil_front_fail_op = failOp;
+      cmd->dyn_stencil_front_zpass_op = passOp;
+      cmd->dyn_stencil_front_zfail_op = depthFailOp;
+      cmd->dyn_stencil_front_compare_op = compareOp;
+   }
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
+      cmd->dyn_stencil_back_fail_op = failOp;
+      cmd->dyn_stencil_back_zpass_op = passOp;
+      cmd->dyn_stencil_back_zfail_op = depthFailOp;
+      cmd->dyn_stencil_back_compare_op = compareOp;
+      cmd->dyn_stencil_two_sided = true;
+   }
+   /* FRONT_AND_BACK is both bits set */
+   if (faceMask == VK_STENCIL_FACE_FRONT_AND_BACK) {
+      cmd->dyn_stencil_back_fail_op = failOp;
+      cmd->dyn_stencil_back_zpass_op = passOp;
+      cmd->dyn_stencil_back_zfail_op = depthFailOp;
+      cmd->dyn_stencil_back_compare_op = compareOp;
+   }
    cmd->dyn_stencil_valid = true;
-   if (cmd->push_map && cmd->dyn_stencil_test_enable)
-      nv_3d_emit_stencil_state(&cmd->push, true,
-                               (unsigned)compareOp,
-                               cmd->dyn_stencil_front_compare_mask,
-                               cmd->dyn_stencil_front_write_mask,
-                               cmd->dyn_stencil_front_reference,
-                               (unsigned)failOp, (unsigned)depthFailOp,
-                               (unsigned)passOp);
+   if (cmd->dyn_stencil_test_enable)
+      nvrm_cmd_emit_dyn_stencil(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2977,18 +3015,15 @@ nvrm_CmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
                               VkStencilFaceFlags faceMask, uint32_t compareMask)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)faceMask;
-   cmd->dyn_stencil_front_compare_mask = compareMask;
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+      cmd->dyn_stencil_front_compare_mask = compareMask;
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
+      cmd->dyn_stencil_back_compare_mask = compareMask;
+      cmd->dyn_stencil_two_sided = true;
+   }
    cmd->dyn_stencil_valid = true;
-   if (cmd->push_map && cmd->dyn_stencil_test_enable)
-      nv_3d_emit_stencil_state(&cmd->push, true,
-                               (unsigned)cmd->dyn_stencil_front_compare_op,
-                               compareMask,
-                               cmd->dyn_stencil_front_write_mask,
-                               cmd->dyn_stencil_front_reference,
-                               (unsigned)cmd->dyn_stencil_front_fail_op,
-                               (unsigned)cmd->dyn_stencil_front_zfail_op,
-                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+   if (cmd->dyn_stencil_test_enable)
+      nvrm_cmd_emit_dyn_stencil(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2996,9 +3031,15 @@ nvrm_CmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
                             VkStencilFaceFlags faceMask, uint32_t writeMask)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)faceMask;
-   cmd->dyn_stencil_front_write_mask = writeMask;
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+      cmd->dyn_stencil_front_write_mask = writeMask;
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
+      cmd->dyn_stencil_back_write_mask = writeMask;
+      cmd->dyn_stencil_two_sided = true;
+   }
    cmd->dyn_stencil_valid = true;
+   if (cmd->dyn_stencil_test_enable)
+      nvrm_cmd_emit_dyn_stencil(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3006,18 +3047,15 @@ nvrm_CmdSetStencilReference(VkCommandBuffer commandBuffer,
                             VkStencilFaceFlags faceMask, uint32_t reference)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)faceMask;
-   cmd->dyn_stencil_front_reference = reference;
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+      cmd->dyn_stencil_front_reference = reference;
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT) {
+      cmd->dyn_stencil_back_reference = reference;
+      cmd->dyn_stencil_two_sided = true;
+   }
    cmd->dyn_stencil_valid = true;
-   if (cmd->push_map && cmd->dyn_stencil_test_enable)
-      nv_3d_emit_stencil_state(&cmd->push, true,
-                               (unsigned)cmd->dyn_stencil_front_compare_op,
-                               cmd->dyn_stencil_front_compare_mask,
-                               cmd->dyn_stencil_front_write_mask,
-                               reference,
-                               (unsigned)cmd->dyn_stencil_front_fail_op,
-                               (unsigned)cmd->dyn_stencil_front_zfail_op,
-                               (unsigned)cmd->dyn_stencil_front_zpass_op);
+   if (cmd->dyn_stencil_test_enable)
+      nvrm_cmd_emit_dyn_stencil(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3026,6 +3064,7 @@ nvrm_CmdSetCullMode(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode)
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    cmd->dyn_cull_mode = cullMode;
    cmd->dyn_cull_mode_valid = true;
+   nvrm_cmd_emit_dyn_cull_front(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3034,6 +3073,7 @@ nvrm_CmdSetFrontFace(VkCommandBuffer commandBuffer, VkFrontFace frontFace)
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    cmd->dyn_front_ccw = (frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE);
    cmd->dyn_front_face_valid = true;
+   nvrm_cmd_emit_dyn_cull_front(cmd);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3080,6 +3120,153 @@ nvrm_CmdSetBlendConstants(VkCommandBuffer commandBuffer,
    if (cmd->push_map)
       nv_3d_emit_blend_constants(&cmd->push, blendConstants[0], blendConstants[1],
                                  blendConstants[2], blendConstants[3]);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetRasterizerDiscardEnable(VkCommandBuffer commandBuffer,
+                                   VkBool32 rasterizerDiscardEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_rasterizer_discard = rasterizerDiscardEnable;
+   cmd->dyn_rasterizer_discard_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_rasterizer_discard(&cmd->push, rasterizerDiscardEnable);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer,
+                                 VkBool32 depthBoundsTestEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_bounds_enable = depthBoundsTestEnable;
+   cmd->dyn_depth_bounds_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_depth_bounds(&cmd->push, depthBoundsTestEnable,
+                              cmd->dyn_depth_bounds_min,
+                              cmd->dyn_depth_bounds_max);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetDepthBounds(VkCommandBuffer commandBuffer,
+                       float minDepthBounds, float maxDepthBounds)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_depth_bounds_min = minDepthBounds;
+   cmd->dyn_depth_bounds_max = maxDepthBounds;
+   cmd->dyn_depth_bounds_enable = true;
+   cmd->dyn_depth_bounds_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_depth_bounds(&cmd->push, true, minDepthBounds, maxDepthBounds);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetLogicOpEnableEXT(VkCommandBuffer commandBuffer, VkBool32 logicOpEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_logic_op_enable = logicOpEnable;
+   cmd->dyn_logic_op_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_logic_op(&cmd->push, logicOpEnable, (unsigned)cmd->dyn_logic_op);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetLogicOpEXT(VkCommandBuffer commandBuffer, VkLogicOp logicOp)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_logic_op = logicOp;
+   cmd->dyn_logic_op_enable = true;
+   cmd->dyn_logic_op_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_logic_op(&cmd->push, true, (unsigned)logicOp);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetPolygonModeEXT(VkCommandBuffer commandBuffer, VkPolygonMode polygonMode)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   unsigned fm = 0;
+   if (polygonMode == VK_POLYGON_MODE_LINE)
+      fm = 1;
+   else if (polygonMode == VK_POLYGON_MODE_POINT)
+      fm = 2;
+   cmd->dyn_polygon_mode = fm;
+   cmd->dyn_polygon_mode_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_fill_mode(&cmd->push, fm);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetProvokingVertexModeEXT(VkCommandBuffer commandBuffer,
+                                  VkProvokingVertexModeEXT provokingVertexMode)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_provoking_last =
+      (provokingVertexMode == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT);
+   cmd->dyn_provoking_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_provoking_vertex(&cmd->push, cmd->dyn_provoking_last);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetPrimitiveTopology(VkCommandBuffer commandBuffer,
+                             VkPrimitiveTopology primitiveTopology)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t topo_nv = 0; /* POINTS default; refined via nv_3d_topology_from_pipe_prim if mapped */
+   cmd->dyn_primitive_topology = primitiveTopology;
+   cmd->dyn_primitive_topology_valid = true;
+   /* Map common topologies to NVC597 begin/end codes via pipe prim helper */
+   switch (primitiveTopology) {
+   case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:      topo_nv = nv_3d_topology_from_pipe_prim(0); break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:       topo_nv = nv_3d_topology_from_pipe_prim(1); break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:      topo_nv = nv_3d_topology_from_pipe_prim(2); break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:   topo_nv = nv_3d_topology_from_pipe_prim(4); break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:  topo_nv = nv_3d_topology_from_pipe_prim(5); break;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:    topo_nv = nv_3d_topology_from_pipe_prim(6); break;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+   case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
+   default:
+      topo_nv = nv_3d_topology_from_pipe_prim(4);
+      break;
+   }
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_primitive_topology(&cmd->push, topo_nv);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetSampleMaskEXT(VkCommandBuffer commandBuffer, uint32_t samples,
+                         const VkSampleMask *pSampleMask)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t mask = 0xffffffffu;
+   (void)samples;
+   if (pSampleMask)
+      mask = pSampleMask[0];
+   cmd->dyn_sample_mask = mask;
+   cmd->dyn_sample_mask_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_sample_mask(&cmd->push, mask);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL

@@ -221,6 +221,15 @@ struct nvrm_cmd_buffer {
    uint32_t dyn_stencil_front_compare_mask;
    uint32_t dyn_stencil_front_write_mask;
    uint32_t dyn_stencil_front_reference;
+   /* Back-face stencil (two-sided when BACK face programmed) */
+   uint32_t dyn_stencil_back_compare_op;
+   uint32_t dyn_stencil_back_fail_op;
+   uint32_t dyn_stencil_back_zfail_op;
+   uint32_t dyn_stencil_back_zpass_op;
+   uint32_t dyn_stencil_back_compare_mask;
+   uint32_t dyn_stencil_back_write_mask;
+   uint32_t dyn_stencil_back_reference;
+   bool dyn_stencil_two_sided;
    bool dyn_stencil_valid;
    bool dyn_cull_mode_valid;
    uint32_t dyn_cull_mode;
@@ -242,6 +251,23 @@ struct nvrm_cmd_buffer {
    bool dyn_blend_const_valid;
    float dyn_line_width;
    bool dyn_line_width_valid;
+   /* Additional dynamic raster / depth / logic state */
+   bool dyn_rasterizer_discard;
+   bool dyn_rasterizer_discard_valid;
+   float dyn_depth_bounds_min, dyn_depth_bounds_max;
+   bool dyn_depth_bounds_enable;
+   bool dyn_depth_bounds_valid;
+   bool dyn_logic_op_enable;
+   uint32_t dyn_logic_op; /* VkLogicOp */
+   bool dyn_logic_op_valid;
+   uint32_t dyn_polygon_mode; /* 0=fill, 1=line, 2=point */
+   bool dyn_polygon_mode_valid;
+   bool dyn_provoking_last;
+   bool dyn_provoking_valid;
+   float dyn_point_size;
+   bool dyn_point_size_valid;
+   uint32_t dyn_primitive_topology; /* VkPrimitiveTopology when dynamic */
+   bool dyn_primitive_topology_valid;
    /* Conditional rendering (predication via RENDER_ENABLE memory) */
    bool cond_render_active;
    uint64_t cond_render_gpu_addr;
@@ -454,6 +480,30 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthBias(VkCommandBuffer commandBuffer, f
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetBlendConstants(VkCommandBuffer commandBuffer, const float blendConstants[4]);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetColorWriteEnableEXT(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
                                                           const VkBool32 *pColorWriteEnables);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetRasterizerDiscardEnable(VkCommandBuffer commandBuffer,
+                                                              VkBool32 rasterizerDiscardEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer,
+                                                            VkBool32 depthBoundsTestEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetDepthBounds(VkCommandBuffer commandBuffer,
+                                                  float minDepthBounds, float maxDepthBounds);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetLogicOpEnableEXT(VkCommandBuffer commandBuffer, VkBool32 logicOpEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetLogicOpEXT(VkCommandBuffer commandBuffer, VkLogicOp logicOp);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetPolygonModeEXT(VkCommandBuffer commandBuffer, VkPolygonMode polygonMode);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetProvokingVertexModeEXT(VkCommandBuffer commandBuffer,
+                                                             VkProvokingVertexModeEXT provokingVertexMode);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetPrimitiveTopology(VkCommandBuffer commandBuffer,
+                                                        VkPrimitiveTopology primitiveTopology);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetSampleMaskEXT(VkCommandBuffer commandBuffer, uint32_t samples,
+                                                    const VkSampleMask *pSampleMask);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                                              VkDeviceSize dstOffset, VkDeviceSize size, uint32_t data);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                                                VkDeviceSize dstOffset, VkDeviceSize dataSize,
+                                                const void *pData);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
+                                              const VkBlitImageInfo2 *pBlitImageInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdResolveImage2(VkCommandBuffer commandBuffer,
+                                                 const VkResolveImageInfo2 *pResolveImageInfo);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                                              const VkDependencyInfo *pDependencyInfo);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
