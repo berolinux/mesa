@@ -1753,6 +1753,10 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
          nv_3d_emit_msaa(&cmd->push, pipe->sample_count, false);
    }
 
+   if (cmd->dyn_line_width_valid)
+      nv_3d_emit_line_width(&cmd->push, cmd->dyn_line_width);
+   else if (pipe->line_width > 0.0f)
+      nv_3d_emit_line_width(&cmd->push, pipe->line_width);
    nv_3d_set_primitive_topology(&cmd->push, pipe->topology_nv);
    nv_3d_set_primitive_restart(&cmd->push, pipe->prim_restart_enable ||
                                cmd->prim_restart_enable,
@@ -2360,25 +2364,24 @@ nvrm_CmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport,
                     uint32_t viewportCount, const VkViewport *pViewports)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   if (!viewportCount || !pViewports || firstViewport > 0)
+   uint32_t i;
+   if (!viewportCount || !pViewports || !cmd->push_map)
       return;
-   cmd->vp_x = pViewports[0].x;
-   cmd->vp_y = pViewports[0].y;
-   cmd->vp_w = pViewports[0].width;
-   cmd->vp_h = pViewports[0].height;
-   cmd->vp_min_z = pViewports[0].minDepth;
-   cmd->vp_max_z = pViewports[0].maxDepth;
-   cmd->vp_valid = true;
-   if (cmd->push_map) {
-      /* Vulkan viewport -> NV scale/offset: scale = half extent, offset = centre */
-      float sx = cmd->vp_w * 0.5f;
-      float sy = cmd->vp_h * 0.5f;
-      float sz = cmd->vp_max_z - cmd->vp_min_z;
-      float ox = cmd->vp_x + sx;
-      float oy = cmd->vp_y + sy;
-      float oz = cmd->vp_min_z;
-      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-      nv_3d_set_viewport0(&cmd->push, sx, sy, sz, ox, oy, oz);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   for (i = 0; i < viewportCount; i++) {
+      const VkViewport *vp = &pViewports[i];
+      uint32_t slot = firstViewport + i;
+      if (slot == 0) {
+         cmd->vp_x = vp->x;
+         cmd->vp_y = vp->y;
+         cmd->vp_w = vp->width;
+         cmd->vp_h = vp->height;
+         cmd->vp_min_z = vp->minDepth;
+         cmd->vp_max_z = vp->maxDepth;
+         cmd->vp_valid = true;
+      }
+      nv_3d_set_viewport_n(&cmd->push, slot, vp->x, vp->y, vp->width, vp->height,
+                           vp->minDepth, vp->maxDepth);
    }
 }
 
@@ -2387,22 +2390,25 @@ nvrm_CmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor,
                    uint32_t scissorCount, const VkRect2D *pScissors)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   if (!scissorCount || !pScissors || firstScissor > 0)
+   uint32_t i;
+   if (!scissorCount || !pScissors || !cmd->push_map)
       return;
-   cmd->sc_x = pScissors[0].offset.x;
-   cmd->sc_y = pScissors[0].offset.y;
-   cmd->sc_w = pScissors[0].extent.width;
-   cmd->sc_h = pScissors[0].extent.height;
-   cmd->sc_valid = true;
-   if (cmd->push_map) {
-      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-      nv_3d_set_scissor0(&cmd->push, true,
-                         (uint32_t)cmd->sc_x,
-                         (uint32_t)(cmd->sc_x + (int32_t)cmd->sc_w),
-                         (uint32_t)cmd->sc_y,
-                         (uint32_t)(cmd->sc_y + (int32_t)cmd->sc_h));
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   for (i = 0; i < scissorCount; i++) {
+      const VkRect2D *sc = &pScissors[i];
+      uint32_t slot = firstScissor + i;
+      if (slot == 0) {
+         cmd->sc_x = sc->offset.x;
+         cmd->sc_y = sc->offset.y;
+         cmd->sc_w = sc->extent.width;
+         cmd->sc_h = sc->extent.height;
+         cmd->sc_valid = true;
+      }
+      nv_3d_set_scissor_n(&cmd->push, slot, sc->offset.x, sc->offset.y,
+                          sc->extent.width, sc->extent.height);
    }
 }
+
 
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
@@ -2674,6 +2680,22 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
       desc->cb_size[1] = cmd->push_const_bo_size ? cmd->push_const_bo_size : 256;
       desc->cb_valid_mask |= 0x2;
    }
+   /* Descriptor set 0 UBOs -> QMD CB slots 2..7 (layout-aware flat slots) */
+   if (cmd->bound_set_count > 0 && cmd->bound_sets[0]) {
+      struct nvrm_descriptor_set *set = cmd->bound_sets[0];
+      uint32_t u, cb_slot = 2;
+      for (u = 0; u < set->ubo_count && cb_slot < NV_QMD_MAX_CBS; u++) {
+         if (!set->ubo[u].bo)
+            continue;
+         desc->cb_addr[cb_slot] = nv_rm_bo_gpu_offset(set->ubo[u].bo) +
+                                  set->ubo[u].offset;
+         desc->cb_size[cb_slot] = set->ubo[u].range &&
+            set->ubo[u].range != VK_WHOLE_SIZE ?
+            (uint32_t)set->ubo[u].range : 65536;
+         desc->cb_valid_mask |= (uint8_t)(1u << cb_slot);
+         cb_slot++;
+      }
+   }
 }
 
 static void
@@ -2714,6 +2736,8 @@ nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    if (!cmd || !cmd->push_map)
       return;
+   nvrm_cmd_emit_push_constants(cmd);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE);
    nvrm_emit_compute_dispatch(cmd, groupCountX, groupCountY, groupCountZ);
 }
 
