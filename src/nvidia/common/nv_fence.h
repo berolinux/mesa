@@ -15,6 +15,9 @@
 #include <stdint.h>
 
 #include "nv_push.h"
+/* nv_3d_methods.h provides nv_3d_report_semaphore_acquire /
+ * nv_push_host_semaphore_acquire used by nv_fence_emit_wait_other. */
+#include "nv_3d_methods.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +58,44 @@ static inline uint32_t
 nv_fence_seq(const struct nv_fence *f)
 {
    return f ? f->seq : 0;
+}
+
+/**
+ * Timeline-style payload: increment seq and emit 3D report sema release.
+ * Returns the new seq (payload written to sema memory).
+ */
+static inline uint32_t
+nv_fence_signal_next_3d(struct nv_fence *f, struct nv_push *p)
+{
+   if (!f || !p)
+      return 0;
+   return nv_fence_emit_3d_signal(f, p);
+}
+
+/** Host semaphore path (GPFIFO/NVC36F) for submits without active 3D class. */
+static inline uint32_t
+nv_fence_signal_next_host(struct nv_fence *f, struct nv_push *p)
+{
+   if (!f || !p)
+      return 0;
+   return nv_fence_emit_host_signal(f, p);
+}
+
+/**
+ * Wait on another fence's sema (acquire GEQ) before continuing push stream.
+ * Used for VkSemaphore wait on queue submit / cmd buffer boundaries.
+ */
+static inline void
+nv_fence_emit_wait_other(struct nv_push *p, const struct nv_fence *other,
+                         uint32_t wait_seq, bool use_3d_report)
+{
+   if (!p || !other || !other->sema_gpu_addr)
+      return;
+   if (use_3d_report)
+      nv_3d_report_semaphore_acquire(p, other->sema_gpu_addr, wait_seq,
+                                     true /* one_word */);
+   else
+      nv_push_host_semaphore_acquire(p, other->sema_gpu_addr, wait_seq);
 }
 
 #ifdef __cplusplus

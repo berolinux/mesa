@@ -1306,6 +1306,235 @@ nv_nvdec_fill_frame_from_h264(struct nv_nvdec_frame_setup *fs,
    return 0;
 }
 
+/**
+ * Host-side NVDEC decode session: owns pic_setup/status scratch layout hints
+ * and sequences frame executes.  BOs are provided by the caller (Vulkan video
+ * / gallium VA path); this struct is the method-level session state.
+ */
+struct nv_nvdec_session {
+   uint32_t class_nvdec;       /* from nv_device_info.class_nvdec */
+   uint32_t app_id;            /* NV_NVDEC_APP_ID_* */
+   uint32_t next_picture_index;
+   uint32_t pic_setup_bytes;
+   uint64_t pic_setup_gpu_addr;
+   void *pic_setup_cpu_map;    /* optional host map of pic_setup BO */
+   uint32_t pic_setup_map_bytes;
+   uint64_t status_gpu_addr;
+   uint64_t output_luma_gpu_addr;
+   uint64_t output_chroma_gpu_addr;
+   uint32_t output_luma_pitch;
+   uint32_t output_chroma_pitch;
+   struct nv_nvdec_h264_pic_setup h264_ps;
+   struct nv_nvdec_hevc_pic_setup hevc_ps;
+   bool h264_ps_valid;
+   bool hevc_ps_valid;
+   bool object_set;            /* SET_OBJECT emitted on channel */
+};
+
+static inline void
+nv_nvdec_session_init(struct nv_nvdec_session *s, uint32_t class_nvdec,
+                      uint32_t app_id)
+{
+   if (!s)
+      return;
+   memset(s, 0, sizeof(*s));
+   s->class_nvdec = class_nvdec;
+   s->app_id = app_id ? app_id : NV_NVDEC_APP_ID_H264;
+   s->pic_setup_bytes = nv_nvdec_pic_setup_size(s->app_id);
+}
+
+static inline void
+nv_nvdec_session_set_pic_setup_bo(struct nv_nvdec_session *s,
+                                  uint64_t gpu_addr, void *cpu_map,
+                                  uint32_t map_bytes)
+{
+   if (!s)
+      return;
+   s->pic_setup_gpu_addr = gpu_addr;
+   s->pic_setup_cpu_map = cpu_map;
+   s->pic_setup_map_bytes = map_bytes;
+}
+
+static inline void
+nv_nvdec_session_set_output(struct nv_nvdec_session *s,
+                            uint64_t luma_gpu, uint64_t chroma_gpu,
+                            uint32_t luma_pitch, uint32_t chroma_pitch)
+{
+   if (!s)
+      return;
+   s->output_luma_gpu_addr = luma_gpu;
+   s->output_chroma_gpu_addr = chroma_gpu;
+   s->output_luma_pitch = luma_pitch;
+   s->output_chroma_pitch = chroma_pitch;
+}
+
+/** Optional status BO (NVDEC writes decode completion / error dword). */
+static inline void
+nv_nvdec_session_set_status_bo(struct nv_nvdec_session *s, uint64_t gpu_addr)
+{
+   if (!s)
+      return;
+   s->status_gpu_addr = gpu_addr;
+}
+
+/**
+ * Program H.264 DPB reference for slot (mirrors nv_nvdec_h264_set_dpb_ref).
+ * Also updates curr_pic_idx when slot matches next_picture_index.
+ */
+static inline void
+nv_nvdec_session_set_h264_dpb(struct nv_nvdec_session *s, unsigned slot,
+                              uint64_t luma_top, uint64_t luma_bot,
+                              uint64_t chroma_top, uint64_t chroma_bot)
+{
+   if (!s || slot >= 16)
+      return;
+   nv_nvdec_h264_set_dpb_ref(&s->h264_ps, slot, luma_top, luma_bot,
+                             chroma_top, chroma_bot);
+   s->h264_ps.dpb_luma_pitch = s->output_luma_pitch;
+   s->h264_ps.dpb_chroma_pitch = s->output_chroma_pitch;
+   s->h264_ps_valid = true;
+}
+
+/** Program HEVC DPB reference for slot. */
+static inline void
+nv_nvdec_session_set_hevc_dpb(struct nv_nvdec_session *s, unsigned slot,
+                              uint64_t luma_va, uint64_t chroma_va)
+{
+   if (!s || slot >= 16)
+      return;
+   nv_nvdec_hevc_set_dpb_ref(&s->hevc_ps, slot, luma_va, chroma_va);
+   s->hevc_ps.dpb_luma_pitch = s->output_luma_pitch;
+   s->hevc_ps.dpb_chroma_pitch = s->output_chroma_pitch;
+   s->hevc_ps_valid = true;
+}
+
+/**
+ * Pack session pic_setup structs into the host-mapped pic_setup BO (if any).
+ * Call after SPS/PPS load and DPB updates, before emit_frame.
+ */
+static inline void
+nv_nvdec_session_pack_pic_setup(struct nv_nvdec_session *s)
+{
+   uint32_t dwords;
+   if (!s || !s->pic_setup_cpu_map || !s->pic_setup_map_bytes)
+      return;
+   dwords = s->pic_setup_map_bytes / 4;
+   if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
+      s->hevc_ps.curr_pic_idx = s->next_picture_index;
+      nv_nvdec_hevc_pic_setup_pack(&s->hevc_ps,
+                                   (uint32_t *)s->pic_setup_cpu_map, dwords);
+   } else if (s->h264_ps_valid) {
+      s->h264_ps.curr_pic_idx = s->next_picture_index;
+      nv_nvdec_h264_pic_setup_pack(&s->h264_ps,
+                                   (uint32_t *)s->pic_setup_cpu_map, dwords);
+   }
+}
+
+/**
+ * Load parameter sets from Annex-B SPS/PPS into session pic_setup structs.
+ * Returns number of PS applied (H.264: 0..2, HEVC: 0..1 SPS).
+ */
+static inline unsigned
+nv_nvdec_session_load_annexb_ps(struct nv_nvdec_session *s,
+                                const uint8_t *annexb, uint32_t annexb_size)
+{
+   unsigned n = 0;
+   if (!s || !annexb || !annexb_size)
+      return 0;
+   if (s->app_id == NV_NVDEC_APP_ID_HEVC) {
+      n = nv_hevc_pic_setup_from_annexb(annexb, annexb_size, &s->hevc_ps);
+      s->hevc_ps_valid = (n > 0);
+   } else {
+      n = nv_h264_pic_setup_from_annexb(annexb, annexb_size, &s->h264_ps);
+      s->h264_ps_valid = (n > 0);
+   }
+   return n;
+}
+
+/**
+ * Build frame_setup for one picture and emit NVDEC methods + EXECUTE.
+ * bitstream_gpu/size point at slice/NAL data for this frame (may include PS).
+ * Returns 0 on success.
+ */
+static inline int
+nv_nvdec_session_emit_frame(struct nv_push *p, struct nv_nvdec_session *s,
+                            uint64_t bitstream_gpu_addr, uint32_t bitstream_size)
+{
+   struct nv_nvdec_frame_setup fs;
+   uint32_t pic_idx;
+   if (!p || !s || !bitstream_gpu_addr || !bitstream_size)
+      return -1;
+   if (!s->object_set && s->class_nvdec) {
+      nv_nvdec_set_object(p, s->class_nvdec);
+      s->object_set = true;
+   } else if (!s->object_set) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_NVDEC);
+   }
+   pic_idx = s->next_picture_index++;
+   memset(&fs, 0, sizeof(fs));
+   fs.app_id = s->app_id;
+   fs.picture_index = pic_idx;
+   fs.bitstream_gpu_addr = bitstream_gpu_addr;
+   fs.bitstream_size = bitstream_size;
+   fs.pic_setup_gpu_addr = s->pic_setup_gpu_addr;
+   fs.status_gpu_addr = s->status_gpu_addr;
+   fs.output_luma_gpu_addr = s->output_luma_gpu_addr;
+   fs.output_chroma_gpu_addr = s->output_chroma_gpu_addr;
+   fs.output_luma_pitch = s->output_luma_pitch;
+   fs.output_chroma_pitch = s->output_chroma_pitch;
+   fs.execute_flags = 1;
+   if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
+      fs.mb_width = s->hevc_ps.pic_width_in_luma_samples;
+      fs.mb_height = s->hevc_ps.pic_height_in_luma_samples;
+      fs.bit_depth_luma_minus8 = s->hevc_ps.bit_depth_luma_minus8;
+      fs.bit_depth_chroma_minus8 = s->hevc_ps.bit_depth_chroma_minus8;
+      if (s->pic_setup_cpu_map &&
+          s->pic_setup_map_bytes >= NV_NVDEC_HEVC_PIC_SETUP_DWORDS * 4)
+         nv_nvdec_hevc_pic_setup_pack(&s->hevc_ps,
+                                      (uint32_t *)s->pic_setup_cpu_map,
+                                      s->pic_setup_map_bytes / 4);
+   } else if (s->h264_ps_valid) {
+      fs.mb_width = s->h264_ps.width_mb;
+      fs.mb_height = s->h264_ps.height_mb;
+      if (s->pic_setup_cpu_map &&
+          s->pic_setup_map_bytes >= NV_NVDEC_H264_PIC_SETUP_DWORDS * 4)
+         nv_nvdec_h264_pic_setup_pack(&s->h264_ps,
+                                      (uint32_t *)s->pic_setup_cpu_map,
+                                      s->pic_setup_map_bytes / 4);
+   }
+   nv_nvdec_emit_frame_setup(p, &fs);
+   nv_nvdec_emit_execute(p, s->app_id, fs.execute_flags);
+   nv_push_wfi(p);
+   return 0;
+}
+
+/**
+ * One-shot decode: init session, load PS from annexb if present in same buffer,
+ * emit frame.  Useful for gallium/Vulkan video entrypoints.
+ */
+static inline int
+nv_nvdec_decode_annexb_frame(struct nv_push *p, uint32_t class_nvdec,
+                             uint32_t app_id,
+                             const uint8_t *annexb_cpu, uint32_t annexb_size,
+                             uint64_t bitstream_gpu_addr,
+                             uint64_t pic_setup_gpu_addr, void *pic_setup_cpu,
+                             uint32_t pic_setup_map_bytes,
+                             uint64_t output_luma, uint64_t output_chroma,
+                             uint32_t luma_pitch, uint32_t chroma_pitch)
+{
+   struct nv_nvdec_session s;
+   if (!p || !bitstream_gpu_addr)
+      return -1;
+   nv_nvdec_session_init(&s, class_nvdec, app_id);
+   nv_nvdec_session_set_pic_setup_bo(&s, pic_setup_gpu_addr, pic_setup_cpu,
+                                     pic_setup_map_bytes);
+   nv_nvdec_session_set_output(&s, output_luma, output_chroma,
+                               luma_pitch, chroma_pitch);
+   if (annexb_cpu && annexb_size)
+      nv_nvdec_session_load_annexb_ps(&s, annexb_cpu, annexb_size);
+   return nv_nvdec_session_emit_frame(p, &s, bitstream_gpu_addr, annexb_size);
+}
+
 static inline int
 nv_nvdec_fill_frame_from_hevc(struct nv_nvdec_frame_setup *fs,
                               const struct nv_nvdec_hevc_pic_setup *ps,
