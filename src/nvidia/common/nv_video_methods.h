@@ -1566,7 +1566,11 @@ struct nv_hevc_st_rps_entry {
    uint8_t num_positive_pics;
    uint8_t used_by_curr_s0[NV_HEVC_MAX_RPS_PICS];
    uint8_t used_by_curr_s1[NV_HEVC_MAX_RPS_PICS];
-   /* POC deltas not stored — only counts matter for NumDeltaPocs */
+   /* Absolute POC deltas relative to the current picture (H.265 8.3.2).
+    * s0 are negative (or zero) POC offsets; s1 positive.  Used to rebuild
+    * predicted RPS via inter_ref_pic_set_prediction. */
+   int32_t delta_poc_s0[NV_HEVC_MAX_RPS_PICS];
+   int32_t delta_poc_s1[NV_HEVC_MAX_RPS_PICS];
 };
 
 struct nv_hevc_st_rps_table {
@@ -1583,11 +1587,114 @@ nv_hevc_st_rps_num_delta_pocs(const struct nv_hevc_st_rps_table *t, unsigned idx
           (unsigned)t->e[idx].num_positive_pics;
 }
 
+/** Sort predicted delta_poc list ascending (H.265 8.3.2 step 5/6 style). */
+static inline void
+nv_hevc_st_rps_sort_delta_asc(int32_t *d, uint8_t *used, unsigned n)
+{
+   unsigned i, j;
+   for (i = 1; i < n; i++) {
+      int32_t kd = d[i];
+      uint8_t ku = used[i];
+      j = i;
+      while (j > 0 && d[j - 1] > kd) {
+         d[j] = d[j - 1];
+         used[j] = used[j - 1];
+         j--;
+      }
+      d[j] = kd;
+      used[j] = ku;
+   }
+}
+
+/**
+ * Rebuild predicted ST-RPS from reference set per H.265 8.3.2 (inter RPS pred).
+ * Writes result into out; on failure leaves out zeroed.
+ */
+static inline void
+nv_hevc_st_rps_predict(const struct nv_hevc_st_rps_entry *ref,
+                       int32_t delta_rps,
+                       const uint8_t *used_by_curr_flag,
+                       const uint8_t *use_delta_flag,
+                       unsigned num_delta_pocs_ref,
+                       struct nv_hevc_st_rps_entry *out)
+{
+   int32_t ref_pocs[NV_HEVC_MAX_RPS_PICS * 2];
+   uint8_t ref_used[NV_HEVC_MAX_RPS_PICS * 2];
+   int32_t pred_pocs[NV_HEVC_MAX_RPS_PICS * 2 + 1];
+   uint8_t pred_used[NV_HEVC_MAX_RPS_PICS * 2 + 1];
+   unsigned n_ref = 0, n_pred = 0, i, j;
+   unsigned n_neg = 0, n_pos = 0;
+
+   if (!out)
+      return;
+   memset(out, 0, sizeof(*out));
+   if (!ref || num_delta_pocs_ref > 32)
+      return;
+
+   /* Build RefPicSetStCurrBefore/After style list: s0 then s1 deltas */
+   for (i = 0; i < ref->num_negative_pics && i < NV_HEVC_MAX_RPS_PICS; i++) {
+      ref_pocs[n_ref] = ref->delta_poc_s0[i];
+      ref_used[n_ref] = ref->used_by_curr_s0[i];
+      n_ref++;
+   }
+   for (i = 0; i < ref->num_positive_pics && i < NV_HEVC_MAX_RPS_PICS; i++) {
+      ref_pocs[n_ref] = ref->delta_poc_s1[i];
+      ref_used[n_ref] = ref->used_by_curr_s1[i];
+      n_ref++;
+   }
+
+   /* Predicted candidates: for each ref entry j, if use_delta_flag[j] keep
+    * (poc + delta_rps); plus optional current-picture candidate at j==NumDeltaPocs. */
+   for (j = 0; j <= num_delta_pocs_ref && j < 33; j++) {
+      int32_t d;
+      uint8_t use_d;
+      if (j < num_delta_pocs_ref) {
+         d = ref_pocs[j] + delta_rps;
+         use_d = use_delta_flag ? use_delta_flag[j] : 1;
+      } else {
+         d = delta_rps; /* current picture in reference set */
+         use_d = use_delta_flag ? use_delta_flag[j] : 1;
+      }
+      if (!use_d)
+         continue;
+      if (n_pred >= NV_HEVC_MAX_RPS_PICS * 2)
+         break;
+      pred_pocs[n_pred] = d;
+      pred_used[n_pred] = used_by_curr_flag ? used_by_curr_flag[j] : 0;
+      n_pred++;
+   }
+
+   /* Split into negative (s0) and non-negative (s1) lists, sort each */
+   for (i = 0; i < n_pred; i++) {
+      if (pred_pocs[i] < 0) {
+         if (n_neg < NV_HEVC_MAX_RPS_PICS) {
+            out->delta_poc_s0[n_neg] = pred_pocs[i];
+            out->used_by_curr_s0[n_neg] = pred_used[i];
+            n_neg++;
+         }
+      } else if (pred_pocs[i] > 0) {
+         if (n_pos < NV_HEVC_MAX_RPS_PICS) {
+            out->delta_poc_s1[n_pos] = pred_pocs[i];
+            out->used_by_curr_s1[n_pos] = pred_used[i];
+            n_pos++;
+         }
+      }
+      /* zero POC relative to current is not placed in ST lists */
+   }
+
+   /* s0 ascending by magnitude (most negative first = ascending signed) */
+   nv_hevc_st_rps_sort_delta_asc(out->delta_poc_s0, out->used_by_curr_s0, n_neg);
+   nv_hevc_st_rps_sort_delta_asc(out->delta_poc_s1, out->used_by_curr_s1, n_pos);
+   out->num_negative_pics = (uint8_t)n_neg;
+   out->num_positive_pics = (uint8_t)n_pos;
+   (void)ref_used;
+}
+
 /**
  * Parse one short_term_ref_pic_set(stRpsIdx) per H.265 7.3.7 into table slot
  * stRpsIdx (when table non-NULL) so inter_ref_pic_set_prediction reads the
- * exact NumDeltaPocs(RefRpsIdx) flag pairs.  NVDEC still gets refs via DPB;
- * this only keeps RBSP alignment for LT/temporal_mvp/strong_intra.
+ * exact NumDeltaPocs(RefRpsIdx) flag pairs and rebuilds predicted POC deltas.
+ * NVDEC still gets refs via DPB; this keeps RBSP alignment and host-side RPS.
  *
  * stRpsIdx: index in SPS loop (0 .. num_short_term_ref_pic_sets-1)
  * num_st_rps_total: total SPS short-term sets (for delta_idx in slice RPS only)
@@ -1617,12 +1724,23 @@ nv_hevc_rbsp_parse_short_term_ref_pic_set(struct nv_rbsp_reader *r,
 
    if (inter_ref_pic_set_prediction_flag) {
       uint32_t delta_idx_minus1 = 0;
+      uint32_t delta_rps_sign = 0;
+      uint32_t abs_delta_rps_minus1 = 0;
+      int32_t delta_rps = 0;
       unsigned RefRpsIdx;
       unsigned num_delta_pocs;
+      uint8_t used_flags[33];
+      uint8_t use_delta_flags[33];
+      memset(used_flags, 0, sizeof(used_flags));
+      memset(use_delta_flags, 1, sizeof(use_delta_flags)); /* default keep */
+
       if (stRpsIdx == num_st_rps_total)
          delta_idx_minus1 = nv_rbsp_ue(r);
-      (void)nv_rbsp_u(r, 1);  /* delta_rps_sign */
-      (void)nv_rbsp_ue(r);    /* abs_delta_rps_minus1 */
+      delta_rps_sign = nv_rbsp_u(r, 1);
+      abs_delta_rps_minus1 = nv_rbsp_ue(r);
+      delta_rps = (1 - 2 * (int32_t)delta_rps_sign) *
+                  ((int32_t)abs_delta_rps_minus1 + 1);
+
       RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1);
       if (RefRpsIdx >= NV_HEVC_MAX_ST_RPS)
          RefRpsIdx = 0;
@@ -1633,19 +1751,29 @@ nv_hevc_rbsp_parse_short_term_ref_pic_set(struct nv_rbsp_reader *r,
          num_delta_pocs = 16;
       if (num_delta_pocs > 32)
          num_delta_pocs = 32;
+
       /* used_by_curr_pic_flag[j] + optional use_delta_flag[j] for j=0..NumDeltaPocs */
       for (i = 0; i <= num_delta_pocs && i < 33; i++) {
          uint32_t used = nv_rbsp_u(r, 1);
-         if (!used)
-            (void)nv_rbsp_u(r, 1); /* use_delta_flag */
+         used_flags[i] = (uint8_t)used;
+         if (!used) {
+            uint32_t ud = nv_rbsp_u(r, 1);
+            use_delta_flags[i] = (uint8_t)ud;
+         } else {
+            use_delta_flags[i] = 1;
+         }
          if (r->bit_pos / 8 >= r->size)
             break;
       }
-      /* Predicted set: approximate counts from reference (for later predictors) */
+
+      /* Predicted set: full POC delta rebuild from reference entry */
       if (slot && table && RefRpsIdx < table->count) {
-         *slot = table->e[RefRpsIdx];
+         nv_hevc_st_rps_predict(&table->e[RefRpsIdx], delta_rps,
+                                used_flags, use_delta_flags, num_delta_pocs,
+                                slot);
       }
    } else {
+      int32_t poc = 0;
       num_negative_pics = nv_rbsp_ue(r);
       num_positive_pics = nv_rbsp_ue(r);
       if (num_negative_pics > NV_HEVC_MAX_RPS_PICS)
@@ -1656,20 +1784,28 @@ nv_hevc_rbsp_parse_short_term_ref_pic_set(struct nv_rbsp_reader *r,
          slot->num_negative_pics = (uint8_t)num_negative_pics;
          slot->num_positive_pics = (uint8_t)num_positive_pics;
       }
+      poc = 0;
       for (i = 0; i < num_negative_pics; i++) {
-         (void)nv_rbsp_ue(r); /* delta_poc_s0_minus1 */
+         uint32_t dpm1 = nv_rbsp_ue(r); /* delta_poc_s0_minus1 */
+         poc -= (int32_t)(dpm1 + 1);
          {
             uint32_t u = nv_rbsp_u(r, 1);
-            if (slot && i < NV_HEVC_MAX_RPS_PICS)
+            if (slot && i < NV_HEVC_MAX_RPS_PICS) {
+               slot->delta_poc_s0[i] = poc;
                slot->used_by_curr_s0[i] = (uint8_t)u;
+            }
          }
       }
+      poc = 0;
       for (i = 0; i < num_positive_pics; i++) {
-         (void)nv_rbsp_ue(r); /* delta_poc_s1_minus1 */
+         uint32_t dpm1 = nv_rbsp_ue(r); /* delta_poc_s1_minus1 */
+         poc += (int32_t)(dpm1 + 1);
          {
             uint32_t u = nv_rbsp_u(r, 1);
-            if (slot && i < NV_HEVC_MAX_RPS_PICS)
+            if (slot && i < NV_HEVC_MAX_RPS_PICS) {
+               slot->delta_poc_s1[i] = poc;
                slot->used_by_curr_s1[i] = (uint8_t)u;
+            }
          }
       }
    }

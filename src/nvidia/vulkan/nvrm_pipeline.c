@@ -2345,6 +2345,19 @@ nvrm_unmap_indirect(void *unmap_cookie)
       nv_rm_bo_unmap((struct nv_rm_bo *)unmap_cookie);
 }
 
+/* Ensure device MME indirect stubs are uploaded into this cmd buffer once. */
+static void
+nvrm_cmd_ensure_mme_indirect(struct nvrm_cmd_buffer *cmd)
+{
+   if (!cmd || !cmd->device || cmd->device->mme_indirect_uploaded)
+      return;
+   if (!cmd->push_map)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   if (nv_3d_mme_upload_indirect_stubs(&cmd->push, NULL))
+      cmd->device->mme_indirect_uploaded = true;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
                      VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
@@ -2356,6 +2369,7 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    uint32_t rec_stride = stride ? stride : NV_VK_DRAW_INDIRECT_STRIDE_DEFAULT;
    void *unmap = NULL;
    const uint32_t *base = NULL;
+   uint64_t ib_addr = 0;
 
    if (!cmd->push_map || !buf || !drawCount)
       return;
@@ -2365,9 +2379,22 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    }
    nvrm_cmd_emit_push_constants(cmd);
    nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   nvrm_cmd_ensure_mme_indirect(cmd);
 
+   if (buf && buf->bo)
+      ib_addr = nv_rm_bo_gpu_offset(buf->bo) + (uint64_t)offset;
+
+   /* Path A: host-mappable indirect BO */
    base = nvrm_try_map_indirect_u32(buf, offset,
                                     rec_stride * drawCount, &unmap);
+   if (!base && buf && ib_addr && cmd->device &&
+       cmd->device->mme_indirect_uploaded) {
+      /* Path C: prime MME MEM_ADDRESS + CALL_MME (END stub until real ucode).
+       * Fall through to path B/A for correctness until macro emits draws. */
+      (void)nv_3d_try_draw_indirect_path_c(&cmd->push, ib_addr, drawCount,
+                                           rec_stride, false /* indexed */,
+                                           true);
+   }
    if (!base && buf)
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);
@@ -2395,12 +2422,17 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    void *unmap = NULL;
    const uint32_t *base = NULL;
 
+   uint64_t ib_addr = 0;
+
    if (!cmd->push_map || !drawCount)
       return;
    if (cmd->bound_gfx_pipeline) {
       nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
       topo = cmd->bound_gfx_pipeline->topology_nv;
    }
+   nvrm_cmd_ensure_mme_indirect(cmd);
+   if (buf && buf->bo)
+      ib_addr = nv_rm_bo_gpu_offset(buf->bo) + (uint64_t)offset;
    if (cmd->index_valid) {
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
       nv_3d_set_index_buffer(&cmd->push, cmd->index_addr, cmd->index_size,
@@ -2412,6 +2444,12 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    if (buf)
       base = nvrm_try_map_indirect_u32(buf, offset,
                                        rec_stride * drawCount, &unmap);
+   if (!base && buf && ib_addr && cmd->device &&
+       cmd->device->mme_indirect_uploaded) {
+      (void)nv_3d_try_draw_indirect_path_c(&cmd->push, ib_addr, drawCount,
+                                           rec_stride, true /* indexed */,
+                                           true);
+   }
    if (!base && buf)
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);

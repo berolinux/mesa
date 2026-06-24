@@ -1139,6 +1139,69 @@ nv_3d_emit_draw_indexed_indirect_mme_kick(struct nv_push *p,
                                             macro_uploaded);
 }
 
+/*
+ * MME macro indices reserved by the nvrm/nvgpu indirect path C scaffolding.
+ * Real microcode is derived incrementally from binary-driver traces; until
+ * then we upload a minimal END-only stub so CALL_MME_MACRO is well-defined
+ * (returns immediately) and method state (MEM_ADDRESS, shadow RAM) is primed.
+ */
+#define NV_MME_MACRO_DRAW_INDIRECT           0
+#define NV_MME_MACRO_DRAW_INDEXED_INDIRECT   1
+#define NV_MME_MACRO_COUNT                   2
+
+/* Maxwell/Pascal MME: single END instruction (stops macro execution).
+ * Encoding is generation-specific; 0x00000001 is the common END opcode
+ * used by open-gpu-doc class headers / public MME research dumps. */
+#define NV_MME_INSN_END                      0x00000001u
+
+/**
+ * Upload minimal MME stubs for indirect draw macros (END-only).
+ * Returns true if methods were emitted; sets *uploaded_out = true.
+ * Call once during 3D channel init (device or first cmd buffer).
+ */
+static inline bool
+nv_3d_mme_upload_indirect_stubs(struct nv_push *p, bool *uploaded_out)
+{
+   static const uint32_t end_only[] = { NV_MME_INSN_END };
+   uint32_t ram_off = 0;
+   if (!p)
+      return false;
+   nv_3d_mme_set_shadow_ram_control(p,
+      NVC597_SET_MME_SHADOW_RAM_CONTROL_MODE_METHOD_TRACK);
+   nv_3d_mme_upload_macro(p, NV_MME_MACRO_DRAW_INDIRECT, ram_off,
+                          end_only, 1);
+   ram_off += 4; /* room for future multi-insn macros */
+   nv_3d_mme_upload_macro(p, NV_MME_MACRO_DRAW_INDEXED_INDIRECT, ram_off,
+                          end_only, 1);
+   if (uploaded_out)
+      *uploaded_out = true;
+   return true;
+}
+
+/**
+ * Try path C: if MME macro is uploaded, kick it; else return false so caller
+ * falls back to path A/B host/shadow indirect.
+ */
+static inline bool
+nv_3d_try_draw_indirect_path_c(struct nv_push *p,
+                               uint64_t indirect_gpu_addr,
+                               uint32_t draw_count,
+                               uint32_t stride_bytes,
+                               bool indexed,
+                               bool mme_uploaded)
+{
+   uint32_t macro = indexed ? NV_MME_MACRO_DRAW_INDEXED_INDIRECT
+                            : NV_MME_MACRO_DRAW_INDIRECT;
+   if (!mme_uploaded || !draw_count)
+      return false;
+   if (indexed)
+      return nv_3d_emit_draw_indexed_indirect_mme_kick(p, indirect_gpu_addr,
+                                                       draw_count, stride_bytes,
+                                                       macro, true);
+   return nv_3d_emit_draw_indirect_mme_kick(p, indirect_gpu_addr, draw_count,
+                                            stride_bytes, macro, true);
+}
+
 /** Map pipe_format (numeric, see p_format.h) to vertex component bit-width code. */
 static inline uint32_t
 nv_3d_vertex_comp_from_pipe(unsigned pipe_fmt)

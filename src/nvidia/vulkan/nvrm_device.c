@@ -680,6 +680,7 @@ nvrm_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       device->meta_blit_fs = NULL;
    }
    device->meta_blit_ready = false;
+   device->mme_indirect_uploaded = false;
    if (device->queue) {
       if (device->tex_pool) {
          nv_tex_pool_destroy(device->tex_pool);

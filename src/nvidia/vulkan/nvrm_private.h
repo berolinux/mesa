@@ -63,6 +63,9 @@ struct nvrm_device {
    struct nv_shader *meta_blit_fs;
    int meta_blit_tex_slot;       /* fixed tex_pool slot for blit source (-1 unset) */
    bool meta_blit_ready;
+   /* MME indirect path C: stubs uploaded once per device (END-only until
+    * real draw-indirect macro microcode lands from binary RE). */
+   bool mme_indirect_uploaded;
 };
 
 struct nvrm_queue {

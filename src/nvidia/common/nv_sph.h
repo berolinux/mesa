@@ -65,7 +65,7 @@ struct nv_sph_info {
 
 struct nv_sph_blob {
    uint32_t sph[NV_SPH_DWORDS];
-   uint32_t sass[16];          /* up to 8 instructions (16 dwords) */
+   uint32_t sass[48];          /* up to 24 instructions (48 dwords) */
    uint32_t sass_dwords;
    uint32_t total_bytes;       /* SPH + pad + sass, aligned */
 };
@@ -180,57 +180,99 @@ nv_sph_blob_finalize(struct nv_sph_blob *blob, uint8_t type, uint16_t regs)
 }
 
 /*
- * Extra SASS class bases for meta VS (IADD/LOP3 used to build clip/UV from VTXID).
- * vid layout for triangle-strip fullscreen quad (matches nv_3d_emit_blit_fullscreen_draw):
+ * Meta blit SASS class bases (Maxwell+ approximations; validated incrementally).
+ * vid layout for triangle-strip fullscreen quad (nv_3d_emit_blit_fullscreen_draw):
  *   0: pos (-1,-1) uv (0,0)   1: ( 1,-1) (1,0)   2: (-1, 1) (0,1)   3: ( 1, 1) (1,1)
- * Without full predicated SELP we emit constants suitable for a symmetric pass:
- * clip pos in R0..R3, UV in R4..R5 (attr1 x/y for FS IPA attr=1).  VTXID is loaded
- * for future SELP refinement; R4/R5 use 0/1 floats as coarse UV (viewport maps pass).
+ * Corner select uses ISETP (VTXID bit0/1) + SELP between ±1.0 / 0.0 / 1.0 floats.
  */
 #define NV_SPH_SASS_IADD_HI     0x5c100000u
 #define NV_SPH_SASS_LOP3_HI     0x5c470000u
+#define NV_SPH_SASS_ISETP_HI    0x5b6c0000u
+#define NV_SPH_SASS_SELP_HI     0x5c980000u
+#define NV_SPH_SASS_LOP_AND_IMM 0xc0u /* LOP3 imm for Rd = Ra & imm (approx) */
 
 /**
- * Meta blit vertex shader: S2R VTXID, fixed clip-space position + UV outputs.
- * R0..R3 = position (x,y,0,1); R4..R5 = UV (0..1 style constants; bit0/1 of
- * VTXID select via LOP3 masks approximated as separate imm MOVs for corners).
- * Full SELP/ISETP corner selection deferred to NIR meta shaders; this primes
- * varyings so FS IPA attr1 has non-garbage UV when hardware accepts the path.
+ * Meta blit vertex shader: S2R VTXID, ISETP/SELP corner select for pos+UV.
+ *
+ * Outputs (varyings/attrs for FS IPA):
+ *   R0..R3 = clip position (x, y, 0, 1)
+ *   R4..R5 = UV (u, v) for attr1
+ *
+ * Predicate path (approximate encoding):
+ *   P0 = (VTXID & 1) != 0  => x/u select +1.0 vs -1.0 / 1.0 vs 0.0
+ *   P1 = (VTXID & 2) != 0  => y/v select +1.0 vs -1.0 / 1.0 vs 0.0
+ * Constants in R9..R15: -1.0, +1.0, 0.0, 1.0f for SELP sources.
  */
 static inline void
 nv_sph_build_meta_blit_vs(struct nv_sph_blob *blob)
 {
    uint32_t *s;
+   unsigned n = 0;
    if (!blob)
       return;
    memset(blob, 0, sizeof(*blob));
    s = blob->sass;
-   /* S2R R8, VTXID — keep in high reg for corner math later */
-   s[0] = 8u | ((uint32_t)NV_SPH_SASS_SR_VTXID << 20);
-   s[1] = NV_SPH_SASS_S2R_HI;
-   /* Position: default lower-left (-1,-1,0,1); hardware viewport/scissor
-    * still bounds the pass; per-vertex SELP would adjust R0/R1 from R8. */
-   s[2] = 0u | 0xbf800000u; /* R0 = -1.0f x */
-   s[3] = NV_SPH_SASS_MOV_HI;
-   s[4] = 1u | 0xbf800000u; /* R1 = -1.0f y */
-   s[5] = NV_SPH_SASS_MOV_HI;
-   s[6] = 2u;               /* R2 = 0.0f z */
-   s[7] = NV_SPH_SASS_MOV_HI;
-   s[8] = 3u | 0x3f800000u; /* R3 = 1.0f w */
-   s[9] = NV_SPH_SASS_MOV_HI;
-   /* UV attr1: R4=0, R5=0 (bottom-left); FS IPA smooth interpolates across
-    * strip when other vertices would set 1.0 — interim uses 0.5 as midpoint
-    * sample for non-SEL path (TEX at centre is wrong but non-faulting). */
-   s[10] = 4u | 0x3f000000u; /* R4 = 0.5f u */
-   s[11] = NV_SPH_SASS_MOV_HI;
-   s[12] = 5u | 0x3f000000u; /* R5 = 0.5f v */
-   s[13] = NV_SPH_SASS_MOV_HI;
-   s[14] = NV_SASS_EXIT_LO;
-   s[15] = NV_SASS_EXIT_HI;
-   blob->sass_dwords = 16;
-   nv_sph_blob_finalize(blob, NV_SPH_TYPE_VERTEX, 16);
+
+   /* S2R R8, VTXID */
+   s[n++] = 8u | ((uint32_t)NV_SPH_SASS_SR_VTXID << 20);
+   s[n++] = NV_SPH_SASS_S2R_HI;
+
+   /* Constant pool: R9=-1.0, R10=+1.0, R11=0.0, R12=1.0 (float imm in lo) */
+   s[n++] = 9u | 0xbf800000u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   s[n++] = 10u | 0x3f800000u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   s[n++] = 11u; /* 0.0f */
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   s[n++] = 12u | 0x3f800000u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+
+   /* R13 = VTXID & 1 (bit0), R14 = VTXID & 2 (bit1) via LOP3 imm path approx:
+    * MOV imm masks then AND — LOP3 Rd, Ra, Rb, imm; use R13=1, R14=2 as masks. */
+   s[n++] = 13u | 0x00000001u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   s[n++] = 14u | 0x00000002u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   /* LOP3 R13, R8, R13 — AND (imm encoding in hi/lo is approximate) */
+   s[n++] = 13u | (8u << 8) | (13u << 16);
+   s[n++] = NV_SPH_SASS_LOP3_HI | NV_SPH_SASS_LOP_AND_IMM;
+   s[n++] = 14u | (8u << 8) | (14u << 16);
+   s[n++] = NV_SPH_SASS_LOP3_HI | NV_SPH_SASS_LOP_AND_IMM;
+
+   /* ISETP P0: R13 != R11 (bit0 set); ISETP P1: R14 != R11 (bit1 set)
+    * lo: pred_dst | ra<<8 | rb<<16; hi: ISETP base | unsigned | neq */
+   s[n++] = (0u << 0) | (13u << 8) | (11u << 16);
+   s[n++] = NV_SPH_SASS_ISETP_HI | (1u << 10); /* unsigned, non-EQ => NZ */
+   s[n++] = (1u << 0) | (14u << 8) | (11u << 16);
+   s[n++] = NV_SPH_SASS_ISETP_HI | (1u << 10);
+
+   /* SELP R0 = P0 ? R10 (+1) : R9 (-1)  — x position */
+   s[n++] = 0u | (10u << 8) | (9u << 16);
+   s[n++] = NV_SPH_SASS_SELP_HI | (0u << 8); /* pred P0 */
+   /* SELP R1 = P1 ? R10 (+1) : R9 (-1)  — y position */
+   s[n++] = 1u | (10u << 8) | (9u << 16);
+   s[n++] = NV_SPH_SASS_SELP_HI | (1u << 8); /* pred P1 */
+   /* R2 = 0, R3 = 1 */
+   s[n++] = 2u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+   s[n++] = 3u | 0x3f800000u;
+   s[n++] = NV_SPH_SASS_MOV_HI;
+
+   /* SELP R4 = P0 ? R12 (1.0) : R11 (0.0)  — u */
+   s[n++] = 4u | (12u << 8) | (11u << 16);
+   s[n++] = NV_SPH_SASS_SELP_HI | (0u << 8);
+   /* SELP R5 = P1 ? R12 (1.0) : R11 (0.0)  — v */
+   s[n++] = 5u | (12u << 8) | (11u << 16);
+   s[n++] = NV_SPH_SASS_SELP_HI | (1u << 8);
+
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+
+   if (n > 48)
+      n = 48;
+   blob->sass_dwords = n;
+   nv_sph_blob_finalize(blob, NV_SPH_TYPE_VERTEX, 24);
    (void)NV_SPH_SASS_IADD_HI;
-   (void)NV_SPH_SASS_LOP3_HI;
 }
 
 /**
