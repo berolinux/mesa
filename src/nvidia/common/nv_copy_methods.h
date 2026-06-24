@@ -149,6 +149,49 @@ nv_copy_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
 }
 
 /**
+ * Pitch buffer copy with sema using PIPELINED transfer (alternate to
+ * NON_PIPELINED in nv_copy_emit_buffer_copy_with_sema). Some CE/class combos
+ * only complete sema correctly with one of the two transfer types.
+ */
+static inline void
+nv_copy_emit_buffer_copy_with_sema_pipelined(struct nv_push *p,
+                                             uint64_t src_gpu_addr,
+                                             uint64_t dst_gpu_addr,
+                                             uint32_t size_bytes,
+                                             uint64_t sema_gpu_addr,
+                                             uint32_t sema_payload)
+{
+   uint32_t launch;
+
+   if (!p || !size_bytes)
+      return;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_one_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
  * Linear 1D buffer copy with CE sema release on the same LAUNCH_DMA (one-word
  * payload written when DMA completes). Prefer this over copy + host sema for
  * CE-only vertical-slice bring-up (CPU polls sema dword).

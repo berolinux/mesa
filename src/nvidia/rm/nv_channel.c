@@ -1072,6 +1072,121 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
                                       wait_timeout_ns, check_notifier);
 }
 
+static int
+g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
+                 uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                 uint32_t size_bytes, uint64_t sema_gpu_addr,
+                 volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                 bool sema_reset, uint64_t wait_timeout_ns,
+                 bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 64;
+   int pre;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   nv_copy_set_object(&push, cc);
+   if (pipelined)
+      nv_copy_emit_buffer_copy_with_sema_pipelined(&push, src_gpu_addr,
+                                                   dst_gpu_addr, size_bytes,
+                                                   sema_gpu_addr, sema_payload);
+   else
+      nv_copy_emit_buffer_copy_with_sema(&push, src_gpu_addr, dst_gpu_addr,
+                                         size_bytes, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
+                                              uint64_t src_gpu_addr,
+                                              uint64_t dst_gpu_addr,
+                                              uint32_t size_bytes,
+                                              uint64_t sema_gpu_addr,
+                                              volatile uint32_t *sema_cpu,
+                                              uint32_t sema_payload,
+                                              bool sema_reset,
+                                              uint64_t wait_timeout_ns,
+                                              bool check_notifier,
+                                              bool try_pipelined,
+                                              uint32_t *class_used_out)
+{
+   uint32_t classes[8];
+   unsigned n = 0, i, pipe_pass;
+   int last = -EINVAL;
+   uint32_t tried[8];
+   unsigned nt = 0;
+
+   if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   /* Prefer successfully RmAlloc'd class, then info refine, then alternates */
+   if (ch->class_copy_bound)
+      classes[n++] = ch->class_copy_bound;
+   if (ch->info && ch->info->class_copy)
+      classes[n++] = ch->info->class_copy;
+   classes[n++] = nv_channel_resolve_class_copy(ch, 0);
+   classes[n++] = 0x0000c7b5u;
+   classes[n++] = 0x0000c6b5u;
+   classes[n++] = 0x0000c5b5u;
+   classes[n++] = 0x0000c3b5u;
+   classes[n++] = 0x0000c1b5u;
+
+   for (pipe_pass = 0; pipe_pass < (try_pipelined ? 2u : 1u); pipe_pass++) {
+      bool pipelined = (pipe_pass == 1);
+      nt = 0;
+      for (i = 0; i < n; i++) {
+         uint32_t cc = classes[i];
+         unsigned t;
+         int r;
+         if (!cc)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cc)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 8)
+            tried[nt++] = cc;
+
+         r = g1_copy_sema_one(ch, cc, pipelined, src_gpu_addr, dst_gpu_addr,
+                              size_bytes, sema_gpu_addr, sema_cpu, sema_payload,
+                              sema_reset, wait_timeout_ns, check_notifier);
+         if (r == 0) {
+            if (class_used_out)
+               *class_used_out = cc;
+            /* Remember working class for future resolves on this channel */
+            if (!ch->class_copy_bound)
+               ch->class_copy_bound = cc;
+            return 0;
+         }
+         last = r;
+         /* Hard channel issues: don't burn timeout budget on more classes */
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+      }
+   }
+   return last;
+}
+
 int
 nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
                                   uint32_t class_copy,

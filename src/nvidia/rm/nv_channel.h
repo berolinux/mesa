@@ -238,6 +238,25 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
                                   uint64_t wait_timeout_ns,
                                   bool check_notifier);
 
+/**
+ * G1 copy+sema with class alternates (bound/info/C7B5/C6B5/C5B5/...).
+ * On success, *class_used_out (optional) receives the working class_copy.
+ * pipelined=true uses PIPELINED LAUNCH_DMA (second pass if non-pipelined fails).
+ */
+int
+nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
+                                              uint64_t src_gpu_addr,
+                                              uint64_t dst_gpu_addr,
+                                              uint32_t size_bytes,
+                                              uint64_t sema_gpu_addr,
+                                              volatile uint32_t *sema_cpu,
+                                              uint32_t sema_payload,
+                                              bool sema_reset,
+                                              uint64_t wait_timeout_ns,
+                                              bool check_notifier,
+                                              bool try_pipelined,
+                                              uint32_t *class_used_out);
+
 /** G1 sema-only CE fence (no data transfer) + submit/wait. */
 int
 nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,

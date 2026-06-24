@@ -109,6 +109,7 @@ struct nv_smoke_hw_result {
    bool g1_was_scheduled;     /* channel scheduled at G1 start */
    bool g1_sema_vram;         /* sema BO in VRAM (vs sysmem) */
    bool g1_bufs_vram;         /* src/dst BOs in VRAM */
+   bool g1_used_class_try;    /* true if multi-class/pipelined try path was used */
    uint64_t g1_sema_gpu;
    uint64_t g1_src_gpu;
    uint64_t g1_dst_gpu;

@@ -345,15 +345,17 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             memset(sc->dst_cpu, 0, 256);
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
-         /* Still attempt submit on -EAGAIN (unscheduled) so logs show ETIMEDOUT vs EAGAIN */
-         res.g1_submit_rc = nv_channel_g1_ce_copy_sema_submit(ch, 0,
-                                                              sc->src_gpu,
-                                                              sc->dst_gpu,
-                                                              256, sc->sema_gpu,
-                                                              sc->sema_cpu,
-                                                              sc->sema_payload,
-                                                              true, to,
-                                                              check_notifier);
+         /*
+          * Multi-class + optional PIPELINED LAUNCH_DMA (try_pipelined=true).
+          * First success updates class_copy_bound for later sema_only/remap probes.
+          */
+         res.g1_used_class_try = true;
+         res.g1_submit_rc = nv_channel_g1_ce_copy_sema_submit_try_classes(
+            ch, sc->src_gpu, sc->dst_gpu, 256, sc->sema_gpu, sc->sema_cpu,
+            sc->sema_payload, true, to, check_notifier, true /* try_pipelined */,
+            &res.g1_class_copy);
+         if (!res.g1_class_copy)
+            res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
          res.g1_rc = res.g1_submit_rc;
          if (sc->sema_cpu)
             res.g1_sema_observed = sc->sema_cpu[0];
