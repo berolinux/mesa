@@ -97,6 +97,14 @@ struct nv_rm_bo;
 #define NV_TEX_SAMP_FILT_NEAREST     0x1
 #define NV_TEX_SAMP_FILT_LINEAR      0x2
 
+/* Blocklinear gobs-per-block log2 encodings (NVC597_TEXHEAD_BL_GOBS_PER_BLOCK_*) */
+#define NV_TEX_GOBS_ONE          0x0
+#define NV_TEX_GOBS_TWO          0x1
+#define NV_TEX_GOBS_FOUR         0x2
+#define NV_TEX_GOBS_EIGHT        0x3
+#define NV_TEX_GOBS_SIXTEEN      0x4
+#define NV_TEX_GOBS_THIRTYTWO    0x5
+
 struct nv_tex_desc {
    uint64_t gpu_addr;
    uint32_t width;
@@ -109,6 +117,11 @@ struct nv_tex_desc {
    uint8_t  texture_type;   /* NV_TEX_TEXTURE_TYPE_*; default 2D */
    bool     normalized_coords;
    bool     s_r_g_b_conversion; /* sRGB */
+   bool     blocklinear;    /* if true, use TEXHEAD_BL instead of PITCH */
+   /* Blocklinear layout (only when blocklinear=true) */
+   uint8_t  gobs_width;     /* NV_TEX_GOBS_* log2 count in X (usually ONE) */
+   uint8_t  gobs_height;    /* NV_TEX_GOBS_* log2 count in Y */
+   uint8_t  gobs_depth;     /* NV_TEX_GOBS_* log2 count in Z (usually ONE for 2D) */
    /* sampler */
    uint8_t  addr_u, addr_v, addr_p;
    uint8_t  mag_filt, min_filt;
@@ -248,6 +261,96 @@ nv_tex_encode_pitch_2d(const struct nv_tex_desc *d, struct nv_tex_entry *e)
    /* S_R_G_B_CONVERSION MW(123:123) if present in pitch header — set when sRGB */
    if (d->s_r_g_b_conversion)
       nv_tex_mw_set_u32(e->head, 123, 123, 1);
+}
+
+/*
+ * Encode blocklinear 2D texture header using exact clc597tex TEXHEAD_BL MW
+ * positions.  Address is 512-byte aligned (bits 31:9 of address); gobs-per-block
+ * describe the swizzle tile (default 1x16x1 gobs for 2D color surfaces).
+ */
+static inline void
+nv_tex_encode_bl_2d(const struct nv_tex_desc *d, struct nv_tex_entry *e)
+{
+   uint32_t w1 = d->width ? (d->width - 1) : 0;
+   uint32_t h1 = d->height ? (d->height - 1) : 0;
+   uint64_t addr = d->gpu_addr;
+   uint8_t dt = d->data_type ? d->data_type : NV_TEX_DT_UNORM;
+   uint8_t sx = d->src_x ? d->src_x : NV_TEX_SRC_R;
+   uint8_t sy = d->src_y ? d->src_y : NV_TEX_SRC_G;
+   uint8_t sz = d->src_z ? d->src_z : NV_TEX_SRC_B;
+   uint8_t sw = d->src_w ? d->src_w : NV_TEX_SRC_A;
+   uint8_t comp = d->components ? d->components : NV_TEX_COMP_A8B8G8R8;
+   uint8_t ttype = d->texture_type ? d->texture_type : NV_TEX_TEXTURE_TYPE_2D;
+   uint8_t au = d->addr_u ? d->addr_u : NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   uint8_t av = d->addr_v ? d->addr_v : NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   uint8_t ap = d->addr_p ? d->addr_p : NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   uint8_t mag = d->mag_filt ? d->mag_filt : NV_TEX_SAMP_FILT_LINEAR;
+   uint8_t minf = d->min_filt ? d->min_filt : NV_TEX_SAMP_FILT_LINEAR;
+   uint8_t mip = d->mip_filt ? d->mip_filt : NV_TEX_SAMP_FILT_NEAREST;
+   uint8_t gobs_w = d->gobs_width;   /* default ONE_GOB = 0 */
+   uint8_t gobs_h = d->gobs_height ? d->gobs_height : NV_TEX_GOBS_SIXTEEN;
+   uint8_t gobs_d = d->gobs_depth;   /* default ONE_GOB = 0 */
+   uint32_t addr31_9;
+   uint32_t addr48_32;
+
+   memset(e, 0, sizeof(*e));
+
+   e->samp[0] = (au & 7) | ((av & 7) << 3) | ((ap & 7) << 6);
+   e->samp[1] = (mag & 7) | ((minf & 7) << 3) | ((mip & 7) << 6);
+
+   /* --- TEXHEAD_BL via MW positions from clc597tex.h --- */
+   /* COMPONENTS MW(6:0) */
+   nv_tex_mw_set_u32(e->head, 6, 0, comp);
+   /* R/G/B/A_DATA_TYPE MW(9:7)(12:10)(15:13)(18:16) */
+   nv_tex_mw_set_u32(e->head, 9, 7, dt);
+   nv_tex_mw_set_u32(e->head, 12, 10, dt);
+   nv_tex_mw_set_u32(e->head, 15, 13, dt);
+   nv_tex_mw_set_u32(e->head, 18, 16, dt);
+   /* X/Y/Z/W_SOURCE MW(21:19)(24:22)(27:25)(30:28) */
+   nv_tex_mw_set_u32(e->head, 21, 19, sx);
+   nv_tex_mw_set_u32(e->head, 24, 22, sy);
+   nv_tex_mw_set_u32(e->head, 27, 25, sz);
+   nv_tex_mw_set_u32(e->head, 30, 28, sw);
+
+   /* ADDRESS_BITS31TO9 MW(63:41) — 23 bits of (addr >> 9); 512B alignment */
+   addr31_9 = (uint32_t)((addr >> 9) & 0x7fffffu);
+   nv_tex_mw_set_u32(e->head, 63, 41, addr31_9);
+   /* ADDRESS_BITS48TO32 MW(80:64) — 17 bits */
+   addr48_32 = (uint32_t)((addr >> 32) & 0x1ffffu);
+   nv_tex_mw_set_u32(e->head, 80, 64, addr48_32);
+   /* HEADER_VERSION MW(87:85) = SELECT_BLOCKLINEAR (3) */
+   nv_tex_mw_set_u32(e->head, 87, 85, NV_TEX_HEADER_VERSION_BL);
+
+   /* GOBS_PER_BLOCK_WIDTH MW(98:96), HEIGHT MW(101:99), DEPTH MW(104:102) */
+   nv_tex_mw_set_u32(e->head, 98, 96, gobs_w & 7);
+   nv_tex_mw_set_u32(e->head, 101, 99, gobs_h & 7);
+   nv_tex_mw_set_u32(e->head, 104, 102, gobs_d & 7);
+
+   /* WIDTH_MINUS_ONE MW(144:128) — 17 bits */
+   nv_tex_mw_set_u32(e->head, 144, 128, w1 & 0x1ffffu);
+   /* HEIGHT_MINUS_ONE_BIT16 MW(146:146) */
+   if (h1 & 0x10000u)
+      nv_tex_mw_set_u32(e->head, 146, 146, 1);
+   /* S_R_G_B_CONVERSION MW(150:150) */
+   if (d->s_r_g_b_conversion)
+      nv_tex_mw_set_u32(e->head, 150, 150, 1);
+   /* TEXTURE_TYPE MW(154:151) */
+   nv_tex_mw_set_u32(e->head, 154, 151, ttype & 0xfu);
+   /* HEIGHT_MINUS_ONE MW(175:160) — low 16 bits */
+   nv_tex_mw_set_u32(e->head, 175, 160, h1 & 0xffffu);
+   /* NORMALIZED_COORDS MW(191:191) */
+   if (d->normalized_coords)
+      nv_tex_mw_set_u32(e->head, 191, 191, 1);
+}
+
+/** Encode pitch or blocklinear header based on d->blocklinear. */
+static inline void
+nv_tex_encode_2d(const struct nv_tex_desc *d, struct nv_tex_entry *e)
+{
+   if (d && d->blocklinear)
+      nv_tex_encode_bl_2d(d, e);
+   else
+      nv_tex_encode_pitch_2d(d, e);
 }
 
 /** Map common pipe_format numeric id to tex component size + data type. */
