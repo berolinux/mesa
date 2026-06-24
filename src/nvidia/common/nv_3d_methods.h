@@ -228,6 +228,11 @@ extern "C" {
 #define NVC597_SET_RENDER_ENABLE_A              0x1550
 #define NVC597_SET_RENDER_ENABLE_B              0x1554
 #define NVC597_SET_RENDER_ENABLE_C              0x1558
+#define NVC597_SET_RENDER_ENABLE_C_MODE_FALSE              0x0
+#define NVC597_SET_RENDER_ENABLE_C_MODE_TRUE               0x1
+#define NVC597_SET_RENDER_ENABLE_C_MODE_CONDITIONAL        0x2 /* render if mem != 0 */
+#define NVC597_SET_RENDER_ENABLE_C_MODE_RENDER_IF_EQUAL    0x3
+#define NVC597_SET_RENDER_ENABLE_C_MODE_RENDER_IF_NOT_EQUAL 0x4
 #define NVC597_SET_RENDER_ENABLE_OVERRIDE       0x1944
 #define NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER  0x0
 #define NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE 0x1
@@ -236,6 +241,22 @@ extern "C" {
 #define NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_TRUE  1
 #define NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_FALSE 0
 #define NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE     (1u << 2)
+/* Two-sided / back stencil (clc597.h) */
+#define NVC597_SET_BACK_STENCIL_FUNC_REF        0x0f54
+#define NVC597_SET_BACK_STENCIL_MASK            0x0f58
+#define NVC597_SET_BACK_STENCIL_FUNC_MASK       0x0f5c
+#define NVC597_SET_DEPTH_BOUNDS_MIN             0x0f9c
+#define NVC597_SET_DEPTH_BOUNDS_MAX             0x0fa0
+#define NVC597_SET_TWO_SIDED_STENCIL_TEST       0x1594
+#define NVC597_SET_BACK_STENCIL_OP_FAIL         0x1598
+#define NVC597_SET_BACK_STENCIL_OP_ZFAIL        0x159c
+#define NVC597_SET_BACK_STENCIL_OP_ZPASS        0x15a0
+#define NVC597_SET_BACK_STENCIL_FUNC            0x15a4
+#define NVC597_SET_STENCIL_FUNC_MASK            0x1398
+#define NVC597_SET_DEPTH_BOUNDS_TEST            0x19bc
+/* Logic op enable is bit 0 of SET_LOGIC_OP method word; op value in full dword */
+#define NVC597_SET_LOGIC_OP_ENABLE_TRUE         1u
+#define NVC597_SET_LOGIC_OP_ENABLE_FALSE        0u
 
 /* Fixed-function / texture pool / channel init (nvidia-3d fermi init) */
 #define NVC597_SET_RASTER_ENABLE                0x037c
@@ -962,20 +983,51 @@ nv_3d_set_scissor_n(struct nv_push *p, unsigned j,
 
 /**
  * Conditional render / predication: point RENDER_ENABLE at a sema/report
- * memory word; override mode selects always/use/never render.
+ * memory word; render_c_mode is NVC597_SET_RENDER_ENABLE_C_MODE_*;
+ * mode_override selects always/use/never render via OVERRIDE register.
+ *
+ * For normal cond-render (render when *addr != 0): CONDITIONAL + USE_RENDER_ENABLE.
+ * For inverted (render when *addr == 0): RENDER_IF_EQUAL + USE_RENDER_ENABLE
+ * with compare value 0 (hardware compares memory to 0 internally for IF_EQUAL).
  */
 static inline void
-nv_3d_set_render_enable_memory(struct nv_push *p, uint64_t cond_gpu_addr,
-                               uint32_t mode_override)
+nv_3d_set_render_enable_memory_ex(struct nv_push *p, uint64_t cond_gpu_addr,
+                                  uint32_t render_c_mode,
+                                  uint32_t mode_override)
 {
    if (cond_gpu_addr) {
       nv_push_method(p, NVC597_SET_RENDER_ENABLE_A,
                      (uint32_t)(cond_gpu_addr >> 32) & 0xff);
       nv_push_method(p, NVC597_SET_RENDER_ENABLE_B,
                      (uint32_t)(cond_gpu_addr & 0xffffffffu));
-      nv_push_method(p, NVC597_SET_RENDER_ENABLE_C, 0); /* mode: render if != 0 */
+      nv_push_method(p, NVC597_SET_RENDER_ENABLE_C, render_c_mode);
    }
    nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE, mode_override);
+}
+
+static inline void
+nv_3d_set_render_enable_memory(struct nv_push *p, uint64_t cond_gpu_addr,
+                               uint32_t mode_override)
+{
+   nv_3d_set_render_enable_memory_ex(p, cond_gpu_addr,
+      cond_gpu_addr ? NVC597_SET_RENDER_ENABLE_C_MODE_CONDITIONAL : 0,
+      mode_override);
+}
+
+/** Conditional rendering: normal = render if *addr != 0; inverted = if *addr == 0 */
+static inline void
+nv_3d_set_conditional_render(struct nv_push *p, uint64_t cond_gpu_addr,
+                             bool inverted)
+{
+   if (!cond_gpu_addr) {
+      nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE,
+                     NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+      return;
+   }
+   nv_3d_set_render_enable_memory_ex(p, cond_gpu_addr,
+      inverted ? NVC597_SET_RENDER_ENABLE_C_MODE_RENDER_IF_EQUAL
+               : NVC597_SET_RENDER_ENABLE_C_MODE_CONDITIONAL,
+      NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE);
 }
 
 static inline void
@@ -1110,12 +1162,19 @@ nv_3d_ogl_blend_factor(unsigned pipe_factor, bool is_alpha)
  * smooth_shade: non-zero => smooth, else flat
  */
 
-/** Stencil op: map Vulkan/GL style 0..7 to NVC597 values (KEEP=1, ZERO=2, REPLACE=3, INCR=4, DECR=5, INVERT=6, INCR_WRAP=7, DECR_WRAP=8; 0=KEEP) */
+/** Stencil op: map Vulkan/GL style 0..7 to NVC597 D3D values (KEEP=1, ZERO=2, REPLACE=3, INCR=4, DECR=5, INVERT=6, INCR_WRAP=7, DECR_WRAP=8) */
 static inline uint32_t
 nv_3d_ogl_stencil_op(unsigned op)
 {
    static const uint32_t tbl[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
    return op < 8 ? tbl[op] : 1;
+}
+
+/** Vulkan stencil op (KEEP=0..DECR_WRAP=7) to hardware D3D encoding */
+static inline uint32_t
+nv_3d_vk_stencil_op(unsigned vk_op)
+{
+   return nv_3d_ogl_stencil_op(vk_op);
 }
 
 static inline void
@@ -1127,23 +1186,164 @@ nv_3d_emit_depth_state(struct nv_push *p, bool test_enable, bool write_enable,
    nv_push_method(p, NVC597_SET_DEPTH_FUNC, nv_3d_ogl_cmp_func(compare_op));
 }
 
+/** Front-face (default) stencil plane: func, masks, ref, ops */
+static inline void
+nv_3d_emit_stencil_front(struct nv_push *p,
+                         unsigned compare_op, unsigned compare_mask,
+                         unsigned write_mask, unsigned reference,
+                         unsigned fail_op, unsigned zfail_op, unsigned zpass_op)
+{
+   nv_push_method(p, NVC597_SET_STENCIL_FUNC, nv_3d_ogl_cmp_func(compare_op));
+   nv_push_method(p, NVC597_SET_STENCIL_FUNC_REF, reference & 0xff);
+   nv_push_method(p, NVC597_SET_STENCIL_FUNC_MASK, compare_mask & 0xff);
+   nv_push_method(p, NVC597_SET_STENCIL_MASK, write_mask & 0xff);
+   nv_push_method(p, NVC597_SET_STENCIL_OP_FAIL, nv_3d_ogl_stencil_op(fail_op));
+   nv_push_method(p, NVC597_SET_STENCIL_OP_ZFAIL, nv_3d_ogl_stencil_op(zfail_op));
+   nv_push_method(p, NVC597_SET_STENCIL_OP_ZPASS, nv_3d_ogl_stencil_op(zpass_op));
+}
+
+/** Back-face stencil plane (requires SET_TWO_SIDED_STENCIL_TEST=1) */
+static inline void
+nv_3d_emit_stencil_back(struct nv_push *p,
+                        unsigned compare_op, unsigned compare_mask,
+                        unsigned write_mask, unsigned reference,
+                        unsigned fail_op, unsigned zfail_op, unsigned zpass_op)
+{
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_FUNC, nv_3d_ogl_cmp_func(compare_op));
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_FUNC_REF, reference & 0xff);
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_FUNC_MASK, compare_mask & 0xff);
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_MASK, write_mask & 0xff);
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_OP_FAIL, nv_3d_ogl_stencil_op(fail_op));
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_OP_ZFAIL, nv_3d_ogl_stencil_op(zfail_op));
+   nv_push_method(p, NVC597_SET_BACK_STENCIL_OP_ZPASS, nv_3d_ogl_stencil_op(zpass_op));
+}
+
+/**
+ * Full stencil state: enable, optional two-sided, front (+ optional back).
+ * If two_sided is false, only front plane is programmed (back mirrors front in HW default).
+ */
+static inline void
+nv_3d_emit_stencil_state_full(struct nv_push *p, bool enable, bool two_sided,
+                              unsigned f_cmp, unsigned f_cmp_mask,
+                              unsigned f_wrt_mask, unsigned f_ref,
+                              unsigned f_fail, unsigned f_zfail, unsigned f_zpass,
+                              unsigned b_cmp, unsigned b_cmp_mask,
+                              unsigned b_wrt_mask, unsigned b_ref,
+                              unsigned b_fail, unsigned b_zfail, unsigned b_zpass)
+{
+   nv_push_method(p, NVC597_SET_STENCIL_TEST, enable ? 1 : 0);
+   if (!enable)
+      return;
+   nv_push_method(p, NVC597_SET_TWO_SIDED_STENCIL_TEST, two_sided ? 1 : 0);
+   nv_3d_emit_stencil_front(p, f_cmp, f_cmp_mask, f_wrt_mask, f_ref,
+                            f_fail, f_zfail, f_zpass);
+   if (two_sided)
+      nv_3d_emit_stencil_back(p, b_cmp, b_cmp_mask, b_wrt_mask, b_ref,
+                              b_fail, b_zfail, b_zpass);
+}
+
 static inline void
 nv_3d_emit_stencil_state(struct nv_push *p, bool enable,
                          unsigned compare_op, unsigned compare_mask,
                          unsigned write_mask, unsigned reference,
                          unsigned fail_op, unsigned zfail_op, unsigned zpass_op)
 {
-   nv_push_method(p, NVC597_SET_STENCIL_TEST, enable ? 1 : 0);
-   if (!enable)
+   nv_3d_emit_stencil_state_full(p, enable, false,
+      compare_op, compare_mask, write_mask, reference,
+      fail_op, zfail_op, zpass_op,
+      compare_op, compare_mask, write_mask, reference,
+      fail_op, zfail_op, zpass_op);
+}
+
+/** OGL-style cull/front-face; cull_face: 0=none, 1=front, 2=back, 3=front+back */
+static inline void
+nv_3d_emit_cull_front_face(struct nv_push *p, unsigned cull_face, bool front_ccw)
+{
+   nv_push_method(p, NVC597_OGL_SET_FRONT_FACE,
+                  front_ccw ? NVC597_OGL_SET_FRONT_FACE_V_CCW
+                            : NVC597_OGL_SET_FRONT_FACE_V_CW);
+   if (cull_face) {
+      uint32_t dir = NVC597_OGL_SET_CULL_FACE_V_BACK;
+      if (cull_face == 1)
+         dir = NVC597_OGL_SET_CULL_FACE_V_FRONT;
+      else if (cull_face == 3)
+         dir = NVC597_OGL_SET_CULL_FACE_V_FRONT_AND_BACK;
+      nv_push_method(p, NVC597_OGL_SET_CULL, 1);
+      nv_push_method(p, NVC597_OGL_SET_CULL_FACE, dir);
+   } else {
+      nv_push_method(p, NVC597_OGL_SET_CULL, 0);
+   }
+}
+
+/** Map VkCullModeFlags to internal cull_face encoding */
+static inline unsigned
+nv_3d_cull_face_from_vk(uint32_t vk_cull_mode)
+{
+   /* VK_CULL_MODE_NONE=0, FRONT=1, BACK=2, FRONT_AND_BACK=3 */
+   return (unsigned)(vk_cull_mode & 3u);
+}
+
+static inline void
+nv_3d_emit_fill_mode(struct nv_push *p, unsigned fill_mode)
+{
+   uint32_t fill = NVC597_SET_FILL_MODE_V_SOLID;
+   if (fill_mode == 1)
+      fill = NVC597_SET_FILL_MODE_V_WIREFRAME;
+   else if (fill_mode == 2)
+      fill = NVC597_SET_FILL_MODE_V_POINT;
+   nv_push_method(p, NVC597_SET_FILL_MODE, fill);
+}
+
+static inline void
+nv_3d_emit_point_size(struct nv_push *p, float size)
+{
+   union { float f; uint32_t u; } v;
+   v.f = size;
+   nv_push_method(p, NVC597_SET_POINT_SIZE, v.u);
+}
+
+static inline void
+nv_3d_emit_rasterizer_discard(struct nv_push *p, bool discard)
+{
+   /* raster enable = !discard */
+   nv_push_method(p, NVC597_SET_RASTER_ENABLE, discard ? 0 : 1);
+}
+
+static inline void
+nv_3d_emit_provoking_vertex(struct nv_push *p, bool last_vertex)
+{
+   nv_push_method(p, NVC597_SET_PROVOKING_VERTEX,
+                  last_vertex ? NVC597_SET_PROVOKING_VERTEX_V_LAST
+                              : NVC597_SET_PROVOKING_VERTEX_V_FIRST);
+}
+
+static inline void
+nv_3d_emit_depth_bounds(struct nv_push *p, bool enable, float min_d, float max_d)
+{
+   union { float f; uint32_t u; } lo, hi;
+   lo.f = min_d;
+   hi.f = max_d;
+   nv_push_method(p, NVC597_SET_DEPTH_BOUNDS_TEST, enable ? 1 : 0);
+   if (enable) {
+      nv_push_method(p, NVC597_SET_DEPTH_BOUNDS_MIN, lo.u);
+      nv_push_method(p, NVC597_SET_DEPTH_BOUNDS_MAX, hi.u);
+   }
+}
+
+/** Logic op: enable + Vulkan/GL op code (COPY=0x1503 etc. via OGL codes in method) */
+static inline void
+nv_3d_emit_logic_op(struct nv_push *p, bool enable, unsigned vk_logic_op)
+{
+   /* Vulkan VkLogicOp 0..15 maps to GL 0x1500+op; enable is separate method at 0x19c8
+    * on some gens — on C597 enable is programmed via SET_LOGIC_OP with op when on,
+    * and a follow-up clear.  Use dedicated enable method if present (0x19c8) via
+    * LOGIC_OP register with enable bit patterns from class header. */
+   uint32_t gl_op = 0x1500u + (vk_logic_op & 0xfu);
+   if (!enable) {
+      nv_push_method(p, NVC597_SET_LOGIC_OP, 0); /* disable path: zeroed op */
       return;
-   nv_push_method(p, NVC597_SET_STENCIL_FUNC, nv_3d_ogl_cmp_func(compare_op));
-   nv_push_method(p, NVC597_SET_STENCIL_FUNC_REF, reference & 0xff);
-   nv_push_method(p, NVC597_SET_STENCIL_MASK, compare_mask & 0xff);
-   /* Write mask shares SET_STENCIL_MASK upper or separate; use low 8 for func mask */
-   (void)write_mask;
-   nv_push_method(p, NVC597_SET_STENCIL_OP_FAIL, nv_3d_ogl_stencil_op(fail_op));
-   nv_push_method(p, NVC597_SET_STENCIL_OP_ZFAIL, nv_3d_ogl_stencil_op(zfail_op));
-   nv_push_method(p, NVC597_SET_STENCIL_OP_ZPASS, nv_3d_ogl_stencil_op(zpass_op));
+   }
+   nv_push_method(p, NVC597_SET_LOGIC_OP, gl_op);
 }
 
 static inline void
