@@ -10,7 +10,7 @@ libnvgpu = static_library(
   'nvgpu',
   files_libnvgpu,
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     inc_gallium_drivers,
     include_directories('../../../../include'),
     include_directories('../../../nvidia/common'),

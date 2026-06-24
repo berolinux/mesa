@@ -31,12 +31,13 @@ nvrm_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
 {
    struct nvrm_instance *instance;
    VkResult result;
+   const VkAllocationCallbacks *alloc = pAllocator ? pAllocator
+                                                   : vk_default_allocator();
 
    if (!nv_rm_probe_available())
       return VK_ERROR_INITIALIZATION_FAILED;
 
-   instance = vk_zalloc2(vk_default_allocator(pAllocator), NULL,
-                         sizeof(*instance), 8,
+   instance = vk_zalloc2(alloc, NULL, sizeof(*instance), 8,
                          VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!instance)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -45,9 +46,12 @@ nvrm_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
                              &nvrm_instance_entrypoints, pCreateInfo,
                              pAllocator);
    if (result != VK_SUCCESS) {
-      vk_free2(vk_default_allocator(pAllocator), NULL, instance);
+      vk_free2(alloc, NULL, instance);
       return result;
    }
+
+   instance->vk.physical_devices.enumerate = nvrm_enumerate_physical_devices;
+   instance->vk.physical_devices.destroy = nvrm_physical_device_destroy;
 
    *pInstance = nvrm_instance_to_handle(instance);
    return VK_SUCCESS;
@@ -58,6 +62,7 @@ nvrm_DestroyInstance(VkInstance _instance,
                      const VkAllocationCallbacks *pAllocator)
 {
    VK_FROM_HANDLE(nvrm_instance, instance, _instance);
+   (void)pAllocator;
    if (!instance)
       return;
    vk_instance_finish(&instance->vk);
@@ -68,8 +73,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 nvrm_GetInstanceProcAddr(VkInstance _instance, const char *pName)
 {
    VK_FROM_HANDLE(nvrm_instance, instance, _instance);
-   return vk_instance_get_proc_addr(instance ? &instance->vk : NULL,
-                                    &nvrm_instance_entrypoints, pName);
+   /* Runtime uses entrypoint tables; without full codegen we fall back to
+    * the instance dispatch table / common helpers via unchecked lookup. */
+   if (!instance)
+      return vk_instance_get_proc_addr_unchecked(NULL, pName);
+   return vk_instance_get_proc_addr_unchecked(&instance->vk, pName);
 }
 
 PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL

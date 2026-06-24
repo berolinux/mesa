@@ -105,6 +105,9 @@ endif
 if with_any_nouveau
   subdir('nouveau')
 endif
+# NVIDIA driver tree is included after compiler/vulkan runtime so idep_nir and
+# inc_compiler-adjacent paths exist; only inc_mesa/inc_gallium from this file
+# are required at configure time.
 if with_gallium_nvgpu or with_nvrm_vk
   subdir('nvidia')
 endif

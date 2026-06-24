@@ -83,7 +83,7 @@ nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image,
 
 /* Bind a pre-uploaded nv_shader to the graphics pipeline (helper for pipeline
  * bind once shader modules compile to machine code). */
-void
+static void
 nvrm_cmd_bind_graphics_shader(struct nvrm_cmd_buffer *cmd,
                               const struct nv_shader *sh,
                               uint64_t program_region_base)
@@ -96,7 +96,7 @@ nvrm_cmd_bind_graphics_shader(struct nvrm_cmd_buffer *cmd,
 
 /* Record a host semaphore release at the end of the command buffer segment
  * (queue submit path can wait via nv_fence_wait on the same sema BO). */
-void
+static void
 nvrm_cmd_emit_host_sema_release(struct nvrm_cmd_buffer *cmd,
                                 uint64_t sema_gpu_addr, uint32_t payload)
 {

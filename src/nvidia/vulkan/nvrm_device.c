@@ -4,6 +4,7 @@
  */
 
 #include "nvrm_private.h"
+#include "nvrm_wsi.h"
 
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
@@ -57,8 +58,12 @@ nvrm_enumerate_physical_devices(struct vk_instance *vk_instance)
       pdev->gpu_index = i;
 
       vk_physical_device_init(&pdev->vk, &instance->vk,
-                             &nvrm_physical_device_entrypoints,
-                             NULL); /* sync types filled later */
+                             NULL, NULL, NULL,
+                             &nvrm_physical_device_entrypoints);
+
+      /* WSI is optional at bring-up; failure leaves a non-WSI physical device */
+      if (nvrm_init_wsi(pdev) != VK_SUCCESS)
+         pdev->vk.wsi_device = NULL;
 
       list_addtail(&pdev->vk.link, &instance->vk.physical_devices.list);
    }
@@ -72,7 +77,7 @@ nvrm_physical_device_destroy(struct vk_physical_device *vk_pdev)
    struct nvrm_physical_device *pdev =
       container_of(vk_pdev, struct nvrm_physical_device, vk);
 
-   wsi_device_finish(&pdev->wsi_device);
+   nvrm_finish_wsi(pdev);
    if (pdev->rm)
       nv_rm_device_close(pdev->rm);
    if (pdev->drm_fd >= 0)
@@ -241,8 +246,10 @@ nvrm_CreateDevice(VkPhysicalDevice physicalDevice,
    device->rm = pdev->rm;
    device->info = pdev->info;
 
-   result = vk_device_init(&device->vk, &pdev->vk, NULL /* check dispatch */,
-                          &nvrm_device_entrypoints, pCreateInfo, pAllocator);
+   result = vk_device_init(&device->vk, &pdev->vk, NULL,
+                          pCreateInfo, pAllocator);
+   if (result == VK_SUCCESS)
+      device->vk.dispatch_table = nvrm_device_entrypoints;
    if (result != VK_SUCCESS) {
       vk_free2(&pdev->vk.instance->alloc, pAllocator, device);
       return result;

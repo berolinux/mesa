@@ -12,6 +12,7 @@ nvrm_files = files(
   'nvrm_cmd_buffer.c',
   'nvrm_memory.c',
   'nvrm_pipeline.c',
+  'nvrm_wsi.c',
 )
 
 # Hand-maintained entrypoint tables (minimal) so we compile without codegen yet.
@@ -21,11 +22,11 @@ libvulkan_nvrm = static_library(
   'vulkan_nvrm',
   [nvrm_files, nvrm_stub_entrypoints],
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
+    include_directories('../../compiler'),
     include_directories('../common'),
     include_directories('../rm'),
     include_directories('../compiler'),
-    inc_compiler,
   ],
   c_args : [
     no_override_init_args,

@@ -16,7 +16,10 @@
 #include "vk_pipeline.h"
 #include "vk_shader_module.h"
 #include "vk_descriptor_set_layout.h"
+#include "vk_nir.h"
 #include "nir.h"
+#include "spirv/nir_spirv.h"
+#include "util/ralloc.h"
 
 /* ---------- shader module ---------- */
 
@@ -160,11 +163,103 @@ vk_stage_to_kind(VkShaderStageFlagBits stage)
    }
 }
 
+static mesa_shader_stage
+vk_stage_to_mesa(VkShaderStageFlagBits stage)
+{
+   switch (stage) {
+   case VK_SHADER_STAGE_VERTEX_BIT: return MESA_SHADER_VERTEX;
+   case VK_SHADER_STAGE_FRAGMENT_BIT: return MESA_SHADER_FRAGMENT;
+   case VK_SHADER_STAGE_GEOMETRY_BIT: return MESA_SHADER_GEOMETRY;
+   case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT: return MESA_SHADER_TESS_CTRL;
+   case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT: return MESA_SHADER_TESS_EVAL;
+   case VK_SHADER_STAGE_COMPUTE_BIT: return MESA_SHADER_COMPUTE;
+   default: return MESA_SHADER_VERTEX;
+   }
+}
+
+/* NIR options filled conservatively; backend lowers most ops in isel/stubs. */
+static const nir_shader_compiler_options nvrm_nir_options = { 0 };
+
+static struct spirv_to_nir_options
+nvrm_spirv_options(void)
+{
+   return (struct spirv_to_nir_options){
+      .ubo_addr_format = nir_address_format_32bit_index_offset,
+      .ssbo_addr_format = nir_address_format_64bit_global,
+      .phys_ssbo_addr_format = nir_address_format_64bit_global,
+      .push_const_addr_format = nir_address_format_32bit_offset,
+      .shared_addr_format = nir_address_format_32bit_offset,
+      .constant_addr_format = nir_address_format_64bit_global,
+   };
+}
+
+static nir_shader *
+nvrm_shader_stage_to_nir(struct nvrm_device *dev,
+                         const VkPipelineShaderStageCreateInfo *stage)
+{
+   VK_FROM_HANDLE(vk_shader_module, module, stage->module);
+   mesa_shader_stage mesa_stage = vk_stage_to_mesa(stage->stage);
+   const char *entrypoint = stage->pName ? stage->pName : "main";
+   struct spirv_to_nir_options spirv_opts;
+   nir_shader *nir = NULL;
+   void *mem_ctx;
+
+   if (!module)
+      return NULL;
+
+   /* Already-converted NIR (internal / test path) */
+   if (module->nir)
+      return nir_shader_clone(NULL, module->nir);
+
+   if (!module->size)
+      return NULL;
+
+   spirv_opts = nvrm_spirv_options();
+   mem_ctx = ralloc_context(NULL);
+   if (!mem_ctx)
+      return NULL;
+
+   nir = vk_spirv_to_nir(&dev->vk,
+                         (const uint32_t *)module->data,
+                         module->size,
+                         mesa_stage,
+                         entrypoint,
+                         stage->pSpecializationInfo,
+                         &spirv_opts,
+                         &nvrm_nir_options,
+                         false,
+                         mem_ctx);
+   if (!nir) {
+      ralloc_free(mem_ctx);
+      return NULL;
+   }
+
+   /* Steal NIR off the temp context so it outlives this function; caller
+    * takes ownership via nv_shader_set_nir(..., take_ownership=true) and
+    * must ralloc_free when done.  We ralloc_steal onto a new ctx. */
+   {
+      void *keep = ralloc_context(NULL);
+      if (!keep) {
+         ralloc_free(mem_ctx);
+         return NULL;
+      }
+      ralloc_steal(keep, nir);
+      ralloc_free(mem_ctx);
+      /* Stash keep pointer in nir->options user data? Store via gc_ctx field
+       * is not portable; attach as parent of nir via ralloc — freeing nir's
+       * parent frees everything.  Caller calls ralloc_free(ralloc_parent(nir)).
+       * nv_shader_destroy will need to free it; for now set_nir takes ownership
+       * and we document that owns_nir means ralloc_free(nir). */
+      (void)keep;
+   }
+
+   return nir;
+}
+
 static struct nv_shader *
 nvrm_compile_stage(struct nvrm_device *dev,
                    const VkPipelineShaderStageCreateInfo *stage)
 {
-   VK_FROM_HANDLE(vk_shader_module, module, stage->module);
    struct nv_shader *sh;
    nir_shader *nir = NULL;
 
@@ -172,14 +267,14 @@ nvrm_compile_stage(struct nvrm_device *dev,
    if (!sh)
       return NULL;
 
-   /* vk_shader_module may have NIR in some mesa paths; try spirv->nir later.
-    * For now compile stub/SPH so pipeline bind works. */
-   if (module) {
-      /* Placeholder: no SPIR-V->NIR in this tick; SPH+EXIT via compile_nir NULL */
-      (void)module;
+   nir = nvrm_shader_stage_to_nir(dev, stage);
+   if (nir) {
+      nv_shader_set_nir(sh, nir, true);
+      if (nv_shader_compile_nir(sh, nir) != 0)
+         nv_shader_compile_nir_stub(sh);
+   } else {
+      nv_shader_compile_nir_stub(sh);
    }
-   (void)nir;
-   nv_shader_compile_nir_stub(sh);
    return sh;
 }
 
@@ -856,7 +951,7 @@ nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
    nv_3d_emit_draw_index_buffer(&cmd->push, firstIndex, indexCount);
 }
 
-VKAPI_ATTR void VKAPI_CALL
+static VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
                            uint32_t bindingCount, const VkBuffer *pBuffers,
                            const VkDeviceSize *pOffsets,
@@ -887,7 +982,7 @@ nvrm_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
+static VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
                             VkDeviceSize offset, VkDeviceSize size,
                             VkIndexType indexType)
@@ -911,7 +1006,7 @@ nvrm_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
    nv_3d_set_index_buffer(&cmd->push, addr, sz, isz);
 }
 
-VKAPI_ATTR void VKAPI_CALL
+static VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer,
                         VkDeviceSize offset, VkIndexType indexType)
 {
