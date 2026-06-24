@@ -334,6 +334,112 @@ nv_channel_set_error_notifier_policy(struct nv_channel *ch,
                         NVA06F_CTRL_CMD_SET_ERROR_NOTIFIER,
                         &enp, sizeof(enp));
 }
+
+/* tick92: NV0080 FIFO on device object (0080), not channel (A06F) */
+static uint32_t
+nv_channel_device_handle(struct nv_channel *ch)
+{
+   if (!ch || !ch->rm)
+      return 0;
+   return nv_rm_device_device_handle(ch->rm);
+}
+
+int
+nv_channel_fifo_stop_runlist(struct nv_channel *ch)
+{
+   NV0080_CTRL_FIFO_STOP_RUNLIST_PARAMS p;
+   uint32_t h_dev;
+
+   if (!ch || !ch->rm)
+      return -EINVAL;
+   h_dev = nv_channel_device_handle(ch);
+   if (!h_dev)
+      return -ENODEV;
+   memset(&p, 0, sizeof(p));
+   p.engineID = ch->engine_type;
+   return nv_rm_control(ch->rm, h_dev, NV0080_CTRL_CMD_FIFO_STOP_RUNLIST,
+                        &p, sizeof(p));
+}
+
+int
+nv_channel_fifo_start_runlist(struct nv_channel *ch)
+{
+   NV0080_CTRL_FIFO_START_RUNLIST_PARAMS p;
+   uint32_t h_dev;
+
+   if (!ch || !ch->rm)
+      return -EINVAL;
+   h_dev = nv_channel_device_handle(ch);
+   if (!h_dev)
+      return -ENODEV;
+   memset(&p, 0, sizeof(p));
+   p.engineID = ch->engine_type;
+   return nv_rm_control(ch->rm, h_dev, NV0080_CTRL_CMD_FIFO_START_RUNLIST,
+                        &p, sizeof(p));
+}
+
+int
+nv_channel_fifo_idle_self(struct nv_channel *ch, uint32_t flags,
+                          uint32_t timeout_us)
+{
+   /*
+    * Full RM param has 4096 handles; allocate exact layout matching
+    * NV0080_CTRL_FIFO_IDLE_CHANNELS_PARAMS (ctrl0080fifo.h).
+    */
+   struct {
+      NvU32    numChannels;
+      NvHandle hChannels[NV0080_CTRL_CMD_FIFO_IDLE_CHANNELS_MAX_CHANNELS];
+      NvU32    flags;
+      NvU32    timeout;
+   } *params;
+   uint32_t h_dev;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   h_dev = nv_channel_device_handle(ch);
+   if (!h_dev)
+      return -ENODEV;
+   params = calloc(1, sizeof(*params));
+   if (!params)
+      return -ENOMEM;
+   params->numChannels = 1;
+   params->hChannels[0] = ch->h_channel;
+   params->flags = flags;
+   params->timeout = timeout_us;
+   r = nv_rm_control(ch->rm, h_dev, NV0080_CTRL_CMD_FIFO_IDLE_CHANNELS,
+                     params, (uint32_t)sizeof(*params));
+   free(params);
+   return r;
+}
+
+int
+nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
+                                   uint32_t *gp_entries_out,
+                                   uint32_t *pb_entries_out)
+{
+   NV0080_CTRL_FIFO_GET_LATENCY_BUFFER_SIZE_PARAMS p;
+   uint32_t h_dev;
+   int r;
+
+   if (!ch || !ch->rm)
+      return -EINVAL;
+   h_dev = nv_channel_device_handle(ch);
+   if (!h_dev)
+      return -ENODEV;
+   memset(&p, 0, sizeof(p));
+   p.engineID = ch->engine_type;
+   r = nv_rm_control(ch->rm, h_dev,
+                     NV0080_CTRL_CMD_FIFO_GET_LATENCY_BUFFER_SIZE,
+                     &p, sizeof(p));
+   if (r == 0) {
+      if (gp_entries_out)
+         *gp_entries_out = p.gpEntries;
+      if (pb_entries_out)
+         *pb_entries_out = p.pbEntries;
+   }
+   return r;
+}
 #endif /* HAVE_LIBDRM_NVIDIA */
 
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -410,6 +516,41 @@ nv_channel_set_error_notifier_policy(struct nv_channel *ch,
 {
    (void)ch;
    (void)notify_each_in_tsg;
+   return -ENOSYS;
+}
+
+int
+nv_channel_fifo_stop_runlist(struct nv_channel *ch)
+{
+   (void)ch;
+   return -ENOSYS;
+}
+
+int
+nv_channel_fifo_start_runlist(struct nv_channel *ch)
+{
+   (void)ch;
+   return -ENOSYS;
+}
+
+int
+nv_channel_fifo_idle_self(struct nv_channel *ch, uint32_t flags,
+                          uint32_t timeout_us)
+{
+   (void)ch;
+   (void)flags;
+   (void)timeout_us;
+   return -ENOSYS;
+}
+
+int
+nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
+                                   uint32_t *gp_entries_out,
+                                   uint32_t *pb_entries_out)
+{
+   (void)ch;
+   (void)gp_entries_out;
+   (void)pb_entries_out;
    return -ENOSYS;
 }
 #endif

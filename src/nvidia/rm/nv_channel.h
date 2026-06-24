@@ -250,6 +250,20 @@ int nv_channel_tsg_get_interleave(struct nv_channel *ch, uint32_t *level_out);
 int nv_channel_set_error_notifier_policy(struct nv_channel *ch,
                                          bool notify_each_in_tsg);
 
+/**
+ * tick92: NV0080 device FIFO helpers (object = device handle via ch->rm).
+ * stop/start_runlist: engine-wide runlist pause (privileged / mode-dependent).
+ * idle_self: IDLE_CHANNELS with this channel only (flags/timeout from caller).
+ * get_latency_buffer: engine gp/pb entry counts for ring sizing diagnostics.
+ */
+int nv_channel_fifo_stop_runlist(struct nv_channel *ch);
+int nv_channel_fifo_start_runlist(struct nv_channel *ch);
+int nv_channel_fifo_idle_self(struct nv_channel *ch, uint32_t flags,
+                              uint32_t timeout_us);
+int nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
+                                       uint32_t *gp_entries_out,
+                                       uint32_t *pb_entries_out);
+
 /** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
 void
 nv_channel_notifier_reset(struct nv_channel *ch);
