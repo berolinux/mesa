@@ -32,6 +32,8 @@ nv_shader_compile_nir(struct nv_shader *sh, const struct nir_shader *nir)
    }
 
    r = nv_shader_upload_code(sh, res.code, res.code_size, res.register_count);
+   if (r == 0)
+      sh->local_mem_size = res.local_mem_size;
    nv_compiler_result_finish(&res);
    return r;
 }
