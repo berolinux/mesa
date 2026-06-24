@@ -12,6 +12,7 @@
 #include "nvgpu_resource.h"
 
 #include "nv_rm.h"
+#include "nv_channel.h"
 #include "nv_push.h"
 
 #include "util/u_inlines.h"
@@ -254,13 +255,20 @@ nvgpu_delete_vertex_elements_state(struct pipe_context *pctx, void *s)
 /* ---- draw / clear ---- */
 
 static void
-nvgpu_ensure_push(struct nvgpu_context *ctx)
+nvgpu_ensure_channel(struct nvgpu_context *ctx)
 {
    struct nv_rm_bo_req req;
 
-   if (ctx->push_bo)
+   if (ctx->channel || ctx->push_bo)
       return;
 
+   /* Prefer full GPFIFO channel (nvidia-push style) */
+   ctx->channel = nv_channel_create(ctx->screen->rm, 0 /* GRAPHICS */,
+                                    0, NVGPU_PUSH_DWORDS);
+   if (ctx->channel)
+      return;
+
+   /* Fallback: direct push BO without channel (record only, no submit) */
    memset(&req, 0, sizeof(req));
    req.size = NVGPU_PUSH_DWORDS * 4;
    req.alignment = 4096;
@@ -276,11 +284,42 @@ nvgpu_ensure_push(struct nvgpu_context *ctx)
    ctx->push_dw_used = 0;
 }
 
-static void
-nvgpu_push_reset_if_full(struct nvgpu_context *ctx, uint32_t need)
+static bool
+nvgpu_push_start(struct nvgpu_context *ctx, struct nv_push *push, uint32_t need)
 {
+   uint32_t *base;
+
+   nvgpu_ensure_channel(ctx);
+
+   if (ctx->channel) {
+      base = nv_channel_push_begin(ctx->channel, need);
+      if (!base)
+         return false;
+      nv_push_init(push, base, need);
+      return true;
+   }
+
+   if (!ctx->push_map)
+      return false;
    if (ctx->push_dw_used + need >= ctx->push_dw_size)
-      ctx->push_dw_used = 0; /* ring wrap; kickoff not yet implemented */
+      ctx->push_dw_used = 0;
+   nv_push_init(push, ctx->push_map + ctx->push_dw_used,
+                ctx->push_dw_size - ctx->push_dw_used);
+   return true;
+}
+
+static void
+nvgpu_push_finish(struct nvgpu_context *ctx, struct nv_push *push, bool kick)
+{
+   uint32_t used = nv_push_dw_count(push);
+
+   if (ctx->channel) {
+      ctx->channel->push_dw_used = ctx->channel->push_dw_base + used;
+      if (kick)
+         nv_channel_kickoff(ctx->channel);
+   } else {
+      ctx->push_dw_used += used;
+   }
 }
 
 static void
@@ -291,31 +330,24 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
    struct nv_push push;
    const struct nv_device_info *info = ctx->screen->info;
 
-   nvgpu_ensure_push(ctx);
-   if (!ctx->push_map)
+   if (!nvgpu_push_start(ctx, &push, 64))
       return;
 
-   nvgpu_push_reset_if_full(ctx, 64);
-   nv_push_init(&push, ctx->push_map + ctx->push_dw_used,
-                ctx->push_dw_size - ctx->push_dw_used);
    nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+   if (info)
+      nv_push_set_object(&push, info->class_3d);
 
    /*
-    * Clear method sequence will be filled in from class headers + binary
-    * driver analysis.  For now emit a recognizable NOP-ish marker pattern
-    * and a SET_OBJECT for the 3D class so channel traces are debuggable.
+    * CLEAR_SURFACE method sequence differs by 3D class generation.
+    * Record SET_OBJECT + colour/depth payload as a stand-in; real method
+    * numbers (e.g. NVC597_CLEAR_SURFACE) will replace these from class headers.
     */
-   if (info)
-      nv_push_method(&push, 0x0000, info->class_3d); /* SET_OBJECT */
-
    if (buffers & PIPE_CLEAR_COLOR) {
       uint32_t c[4];
-      if (color) {
+      if (color)
          memcpy(c, color->ui, sizeof(c));
-      } else {
+      else
          memset(c, 0, sizeof(c));
-      }
-      /* Placeholder method addresses; replaced with real CLEAR_SURFACE sequence */
       nv_push_methodN(&push, 0x0d80, c, 4);
    }
    if (buffers & PIPE_CLEAR_DEPTHSTENCIL) {
@@ -328,7 +360,8 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
       nv_push_method(&push, 0x0d88, stencil);
    }
 
-   ctx->push_dw_used += nv_push_dw_count(&push);
+   nv_push_wfi(&push);
+   nvgpu_push_finish(ctx, &push, true);
 }
 
 static void
@@ -358,37 +391,38 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    (void)drawid_offset;
    (void)indirect;
 
-   nvgpu_ensure_push(ctx);
-   if (!ctx->push_map)
-      return;
-
    for (i = 0; i < num_draws; i++) {
-      nvgpu_push_reset_if_full(ctx, 128);
-      nv_push_init(&push, ctx->push_map + ctx->push_dw_used,
-                   ctx->push_dw_size - ctx->push_dw_used);
+      if (!nvgpu_push_start(ctx, &push, 128))
+         return;
+
       nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-
       if (di)
-         nv_push_method(&push, 0x0000, di->class_3d);
+         nv_push_set_object(&push, di->class_3d);
 
-      /* Vertex count / start - real BEGIN/END or DRAW_VERTEX_ARRAY later */
+      /* Real draw: BEGIN / SET_VERTEX_ARRAY / DRAW_* per 3D class headers */
       nv_push_method(&push, 0x1800, draws[i].count);
       nv_push_method(&push, 0x1804, draws[i].start);
       nv_push_method(&push, 0x1808, info->index_size);
       nv_push_method(&push, 0x180c, info->mode);
 
-      ctx->push_dw_used += nv_push_dw_count(&push);
+      nvgpu_push_finish(ctx, &push, i + 1 == num_draws);
    }
-   /* TODO: submit via GPFIFO; wait for semaphore/notifier */
 }
 
 static void
 nvgpu_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
             unsigned flags)
 {
-   (void)pctx;
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
    (void)flags;
-   /* No channel kickoff yet; signal immediate completion fence if requested */
+
+   if (ctx->channel) {
+      /* Kick any pending push; wait briefly for GPU to catch up */
+      if (ctx->channel->push_dw_used > ctx->channel->push_dw_base)
+         nv_channel_kickoff(ctx->channel);
+      if (!(flags & PIPE_FLUSH_DEFERRED))
+         nv_channel_wait_idle(ctx->channel, 100000000ull); /* 100ms */
+   }
    if (fence)
       *fence = NULL;
 }
@@ -413,6 +447,8 @@ nvgpu_destroy_context(struct pipe_context *pctx)
 
    util_unreference_framebuffer_state(&ctx->fb);
 
+   if (ctx->channel)
+      nv_channel_destroy(ctx->channel);
    if (ctx->push_bo) {
       nv_rm_bo_unmap(ctx->push_bo);
       nv_rm_bo_free(ctx->push_bo);
@@ -555,6 +591,6 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.resource_copy_region = util_resource_copy_region;
    ctx->base.blit = NULL; /* use blitter once shaders work */
 
-   nvgpu_ensure_push(ctx);
+   nvgpu_ensure_channel(ctx);
    return &ctx->base;
 }

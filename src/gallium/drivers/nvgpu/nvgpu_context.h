@@ -13,6 +13,7 @@
 struct nvgpu_screen;
 struct nv_rm_bo;
 struct nv_push;
+struct nv_channel;
 
 #define NVGPU_PUSH_DWORDS  (64 * 1024)
 
@@ -20,7 +21,10 @@ struct nvgpu_context {
    struct pipe_context base;
    struct nvgpu_screen *screen;
 
-   /* Pushbuffer (CPU-side BO mapped) */
+   /* GPFIFO channel (preferred submit path) */
+   struct nv_channel *channel;
+
+   /* Legacy direct pushbuffer BO (fallback if channel alloc fails) */
    struct nv_rm_bo *push_bo;
    uint32_t *push_map;
    uint32_t push_dw_size;

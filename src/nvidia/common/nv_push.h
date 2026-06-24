@@ -2,9 +2,11 @@
  * Copyright 2026 - Open NVIDIA userspace driver project
  * SPDX-License-Identifier: MIT
  *
- * Pushbuffer / GPFIFO command stream builder.
- * Method header format follows NVIDIA engine method encoding used by the
- * proprietary driver and documented in class headers (NV906F / NVC36F etc.).
+ * Pushbuffer method encoding from class headers NV906F/NVC36F (SET_OBJECT,
+ * semaphores, NOP) and the classic Fermi+ incrementing method format used
+ * by engine classes (NVC597 3D, NVC6B5 copy, etc.).
+ *
+ * GPFIFO entry format: NV506F_GP_ENTRY / NVC36F_GP_ENTRY (8 bytes).
  */
 
 #ifndef NV_PUSH_H
@@ -19,26 +21,47 @@
 extern "C" {
 #endif
 
-/*
- * Method header: [subchannel:3 | count:13 | method:13 | inc:1?] varies by
- * GPU generation.  We use the NVC36F / Turing+ "new" format when possible:
- *   bits 31-29: subchannel
- *   bits 28-16: method count (N methods)
- *   bits 15-0 : method address >> 2  (or inc/non-inc opcode in low bits)
- *
- * For initial bring-up we emit the classic Fermi+ incrementing method header
- * which is still accepted on modern GPUs for the engines we target:
- *   (subch << 13) | (count << 16) | (method >> 2)   [varies]
- *
- * The exact encoding will be refined from binary driver disassembly; for now
- * we provide helpers that match the layout used by nvkms / RM samples.
- */
-
+/* Subchannel assignments used by the proprietary driver / nvidia-push */
 #define NV_PUSH_SUBCH_3D       0
 #define NV_PUSH_SUBCH_COMPUTE  1
 #define NV_PUSH_SUBCH_2D       2
-#define NV_PUSH_SUBCH_M2MF     3
+#define NV_PUSH_SUBCH_M2MF     3  /* or COPY on modern */
 #define NV_PUSH_SUBCH_COPY     4
+#define NV_PUSH_SUBCH_SW       7
+
+/* Host/GPFIFO methods (NVC36F / NV906F) - on subchannel via SET_OBJECT first */
+#define NVC36F_SET_OBJECT              0x00000000
+#define NVC36F_ILLEGAL                 0x00000004
+#define NVC36F_NOP                     0x00000008
+#define NVC36F_SEMAPHOREA              0x00000010
+#define NVC36F_SEMAPHOREB              0x00000014
+#define NVC36F_SEMAPHOREC              0x00000018
+#define NVC36F_SEMAPHORED              0x0000001C
+#define NVC36F_NON_STALL_INTERRUPT     0x00000020
+#define NVC36F_FB_FLUSH                0x00000024
+#define NVC36F_MEM_OP_A                0x00000028
+#define NVC36F_MEM_OP_B                0x0000002C
+#define NVC36F_MEM_OP_C                0x00000030
+#define NVC36F_MEM_OP_D                0x00000034
+#define NVC36F_WFI                     0x00000078
+#define NVC36F_CRC_CHECK               0x0000007C
+#define NVC36F_YIELD                   0x00000080
+
+/* SEMAPHORED operations */
+#define NVC36F_SEMAPHORED_OPERATION_ACQUIRE      0x00000001
+#define NVC36F_SEMAPHORED_OPERATION_RELEASE      0x00000002
+#define NVC36F_SEMAPHORED_OPERATION_ACQ_GEQ      0x00000004
+#define NVC36F_SEMAPHORED_RELEASE_WFI_DIS        (1u << 20)
+#define NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE     (1u << 24)
+
+/* GPFIFO entry (NV506F/NVC36F) */
+#define NV_GP_ENTRY_SIZE               8
+#define NV_GP_ENTRY0_GET_SHIFT         2
+#define NV_GP_ENTRY1_GET_HI_MASK       0xff
+#define NV_GP_ENTRY1_PRIV_SHIFT        8
+#define NV_GP_ENTRY1_LEVEL_SHIFT       9
+#define NV_GP_ENTRY1_LENGTH_SHIFT      10
+#define NV_GP_ENTRY1_LENGTH_MASK       0x1fffff
 
 struct nv_push {
    uint32_t *start;
@@ -53,6 +76,15 @@ nv_push_init(struct nv_push *p, uint32_t *map, uint32_t dw_count)
    p->start = map;
    p->cur = map;
    p->end = map + dw_count;
+   p->subch = NV_PUSH_SUBCH_3D;
+}
+
+static inline void
+nv_push_init_at(struct nv_push *p, uint32_t *map, uint32_t *cur, uint32_t dw_cap)
+{
+   p->start = map;
+   p->cur = cur;
+   p->end = map + dw_cap;
    p->subch = NV_PUSH_SUBCH_3D;
 }
 
@@ -74,26 +106,34 @@ nv_push_space(const struct nv_push *p, uint32_t dwords)
    return (p->cur + dwords) <= p->end;
 }
 
-/* Classic incrementing methods header (Fermi+ engines) */
+/*
+ * Fermi+ incrementing method header (used by engine method streams):
+ *   bits 31:29 = 000 (inc method)
+ *   bits 28:16 = method count
+ *   bits 15:13 = subchannel
+ *   bits 12:0  = method address >> 2
+ *
+ * Non-incrementing: bit 30 set.
+ * Immediates: bit 29 set, imm in 28:16.
+ */
 static inline uint32_t
 nv_push_hdr_inc(uint32_t subch, uint32_t method, uint32_t count)
 {
-   /* method is byte offset; store as dword index in low 12 bits, count in 28:16, subch in 15:13 */
-   return ((count) << 16) | ((subch) << 13) | ((method) >> 2);
+   return ((count & 0x1fff) << 16) | ((subch & 7) << 13) | ((method >> 2) & 0x1fff);
 }
 
-/* Non-incrementing methods (same method, multiple data) */
 static inline uint32_t
 nv_push_hdr_noninc(uint32_t subch, uint32_t method, uint32_t count)
 {
-   return (1u << 30) | ((count) << 16) | ((subch) << 13) | ((method) >> 2);
+   return (1u << 30) | ((count & 0x1fff) << 16) | ((subch & 7) << 13) |
+          ((method >> 2) & 0x1fff);
 }
 
-/* Immediate data method (1 dword inline) */
 static inline uint32_t
 nv_push_hdr_imm(uint32_t subch, uint32_t method, uint32_t imm)
 {
-   return (1u << 29) | ((imm & 0x1fff) << 16) | ((subch) << 13) | ((method) >> 2);
+   return (1u << 29) | ((imm & 0x1fff) << 16) | ((subch & 7) << 13) |
+          ((method >> 2) & 0x1fff);
 }
 
 static inline void
@@ -135,30 +175,43 @@ nv_push_2inc(struct nv_push *p, uint32_t method, uint32_t a, uint32_t b)
    nv_push_methodN(p, method, d, 2);
 }
 
-/* GPFIFO entry: 8-byte { offset_lo, {offset_hi:8, length:21, wait:1, ...} } */
-struct nv_gp_entry {
-   uint32_t offset_lo;
-   uint32_t offset_hi_length;
-};
-
-#define NV_GP_ENTRY_LENGTH_SHIFT 10
-#define NV_GP_ENTRY_PRIV         (1u << 2)
-#define NV_GP_ENTRY_LEVEL        (1u << 3)
-#define NV_GP_ENTRY_SYNC         (1u << 4)
-#define NV_GP_ENTRY_OPCODE_NOP   (0u << 0)
-#define NV_GP_ENTRY_OPCODE_ILLEGAL (1u << 0)
-#define NV_GP_ENTRY_OPCODE_GP_CRC  (2u << 0)
-#define NV_GP_ENTRY_OPCODE_PB_CRC  (3u << 0)
+static inline void
+nv_push_set_object(struct nv_push *p, uint32_t engine_class)
+{
+   nv_push_method(p, NVC36F_SET_OBJECT, engine_class & 0xffff);
+}
 
 static inline void
-nv_gp_entry_init(struct nv_gp_entry *e, uint64_t gpu_addr, uint32_t length_dwords,
-                 bool wait)
+nv_push_nop(struct nv_push *p)
 {
-   e->offset_lo = (uint32_t)(gpu_addr & 0xffffffffu);
-   e->offset_hi_length = ((uint32_t)(gpu_addr >> 32) & 0xff) |
-                         ((length_dwords & 0x1fffff) << NV_GP_ENTRY_LENGTH_SHIFT);
-   if (wait)
-      e->offset_hi_length |= NV_GP_ENTRY_SYNC;
+   nv_push_method(p, NVC36F_NOP, 0);
+}
+
+/* Host semaphore release (4-byte payload) at GPU sema address */
+static inline void
+nv_push_sema_release(struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload)
+{
+   nv_push_method(p, NVC36F_SEMAPHOREA, (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB, (uint32_t)(sema_gpu_addr & ~0x3u));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED,
+                  NVC36F_SEMAPHORED_OPERATION_RELEASE |
+                  NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
+                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+}
+
+static inline void
+nv_push_wfi(struct nv_push *p)
+{
+   nv_push_method(p, NVC36F_WFI, 0);
+}
+
+static inline void
+nv_gp_entry_pack(uint32_t entry[2], uint64_t gpu_addr, uint32_t length_dwords)
+{
+   entry[0] = (uint32_t)((gpu_addr >> NV_GP_ENTRY0_GET_SHIFT) << NV_GP_ENTRY0_GET_SHIFT);
+   entry[1] = ((uint32_t)(gpu_addr >> 32) & NV_GP_ENTRY1_GET_HI_MASK) |
+              ((length_dwords & NV_GP_ENTRY1_LENGTH_MASK) << NV_GP_ENTRY1_LENGTH_SHIFT);
 }
 
 #ifdef __cplusplus
