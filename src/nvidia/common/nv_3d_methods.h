@@ -2280,9 +2280,31 @@ nv_3d_emit_blit_pass_state(struct nv_push *p, uint32_t x, uint32_t y,
    }
    nv_push_method(p, NVC597_SET_STENCIL_TEST, 0);
    nv_3d_emit_msaa(p, 1, false);
+   /* Meta blit: raster on, no cull, full color write, no blend */
+   nv_push_method(p, NVC597_SET_RASTER_ENABLE, 1);
+   nv_3d_emit_cull_front_face(p, 0 /* none */, false);
+   nv_3d_emit_color_write_mask(p, 0, 0xf);
+   nv_3d_emit_blend_enable_target(p, 0, false);
    /* Always render for meta blit/resolve pass */
    nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE,
                   NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+}
+
+/**
+ * Emit meta blit/resolve draw: 4-vertex triangle strip (fullscreen quad in VS).
+ * topology_nv: NV primitive; 0 defaults to TRIANGLE_STRIP (0x5).
+ * Caller must program VS/FS + texture; vertex count is fixed at 4.
+ */
+static inline void
+nv_3d_emit_blit_fullscreen_draw(struct nv_push *p, uint32_t topology_nv)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (!topology_nv)
+      topology_nv = 0x5; /* TRIANGLE_STRIP */
+   nv_3d_set_draw_control(p, topology_nv, 1 /* instance_count */, false);
+   nv_3d_emit_draw_vertex_array(p, 0 /* start */, 4 /* count */);
 }
 
 /**
