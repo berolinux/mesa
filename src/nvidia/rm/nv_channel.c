@@ -160,7 +160,77 @@ nv_channel_try_schedule(struct nv_channel *ch)
    ch->schedule_path = 0;
    return last_err;
 }
+
+/*
+ * tick90: recover hung/errored channel via A06F STOP/RESTART + re-schedule.
+ * Mirrors optional recovery path in proprietary drivers (rare cold-path ctrls).
+ */
+int
+nv_channel_recover(struct nv_channel *ch, bool stop_first)
+{
+   struct nv_rm_device *rm;
+   int r = -EINVAL;
+   NVA06F_CTRL_STOP_CHANNEL_PARAMS stop;
+   NVA06F_CTRL_RESTART_RUNLIST_PARAMS rst;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   rm = ch->rm;
+
+   if (stop_first) {
+      memset(&stop, 0, sizeof(stop));
+      stop.bInPreemptTimeout = NV_FALSE;
+      (void)nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_STOP_CHANNEL,
+                          &stop, sizeof(stop));
+   }
+
+   memset(&rst, 0, sizeof(rst));
+   rst.bBypassWaitForEngIdle = NV_FALSE;
+   r = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_RESTART_RUNLIST,
+                     &rst, sizeof(rst));
+   /* RESTART may fail if not supported; still try re-schedule */
+
+   ch->scheduled = false;
+   ch->schedule_rc = -EAGAIN;
+   ch->schedule_path = 0;
+   r = nv_channel_try_schedule(ch);
+   return r;
+}
+
+int
+nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out)
+{
+   NVA06F_CTRL_GET_CONTEXT_ID_PARAMS p;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   memset(&p, 0, sizeof(p));
+   r = nv_rm_control(ch->rm, ch->h_channel, NVA06F_CTRL_CMD_GET_CONTEXT_ID,
+                     &p, sizeof(p));
+   if (r == 0 && ctx_id_out)
+      *ctx_id_out = p.contextId;
+   return r;
+}
 #endif /* HAVE_LIBDRM_NVIDIA */
+
+#if !defined(HAVE_LIBDRM_NVIDIA)
+int
+nv_channel_recover(struct nv_channel *ch, bool stop_first)
+{
+   (void)ch;
+   (void)stop_first;
+   return -ENOSYS;
+}
+
+int
+nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out)
+{
+   (void)ch;
+   (void)ctx_id_out;
+   return -ENOSYS;
+}
+#endif
 
 /* Fallback class IDs (OGKM + 610.43.02 binary ladders; prefer refined/bound over these) */
 /* Pass8 imm counts: prefer newest common classes in 610.43.02 ladders */

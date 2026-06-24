@@ -222,6 +222,17 @@ int
 nv_channel_notifier_status(struct nv_channel *ch, uint16_t *status_out,
                            uint32_t *info32_out);
 
+/**
+ * Best-effort channel recovery after error notifier / hung submit (tick90).
+ * STOP_CHANNEL (optional) → RESTART_RUNLIST → re-BIND+SCHEDULE.
+ * Does not free engine objects; resets scheduled=false then try_schedule.
+ * Returns 0 if rescheduled, else last errno (recovery is best-effort).
+ */
+int nv_channel_recover(struct nv_channel *ch, bool stop_first);
+
+/** Fetch A06F context ID into *ctx_id_out (diagnostics; non-fatal if fails). */
+int nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out);
+
 /** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
 void
 nv_channel_notifier_reset(struct nv_channel *ch);
