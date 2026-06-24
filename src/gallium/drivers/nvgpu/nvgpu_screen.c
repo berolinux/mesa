@@ -11,6 +11,7 @@
 #include "compiler/shader_enums.h"
 #include "nvgpu_context.h"
 #include "nvgpu_resource.h"
+#include "nvgpu_video.h"
 
 #include "nv_rm.h"
 #include "nv_device_info.h"
@@ -408,6 +409,8 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.query_memory_info = nvgpu_query_memory_info;
    screen->base.fence_reference = nvgpu_fence_reference;
    screen->base.fence_finish = nvgpu_fence_finish;
+   screen->base.get_video_param = nvgpu_screen_get_video_param;
+   screen->base.is_video_format_supported = nvgpu_screen_is_video_format_supported;
 
    nvgpu_init_shader_caps(screen);
    nvgpu_init_compute_caps(screen);

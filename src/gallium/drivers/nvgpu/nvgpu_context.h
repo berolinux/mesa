@@ -24,8 +24,16 @@ struct nv_channel;
 struct nv_shader;
 struct nv_fence;
 struct nv_tex_pool;
+struct nvgpu_context;
 
 #define NVGPU_PUSH_DWORDS  (64 * 1024)
+
+/* Shared push helpers (used by video / blit paths outside context.c) */
+bool nvgpu_push_start(struct nvgpu_context *ctx, struct nv_push *push,
+                      uint32_t need);
+void nvgpu_push_finish(struct nvgpu_context *ctx, struct nv_push *push,
+                       bool kick);
+void nvgpu_ensure_channel(struct nvgpu_context *ctx);
 
 /* Gallium CSO for vertex elements: array + count (pipe only passes array) */
 struct nvgpu_velems_state {

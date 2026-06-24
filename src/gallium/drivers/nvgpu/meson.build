@@ -4,6 +4,7 @@ files_libnvgpu = files(
   'nvgpu_screen.c',
   'nvgpu_context.c',
   'nvgpu_resource.c',
+  'nvgpu_video.c',
 )
 
 libnvgpu = static_library(

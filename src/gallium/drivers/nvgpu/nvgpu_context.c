@@ -10,6 +10,7 @@
 #include "nvgpu_context.h"
 #include "nvgpu_screen.h"
 #include "nvgpu_resource.h"
+#include "nvgpu_video.h"
 
 #include "nv_rm.h"
 #include "nv_channel.h"
@@ -379,7 +380,7 @@ nvgpu_delete_vertex_elements_state(struct pipe_context *pctx, void *s)
 
 /* ---- draw / clear ---- */
 
-static void
+void
 nvgpu_ensure_channel(struct nvgpu_context *ctx)
 {
    struct nv_rm_bo_req req;
@@ -409,7 +410,7 @@ nvgpu_ensure_channel(struct nvgpu_context *ctx)
    ctx->push_dw_used = 0;
 }
 
-static bool
+bool
 nvgpu_push_start(struct nvgpu_context *ctx, struct nv_push *push, uint32_t need)
 {
    uint32_t *base;
@@ -433,7 +434,7 @@ nvgpu_push_start(struct nvgpu_context *ctx, struct nv_push *push, uint32_t need)
    return true;
 }
 
-static void
+void
 nvgpu_push_finish(struct nvgpu_context *ctx, struct nv_push *push, bool kick)
 {
    uint32_t used = nv_push_dw_count(push);
@@ -2365,6 +2366,8 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.flush_resource = nvgpu_flush_resource;
    ctx->base.invalidate_resource = nvgpu_invalidate_resource;
    ctx->base.launch_grid = nvgpu_launch_grid;
+   ctx->base.create_video_codec = nvgpu_create_video_codec;
+   ctx->base.create_video_buffer = nvgpu_create_video_buffer;
 
    nvgpu_ensure_channel(ctx);
    if (screen->rm)
