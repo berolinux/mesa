@@ -43,8 +43,40 @@ struct nvrm_pipeline_layout {
    uint32_t set_count;
 };
 
+/* Per-binding metadata captured from VkDescriptorSetLayoutCreateInfo. */
+#define NVRM_MAX_LAYOUT_BINDINGS  32
+#define NVRM_MAX_DESC_SLOTS       16
+
+enum nvrm_desc_kind {
+   NVRM_DESC_KIND_NONE = 0,
+   NVRM_DESC_KIND_UBO,
+   NVRM_DESC_KIND_SSBO,
+   NVRM_DESC_KIND_IMAGE,
+   NVRM_DESC_KIND_SAMPLER,
+   NVRM_DESC_KIND_TEXEL,
+};
+
+struct nvrm_layout_binding {
+   uint32_t binding;
+   VkDescriptorType type;
+   enum nvrm_desc_kind kind;
+   uint32_t descriptor_count;
+   VkShaderStageFlags stage_flags;
+   bool is_dynamic;
+   /* Flat index into set->ubo/ssbo/img arrays for this binding's first element */
+   uint16_t flat_base;
+   uint16_t flat_count;
+};
+
 struct nvrm_descriptor_set_layout {
    struct vk_descriptor_set_layout vk;
+   struct nvrm_layout_binding bindings[NVRM_MAX_LAYOUT_BINDINGS];
+   uint32_t binding_count;
+   uint32_t ubo_slots;   /* total UBO descriptors across all bindings */
+   uint32_t ssbo_slots;
+   uint32_t img_slots;
+   uint32_t dynamic_ubo_count;
+   uint32_t dynamic_ssbo_count;
 };
 
 struct nvrm_descriptor_pool {
@@ -62,7 +94,8 @@ struct nvrm_descriptor_set {
       struct nv_rm_bo *bo;
       uint64_t offset;
       uint64_t range;
-   } ubo[16];
+      bool is_dynamic;
+   } ubo[NVRM_MAX_DESC_SLOTS];
    uint32_t ubo_count;
    /* Combined image/sampler bindings: pool slot for TEX header index */
    struct {
@@ -73,13 +106,14 @@ struct nvrm_descriptor_set {
       uint64_t gpu_addr;
       bool has_sampler;
       uint8_t addr_u, addr_v, mag_filt, min_filt;
-   } img[16];
+   } img[NVRM_MAX_DESC_SLOTS];
    uint32_t img_count;
    struct {
       struct nv_rm_bo *bo;
       uint64_t offset;
       uint64_t range;
-   } ssbo[16];
+      bool is_dynamic;
+   } ssbo[NVRM_MAX_DESC_SLOTS];
    uint32_t ssbo_count;
 };
 
@@ -158,16 +192,38 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_compute_pipeline, base, VkPipeline,
 
 /* ---------- render pass / framebuffer (minimal, for compatibility) ---------- */
 
+#define NVRM_MAX_RP_ATTACHMENTS  8
+#define NVRM_MAX_RP_SUBPASSES    4
+
+struct nvrm_rp_attachment {
+   VkFormat format;
+   VkAttachmentLoadOp load_op;
+   VkAttachmentStoreOp store_op;
+   VkAttachmentLoadOp stencil_load_op;
+   VkImageLayout initial_layout;
+   VkImageLayout final_layout;
+   bool is_depth_stencil;
+};
+
+struct nvrm_rp_subpass {
+   uint32_t color_count;
+   uint32_t color_refs[NVRM_MAX_RP_ATTACHMENTS];
+   int32_t depth_stencil_ref; /* -1 if none */
+};
+
 struct nvrm_render_pass {
    struct vk_object_base base;
    uint32_t attachment_count;
    uint32_t subpass_count;
+   struct nvrm_rp_attachment atts[NVRM_MAX_RP_ATTACHMENTS];
+   struct nvrm_rp_subpass subpasses[NVRM_MAX_RP_SUBPASSES];
 };
 
 struct nvrm_framebuffer {
    struct vk_object_base base;
    uint32_t width, height, layers;
    uint32_t attachment_count;
+   struct nvrm_image_view *views[NVRM_MAX_RP_ATTACHMENTS];
 };
 
 struct nvrm_image_view {
@@ -175,6 +231,7 @@ struct nvrm_image_view {
    struct nvrm_image *image;
    VkFormat format;
    uint32_t level, layer, layer_count;
+   VkImageAspectFlags aspect_mask;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_render_pass, base, VkRenderPass,
@@ -255,6 +312,132 @@ vk_format_to_vtx_comp(VkFormat fmt)
    default:
       return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32_A32;
    }
+}
+
+/* Map VkFormat to NVC597 color target / ZT format codes (subset). */
+static uint32_t
+vk_format_to_ct_format(VkFormat fmt)
+{
+   switch (fmt) {
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_B8G8R8A8;
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_RF16_GF16_BF16_AF16;
+   case VK_FORMAT_R32G32B32A32_SFLOAT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32_BF32_AF32;
+   case VK_FORMAT_R16G16B16A16_UNORM:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R16_G16_B16_A16;
+   case VK_FORMAT_R5G6B5_UNORM_PACK16:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R5G6B5;
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_UINT:
+   case VK_FORMAT_R32_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R32;
+   default:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   }
+}
+
+static uint32_t
+vk_format_to_zt_format(VkFormat fmt)
+{
+   switch (fmt) {
+   case VK_FORMAT_D16_UNORM:
+      return NVC597_SET_ZT_FORMAT_V_Z16;
+   case VK_FORMAT_D32_SFLOAT:
+      return NVC597_SET_ZT_FORMAT_V_ZF32;
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+      return NVC597_SET_ZT_FORMAT_V_Z24S8;
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+      return NVC597_SET_ZT_FORMAT_V_ZF32_X24S8;
+   case VK_FORMAT_X8_D24_UNORM_PACK32:
+      return NVC597_SET_ZT_FORMAT_V_X8Z24;
+   case VK_FORMAT_S8_UINT:
+      return NVC597_SET_ZT_FORMAT_V_S8;
+   default:
+      return NVC597_SET_ZT_FORMAT_V_Z24S8;
+   }
+}
+
+static bool
+vk_format_is_depth_stencil(VkFormat fmt)
+{
+   switch (fmt) {
+   case VK_FORMAT_D16_UNORM:
+   case VK_FORMAT_D32_SFLOAT:
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+   case VK_FORMAT_D32_SFLOAT_S8_UINT:
+   case VK_FORMAT_X8_D24_UNORM_PACK32:
+   case VK_FORMAT_S8_UINT:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static enum nvrm_desc_kind
+vk_desc_type_to_kind(VkDescriptorType t, bool *is_dynamic_out)
+{
+   *is_dynamic_out = false;
+   if (t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+      *is_dynamic_out = true;
+      return NVRM_DESC_KIND_UBO;
+   }
+   if (t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+      return NVRM_DESC_KIND_UBO;
+   if (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+      *is_dynamic_out = true;
+      return NVRM_DESC_KIND_SSBO;
+   }
+   if (t == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+      return NVRM_DESC_KIND_SSBO;
+   if (t == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+       t == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+       t == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+       t == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT)
+      return NVRM_DESC_KIND_IMAGE;
+   if (t == VK_DESCRIPTOR_TYPE_SAMPLER)
+      return NVRM_DESC_KIND_SAMPLER;
+   if (t == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+       t == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER)
+      return NVRM_DESC_KIND_TEXEL;
+   return NVRM_DESC_KIND_NONE;
+}
+
+/* Look up layout binding by Vulkan binding number. */
+static const struct nvrm_layout_binding *
+nvrm_layout_find_binding(const struct nvrm_descriptor_set_layout *layout,
+                         uint32_t binding)
+{
+   uint32_t i;
+   if (!layout)
+      return NULL;
+   for (i = 0; i < layout->binding_count; i++) {
+      if (layout->bindings[i].binding == binding)
+         return &layout->bindings[i];
+   }
+   return NULL;
+}
+
+/* Flat slot index for (binding, arrayElement) within its kind array. */
+static int
+nvrm_layout_flat_slot(const struct nvrm_descriptor_set_layout *layout,
+                      uint32_t binding, uint32_t array_element,
+                      enum nvrm_desc_kind *kind_out)
+{
+   const struct nvrm_layout_binding *lb = nvrm_layout_find_binding(layout, binding);
+   if (!lb)
+      return -1;
+   if (kind_out)
+      *kind_out = lb->kind;
+   if (array_element >= lb->flat_count)
+      return -1;
+   return (int)lb->flat_base + (int)array_element;
 }
 
 static void
@@ -649,11 +832,58 @@ nvrm_CreateDescriptorSetLayout(VkDevice _device,
 {
    VK_FROM_HANDLE(nvrm_device, device, _device);
    struct nvrm_descriptor_set_layout *layout;
+   uint32_t i;
+   uint16_t ubo_next = 0, ssbo_next = 0, img_next = 0;
 
    layout = vk_descriptor_set_layout_zalloc(&device->vk, sizeof(*layout),
                                             pCreateInfo);
    if (!layout)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   layout->binding_count = 0;
+   layout->ubo_slots = layout->ssbo_slots = layout->img_slots = 0;
+   layout->dynamic_ubo_count = layout->dynamic_ssbo_count = 0;
+
+   for (i = 0; i < pCreateInfo->bindingCount &&
+        layout->binding_count < NVRM_MAX_LAYOUT_BINDINGS; i++) {
+      const VkDescriptorSetLayoutBinding *b = &pCreateInfo->pBindings[i];
+      struct nvrm_layout_binding *lb = &layout->bindings[layout->binding_count++];
+      bool is_dyn = false;
+      uint32_t count = b->descriptorCount ? b->descriptorCount : 1;
+
+      lb->binding = b->binding;
+      lb->type = b->descriptorType;
+      lb->kind = vk_desc_type_to_kind(b->descriptorType, &is_dyn);
+      lb->descriptor_count = count;
+      lb->stage_flags = b->stageFlags;
+      lb->is_dynamic = is_dyn;
+      lb->flat_base = 0;
+      lb->flat_count = 0;
+
+      if (lb->kind == NVRM_DESC_KIND_UBO) {
+         lb->flat_base = ubo_next;
+         lb->flat_count = (uint16_t)MIN2(count, NVRM_MAX_DESC_SLOTS - ubo_next);
+         ubo_next = (uint16_t)(ubo_next + lb->flat_count);
+         if (is_dyn)
+            layout->dynamic_ubo_count += lb->flat_count;
+      } else if (lb->kind == NVRM_DESC_KIND_SSBO ||
+                 lb->kind == NVRM_DESC_KIND_TEXEL) {
+         lb->flat_base = ssbo_next;
+         lb->flat_count = (uint16_t)MIN2(count, NVRM_MAX_DESC_SLOTS - ssbo_next);
+         ssbo_next = (uint16_t)(ssbo_next + lb->flat_count);
+         if (is_dyn)
+            layout->dynamic_ssbo_count += lb->flat_count;
+      } else if (lb->kind == NVRM_DESC_KIND_IMAGE ||
+                 lb->kind == NVRM_DESC_KIND_SAMPLER) {
+         lb->flat_base = img_next;
+         lb->flat_count = (uint16_t)MIN2(count, NVRM_MAX_DESC_SLOTS - img_next);
+         img_next = (uint16_t)(img_next + lb->flat_count);
+      }
+   }
+   layout->ubo_slots = ubo_next;
+   layout->ssbo_slots = ssbo_next;
+   layout->img_slots = img_next;
+
    *pSetLayout = nvrm_descriptor_set_layout_to_handle(layout);
    return VK_SUCCESS;
 }
@@ -723,6 +953,12 @@ nvrm_AllocateDescriptorSets(VkDevice _device,
       vk_object_base_init(&device->vk, &set->base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
       set->layout = layout;
       set->device = device;
+      /* Pre-size slot counts from layout so writes by binding index fit */
+      if (layout) {
+         set->ubo_count = layout->ubo_slots;
+         set->ssbo_count = layout->ssbo_slots;
+         set->img_count = layout->img_slots;
+      }
       if (pool)
          pool->allocated++;
       pDescriptorSets[i] = nvrm_descriptor_set_to_handle(set);
@@ -962,48 +1198,48 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
    return 0;
 }
 
-/* Write a single descriptor into a set at (binding, arrayElement) — we store
- * flat by type in order of writes, but honour dstBinding as the preferred slot
- * index when it fits in the 16-entry arrays. */
 static void
-nvrm_desc_write_ubo(struct nvrm_descriptor_set *set, uint32_t slot,
-                    const VkDescriptorBufferInfo *info)
+nvrm_desc_write_ubo_slot(struct nvrm_descriptor_set *set, uint32_t slot,
+                         const VkDescriptorBufferInfo *info, bool is_dynamic)
 {
    VK_FROM_HANDLE(nvrm_buffer, buf, info->buffer);
-   if (slot >= 16)
-      slot = set->ubo_count < 16 ? set->ubo_count : 15;
+   if (slot >= NVRM_MAX_DESC_SLOTS)
+      return;
    set->ubo[slot].bo = buf ? buf->bo : NULL;
    set->ubo[slot].offset = info->offset;
    set->ubo[slot].range = info->range;
+   set->ubo[slot].is_dynamic = is_dynamic;
    if (slot >= set->ubo_count)
       set->ubo_count = slot + 1;
 }
 
 static void
-nvrm_desc_write_ssbo(struct nvrm_descriptor_set *set, uint32_t slot,
-                     const VkDescriptorBufferInfo *info)
+nvrm_desc_write_ssbo_slot(struct nvrm_descriptor_set *set, uint32_t slot,
+                          const VkDescriptorBufferInfo *info, bool is_dynamic)
 {
    VK_FROM_HANDLE(nvrm_buffer, buf, info->buffer);
-   if (slot >= 16)
-      slot = set->ssbo_count < 16 ? set->ssbo_count : 15;
+   if (slot >= NVRM_MAX_DESC_SLOTS)
+      return;
    set->ssbo[slot].bo = buf ? buf->bo : NULL;
    set->ssbo[slot].offset = info->offset;
    set->ssbo[slot].range = info->range;
+   set->ssbo[slot].is_dynamic = is_dynamic;
    if (slot >= set->ssbo_count)
       set->ssbo_count = slot + 1;
 }
 
 static void
-nvrm_desc_write_image(struct nvrm_device *device, struct nvrm_descriptor_set *set,
-                      uint32_t slot, const VkDescriptorImageInfo *info,
-                      VkDescriptorType dtype)
+nvrm_desc_write_image_slot(struct nvrm_device *device,
+                           struct nvrm_descriptor_set *set, uint32_t slot,
+                           const VkDescriptorImageInfo *info,
+                           VkDescriptorType dtype)
 {
    VK_FROM_HANDLE(nvrm_image_view, view, info->imageView);
    struct nv_tex_pool *pool = nvrm_device_ensure_tex_pool(device);
    struct nv_tex_entry entry;
    int tex_slot = -1;
-   if (slot >= 16)
-      slot = set->img_count < 16 ? set->img_count : 15;
+   if (slot >= NVRM_MAX_DESC_SLOTS)
+      return;
    if (view && pool &&
        nvrm_write_combined_image_sampler(device, view, NULL, info->sampler,
                                          &entry) == 0) {
@@ -1039,63 +1275,88 @@ nvrm_UpdateDescriptorSets(VkDevice _device,
    for (i = 0; i < descriptorWriteCount; i++) {
       const VkWriteDescriptorSet *w = &pDescriptorWrites[i];
       VK_FROM_HANDLE(nvrm_descriptor_set, set, w->dstSet);
-      uint32_t base_slot = w->dstBinding + w->dstArrayElement;
+      enum nvrm_desc_kind kind = NVRM_DESC_KIND_NONE;
+      bool is_dyn = false;
+      int flat;
       if (!set)
          continue;
-      if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+
+      /* Resolve through layout when available; else fall back to binding index */
+      flat = nvrm_layout_flat_slot(set->layout, w->dstBinding,
+                                   w->dstArrayElement, &kind);
+      if (flat < 0) {
+         kind = vk_desc_type_to_kind(w->descriptorType, &is_dyn);
+         flat = (int)(w->dstBinding + w->dstArrayElement);
+      } else {
+         const struct nvrm_layout_binding *lb =
+            nvrm_layout_find_binding(set->layout, w->dstBinding);
+         is_dyn = lb ? lb->is_dynamic : false;
+      }
+
+      if (kind == NVRM_DESC_KIND_UBO ||
+          w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
           w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-         for (j = 0; j < w->descriptorCount; j++)
-            nvrm_desc_write_ubo(set, base_slot + j, &w->pBufferInfo[j]);
-      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+         for (j = 0; j < w->descriptorCount; j++) {
+            int s = flat + (int)j;
+            if (s >= 0 && s < (int)NVRM_MAX_DESC_SLOTS)
+               nvrm_desc_write_ubo_slot(set, (uint32_t)s, &w->pBufferInfo[j],
+                                        is_dyn ||
+                                        w->descriptorType ==
+                                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
+         }
+      } else if (kind == NVRM_DESC_KIND_SSBO || kind == NVRM_DESC_KIND_TEXEL ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
-         for (j = 0; j < w->descriptorCount; j++)
-            nvrm_desc_write_ssbo(set, base_slot + j, &w->pBufferInfo[j]);
-      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+         for (j = 0; j < w->descriptorCount; j++) {
+            int s = flat + (int)j;
+            if (s >= 0 && s < (int)NVRM_MAX_DESC_SLOTS && w->pBufferInfo)
+               nvrm_desc_write_ssbo_slot(set, (uint32_t)s, &w->pBufferInfo[j],
+                                         is_dyn ||
+                                         w->descriptorType ==
+                                         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+         }
+      } else if (kind == NVRM_DESC_KIND_IMAGE || kind == NVRM_DESC_KIND_SAMPLER ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {
-         for (j = 0; j < w->descriptorCount; j++)
-            nvrm_desc_write_image(device, set, base_slot + j, &w->pImageInfo[j],
-                                  w->descriptorType);
-      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
-                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
-         /* Texel buffers: treat as SSBO-like address record for now */
-         for (j = 0; j < w->descriptorCount && w->pTexelBufferView; j++) {
-            /* Buffer views not fully wired; reserve SSBO slot with zero range */
-            if (set->ssbo_count < 16)
-               set->ssbo_count++;
+         for (j = 0; j < w->descriptorCount; j++) {
+            int s = flat + (int)j;
+            if (s >= 0 && s < (int)NVRM_MAX_DESC_SLOTS && w->pImageInfo)
+               nvrm_desc_write_image_slot(device, set, (uint32_t)s,
+                                          &w->pImageInfo[j], w->descriptorType);
          }
       }
    }
 
-   /* Descriptor copies: shallow copy of tracked slots between sets */
+   /* Descriptor copies: copy by layout-resolved flat slots when possible */
    for (i = 0; i < descriptorCopyCount; i++) {
       const VkCopyDescriptorSet *c = &pDescriptorCopies[i];
       VK_FROM_HANDLE(nvrm_descriptor_set, src, c->srcSet);
       VK_FROM_HANDLE(nvrm_descriptor_set, dst, c->dstSet);
-      uint32_t n, k;
+      uint32_t k;
       if (!src || !dst)
          continue;
-      n = c->descriptorCount;
-      for (k = 0; k < n; k++) {
-         uint32_t sslot = c->srcBinding + c->srcArrayElement + k;
-         uint32_t dslot = c->dstBinding + c->dstArrayElement + k;
-         if (sslot < 16 && dslot < 16) {
-            if (sslot < src->ubo_count || dslot < dst->ubo_count) {
-               dst->ubo[dslot] = src->ubo[sslot < 16 ? sslot : 0];
-               if (dslot >= dst->ubo_count)
-                  dst->ubo_count = dslot + 1;
-            }
-            if (sslot < src->ssbo_count || dslot < dst->ssbo_count) {
-               dst->ssbo[dslot] = src->ssbo[sslot < 16 ? sslot : 0];
-               if (dslot >= dst->ssbo_count)
-                  dst->ssbo_count = dslot + 1;
-            }
-            if (sslot < src->img_count || dslot < dst->img_count) {
-               dst->img[dslot] = src->img[sslot < 16 ? sslot : 0];
-               if (dslot >= dst->img_count)
-                  dst->img_count = dslot + 1;
-            }
+      for (k = 0; k < c->descriptorCount; k++) {
+         int sslot = nvrm_layout_flat_slot(src->layout, c->srcBinding,
+                                           c->srcArrayElement + k, NULL);
+         int dslot = nvrm_layout_flat_slot(dst->layout, c->dstBinding,
+                                           c->dstArrayElement + k, NULL);
+         if (sslot < 0)
+            sslot = (int)(c->srcBinding + c->srcArrayElement + k);
+         if (dslot < 0)
+            dslot = (int)(c->dstBinding + c->dstArrayElement + k);
+         if (sslot >= 0 && sslot < (int)NVRM_MAX_DESC_SLOTS &&
+             dslot >= 0 && dslot < (int)NVRM_MAX_DESC_SLOTS) {
+            dst->ubo[dslot] = src->ubo[sslot];
+            dst->ssbo[dslot] = src->ssbo[sslot];
+            dst->img[dslot] = src->img[sslot];
+            if ((uint32_t)dslot >= dst->ubo_count)
+               dst->ubo_count = (uint32_t)dslot + 1;
+            if ((uint32_t)dslot >= dst->ssbo_count)
+               dst->ssbo_count = (uint32_t)dslot + 1;
+            if ((uint32_t)dslot >= dst->img_count)
+               dst->img_count = (uint32_t)dslot + 1;
          }
       }
    }
@@ -1111,14 +1372,43 @@ nvrm_CreateRenderPass2(VkDevice _device,
 {
    VK_FROM_HANDLE(nvrm_device, device, _device);
    struct nvrm_render_pass *rp;
+   uint32_t i, s;
 
    rp = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*rp), 8,
                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!rp)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    vk_object_base_init(&device->vk, &rp->base, VK_OBJECT_TYPE_RENDER_PASS);
-   rp->attachment_count = pCreateInfo->attachmentCount;
-   rp->subpass_count = pCreateInfo->subpassCount;
+   rp->attachment_count = MIN2(pCreateInfo->attachmentCount, NVRM_MAX_RP_ATTACHMENTS);
+   rp->subpass_count = MIN2(pCreateInfo->subpassCount, NVRM_MAX_RP_SUBPASSES);
+
+   for (i = 0; i < rp->attachment_count; i++) {
+      const VkAttachmentDescription2 *a = &pCreateInfo->pAttachments[i];
+      rp->atts[i].format = a->format;
+      rp->atts[i].load_op = a->loadOp;
+      rp->atts[i].store_op = a->storeOp;
+      rp->atts[i].stencil_load_op = a->stencilLoadOp;
+      rp->atts[i].initial_layout = a->initialLayout;
+      rp->atts[i].final_layout = a->finalLayout;
+      rp->atts[i].is_depth_stencil = vk_format_is_depth_stencil(a->format);
+   }
+   for (s = 0; s < rp->subpass_count; s++) {
+      const VkSubpassDescription2 *sp = &pCreateInfo->pSubpasses[s];
+      struct nvrm_rp_subpass *out = &rp->subpasses[s];
+      uint32_t c;
+      out->color_count = MIN2(sp->colorAttachmentCount, NVRM_MAX_RP_ATTACHMENTS);
+      out->depth_stencil_ref = -1;
+      for (c = 0; c < out->color_count; c++) {
+         if (sp->pColorAttachments)
+            out->color_refs[c] = sp->pColorAttachments[c].attachment;
+         else
+            out->color_refs[c] = VK_ATTACHMENT_UNUSED;
+      }
+      if (sp->pDepthStencilAttachment &&
+          sp->pDepthStencilAttachment->attachment != VK_ATTACHMENT_UNUSED)
+         out->depth_stencil_ref = (int32_t)sp->pDepthStencilAttachment->attachment;
+   }
+
    *pRenderPass = nvrm_render_pass_to_handle(rp);
    return VK_SUCCESS;
 }
@@ -1129,12 +1419,58 @@ nvrm_CreateRenderPass(VkDevice device,
                       const VkAllocationCallbacks *pAllocator,
                       VkRenderPass *pRenderPass)
 {
-   /* Convert-lite: only counts matter for stub */
+   /* Promote v1 create info to v2 (attachments + subpasses only) */
    VkRenderPassCreateInfo2 ci2 = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
       .attachmentCount = pCreateInfo->attachmentCount,
+      .pAttachments = NULL,
       .subpassCount = pCreateInfo->subpassCount,
+      .pSubpasses = NULL,
    };
+   /* Stack-allocate promoted arrays for common small sizes */
+   VkAttachmentDescription2 atts[NVRM_MAX_RP_ATTACHMENTS];
+   VkSubpassDescription2 subs[NVRM_MAX_RP_SUBPASSES];
+   VkAttachmentReference2 color_refs[NVRM_MAX_RP_SUBPASSES][NVRM_MAX_RP_ATTACHMENTS];
+   VkAttachmentReference2 ds_refs[NVRM_MAX_RP_SUBPASSES];
+   uint32_t i, s;
+
+   memset(atts, 0, sizeof(atts));
+   memset(subs, 0, sizeof(subs));
+   for (i = 0; i < pCreateInfo->attachmentCount && i < NVRM_MAX_RP_ATTACHMENTS; i++) {
+      const VkAttachmentDescription *a = &pCreateInfo->pAttachments[i];
+      atts[i].sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+      atts[i].format = a->format;
+      atts[i].samples = a->samples;
+      atts[i].loadOp = a->loadOp;
+      atts[i].storeOp = a->storeOp;
+      atts[i].stencilLoadOp = a->stencilLoadOp;
+      atts[i].stencilStoreOp = a->stencilStoreOp;
+      atts[i].initialLayout = a->initialLayout;
+      atts[i].finalLayout = a->finalLayout;
+   }
+   ci2.pAttachments = atts;
+   for (s = 0; s < pCreateInfo->subpassCount && s < NVRM_MAX_RP_SUBPASSES; s++) {
+      const VkSubpassDescription *sp = &pCreateInfo->pSubpasses[s];
+      uint32_t c;
+      subs[s].sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+      subs[s].pipelineBindPoint = sp->pipelineBindPoint;
+      subs[s].colorAttachmentCount = sp->colorAttachmentCount;
+      for (c = 0; c < sp->colorAttachmentCount && c < NVRM_MAX_RP_ATTACHMENTS; c++) {
+         color_refs[s][c].sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+         color_refs[s][c].attachment = sp->pColorAttachments ?
+            sp->pColorAttachments[c].attachment : VK_ATTACHMENT_UNUSED;
+         color_refs[s][c].layout = sp->pColorAttachments ?
+            sp->pColorAttachments[c].layout : VK_IMAGE_LAYOUT_UNDEFINED;
+      }
+      subs[s].pColorAttachments = color_refs[s];
+      if (sp->pDepthStencilAttachment) {
+         ds_refs[s].sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+         ds_refs[s].attachment = sp->pDepthStencilAttachment->attachment;
+         ds_refs[s].layout = sp->pDepthStencilAttachment->layout;
+         subs[s].pDepthStencilAttachment = &ds_refs[s];
+      }
+   }
+   ci2.pSubpasses = subs;
    return nvrm_CreateRenderPass2(device, &ci2, pAllocator, pRenderPass);
 }
 
@@ -1170,6 +1506,7 @@ nvrm_CreateImageView(VkDevice _device,
    view->level = pCreateInfo->subresourceRange.baseMipLevel;
    view->layer = pCreateInfo->subresourceRange.baseArrayLayer;
    view->layer_count = pCreateInfo->subresourceRange.layerCount;
+   view->aspect_mask = pCreateInfo->subresourceRange.aspectMask;
    *pView = nvrm_image_view_to_handle(view);
    return VK_SUCCESS;
 }
@@ -1194,6 +1531,7 @@ nvrm_CreateFramebuffer(VkDevice _device,
 {
    VK_FROM_HANDLE(nvrm_device, device, _device);
    struct nvrm_framebuffer *fb;
+   uint32_t i;
 
    fb = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*fb), 8,
                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
@@ -1203,7 +1541,11 @@ nvrm_CreateFramebuffer(VkDevice _device,
    fb->width = pCreateInfo->width;
    fb->height = pCreateInfo->height;
    fb->layers = pCreateInfo->layers;
-   fb->attachment_count = pCreateInfo->attachmentCount;
+   fb->attachment_count = MIN2(pCreateInfo->attachmentCount, NVRM_MAX_RP_ATTACHMENTS);
+   for (i = 0; i < fb->attachment_count; i++) {
+      if (pCreateInfo->pAttachments)
+         fb->views[i] = nvrm_image_view_from_handle(pCreateInfo->pAttachments[i]);
+   }
    *pFramebuffer = nvrm_framebuffer_to_handle(fb);
    return VK_SUCCESS;
 }
@@ -1413,6 +1755,28 @@ nvrm_CmdBindPipeline(VkCommandBuffer commandBuffer,
       nvrm_cmd_emit_pipeline_state(cmd, pipe);
 }
 
+/* Fill nv_3d_surface from image view + render extent / format. */
+static void
+nvrm_surface_from_view(struct nv_3d_surface *s, struct nvrm_image_view *view,
+                       uint32_t w, uint32_t h, bool is_zt)
+{
+   struct nvrm_image *img;
+   memset(s, 0, sizeof(*s));
+   if (!view || !view->image)
+      return;
+   img = view->image;
+   s->enabled = true;
+   s->gpu_addr = img->gpu_offset ? img->gpu_offset :
+                 (img->bo ? nv_rm_bo_gpu_offset(img->bo) : 0);
+   s->width = w ? w : img->vk.extent.width;
+   s->height = h ? h : img->vk.extent.height;
+   s->block_linear = img->is_blocklinear;
+   if (is_zt)
+      s->format = vk_format_to_zt_format(view->format);
+   else
+      s->format = vk_format_to_ct_format(view->format);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
                        const VkRenderingInfo *pRenderingInfo)
@@ -1421,8 +1785,9 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const struct nv_device_info *info = cmd->device->info;
    uint32_t class_3d = info ? info->class_3d : 0;
    uint32_t w, h;
-   uint8_t targets[8] = {0};
+   uint8_t targets[8] = {0, 1, 2, 3, 4, 5, 6, 7};
    unsigned i, n_color = 0;
+   bool have_zt = false;
 
    if (!cmd->push_map || !pRenderingInfo)
       return;
@@ -1449,55 +1814,93 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
       if (att->imageView != VK_NULL_HANDLE) {
          VK_FROM_HANDLE(nvrm_image_view, view, att->imageView);
          if (view && view->image) {
-            s.enabled = true;
-            s.gpu_addr = view->image->gpu_offset;
-            s.width = w;
-            s.height = h;
-            s.format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
-            s.block_linear = false;
+            nvrm_surface_from_view(&s, view, w, h, false);
             n_color++;
          }
       }
       nv_3d_set_color_target(&cmd->push, i, &s);
    }
+   /* Disable unused colour targets */
+   for (; i < 8; i++) {
+      struct nv_3d_surface s;
+      memset(&s, 0, sizeof(s));
+      nv_3d_set_color_target(&cmd->push, i, &s);
+   }
    if (n_color)
       nv_3d_set_ct_select(&cmd->push, n_color, targets);
 
+   /* Depth and/or stencil attachment (may share image view) */
    if (pRenderingInfo->pDepthAttachment &&
        pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(nvrm_image_view, view,
                      pRenderingInfo->pDepthAttachment->imageView);
       struct nv_3d_surface s;
-      memset(&s, 0, sizeof(s));
-      if (view && view->image) {
-         s.enabled = true;
-         s.gpu_addr = view->image->gpu_offset;
-         s.width = w;
-         s.height = h;
-         s.format = NVC597_SET_ZT_FORMAT_V_Z24S8;
+      nvrm_surface_from_view(&s, view, w, h, true);
+      if (s.enabled) {
          nv_3d_set_zeta_target(&cmd->push, &s);
+         have_zt = true;
+      }
+   } else if (pRenderingInfo->pStencilAttachment &&
+              pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(nvrm_image_view, view,
+                     pRenderingInfo->pStencilAttachment->imageView);
+      struct nv_3d_surface s;
+      nvrm_surface_from_view(&s, view, w, h, true);
+      if (s.enabled) {
+         nv_3d_set_zeta_target(&cmd->push, &s);
+         have_zt = true;
       }
    }
 
    nv_3d_set_surface_clip(&cmd->push,
                           pRenderingInfo->renderArea.offset.x,
                           pRenderingInfo->renderArea.offset.y, w, h);
+   /* Viewport: scale half-extent, offset centre; Y inverted for GL/Vulkan clip */
    nv_3d_set_viewport0(&cmd->push,
-                       (float)w * 0.5f, (float)h * -0.5f, 0.5f,
-                       (float)w * 0.5f, (float)h * 0.5f, 0.5f);
+                       (float)w * 0.5f, (float)h * -0.5f, 1.0f,
+                       (float)w * 0.5f, (float)h * 0.5f, 0.0f);
 
-   /* Load ops: clear colour if requested */
-   for (i = 0; i < pRenderingInfo->colorAttachmentCount && i < 1; i++) {
+   /* Apply scissor from render area */
+   nv_3d_set_scissor0(&cmd->push, true,
+                      (uint32_t)pRenderingInfo->renderArea.offset.x,
+                      (uint32_t)pRenderingInfo->renderArea.offset.y,
+                      (uint32_t)(pRenderingInfo->renderArea.offset.x + (int32_t)w),
+                      (uint32_t)(pRenderingInfo->renderArea.offset.y + (int32_t)h));
+
+   /* Load ops: clear colour targets */
+   for (i = 0; i < pRenderingInfo->colorAttachmentCount && i < 8; i++) {
       const VkRenderingAttachmentInfo *att = &pRenderingInfo->pColorAttachments[i];
-      if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      if (att->imageView != VK_NULL_HANDLE &&
+          att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
          const uint32_t *c = att->clearValue.color.uint32;
-         nv_3d_emit_clear_surface(&cmd->push, 0x10, c, 0.0f, 0);
+         /* Multi-target clear: hardware clears all enabled CTs; set values then clear once */
+         if (i == 0)
+            nv_3d_emit_clear_surface(&cmd->push, 0x10, c, 0.0f, 0);
       }
    }
-   if (pRenderingInfo->pDepthAttachment &&
-       pRenderingInfo->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-      float d = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
-      nv_3d_emit_clear_surface(&cmd->push, 0x100, NULL, d, 0);
+   if (have_zt) {
+      float d = 1.0f;
+      uint32_t st = 0;
+      uint32_t flags = 0;
+      if (pRenderingInfo->pDepthAttachment &&
+          pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE &&
+          pRenderingInfo->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         d = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
+         flags |= 0x100;
+      }
+      if (pRenderingInfo->pStencilAttachment &&
+          pRenderingInfo->pStencilAttachment->imageView != VK_NULL_HANDLE &&
+          pRenderingInfo->pStencilAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         st = pRenderingInfo->pStencilAttachment->clearValue.depthStencil.stencil;
+         flags |= 0x200;
+      } else if (pRenderingInfo->pDepthAttachment &&
+                 pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE &&
+                 pRenderingInfo->pDepthAttachment->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         /* Depth-only clear may include stencil in combined formats */
+         st = pRenderingInfo->pDepthAttachment->clearValue.depthStencil.stencil;
+      }
+      if (flags)
+         nv_3d_emit_clear_surface(&cmd->push, flags, NULL, d, st);
    }
 
    cmd->render_width = w;
@@ -1519,22 +1922,75 @@ nvrm_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
                          const VkRenderPassBeginInfo *pRenderPassBegin,
                          const VkSubpassBeginInfo *pSubpassBeginInfo)
 {
+   VK_FROM_HANDLE(nvrm_render_pass, rp, pRenderPassBegin->renderPass);
+   VK_FROM_HANDLE(nvrm_framebuffer, fb, pRenderPassBegin->framebuffer);
    VkRenderingInfo ri;
-   VkRenderingAttachmentInfo color;
+   VkRenderingAttachmentInfo colors[NVRM_MAX_RP_ATTACHMENTS];
+   VkRenderingAttachmentInfo depth_att, stencil_att;
+   const struct nvrm_rp_subpass *sp;
+   uint32_t i, n_color = 0;
    (void)pSubpassBeginInfo;
+
    memset(&ri, 0, sizeof(ri));
    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
    ri.renderArea = pRenderPassBegin->renderArea;
-   ri.layerCount = 1;
-   /* Without attachment formats, only set area; clears from pClearValues if any */
-   if (pRenderPassBegin->clearValueCount && pRenderPassBegin->pClearValues) {
-      memset(&color, 0, sizeof(color));
-      color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-      color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-      color.clearValue = pRenderPassBegin->pClearValues[0];
-      ri.colorAttachmentCount = 1;
-      ri.pColorAttachments = &color;
+   ri.layerCount = fb ? fb->layers : 1;
+   if (!ri.layerCount)
+      ri.layerCount = 1;
+
+   memset(colors, 0, sizeof(colors));
+   memset(&depth_att, 0, sizeof(depth_att));
+   memset(&stencil_att, 0, sizeof(stencil_att));
+
+   sp = (rp && rp->subpass_count) ? &rp->subpasses[0] : NULL;
+   if (sp && fb) {
+      for (i = 0; i < sp->color_count && n_color < NVRM_MAX_RP_ATTACHMENTS; i++) {
+         uint32_t ref = sp->color_refs[i];
+         if (ref == VK_ATTACHMENT_UNUSED || ref >= fb->attachment_count)
+            continue;
+         colors[n_color].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+         colors[n_color].imageView = nvrm_image_view_to_handle(fb->views[ref]);
+         if (rp && ref < rp->attachment_count)
+            colors[n_color].loadOp = rp->atts[ref].load_op;
+         else
+            colors[n_color].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+         if (pRenderPassBegin->clearValueCount > ref &&
+             pRenderPassBegin->pClearValues &&
+             colors[n_color].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+            colors[n_color].clearValue = pRenderPassBegin->pClearValues[ref];
+         n_color++;
+      }
+      if (sp->depth_stencil_ref >= 0 &&
+          (uint32_t)sp->depth_stencil_ref < fb->attachment_count) {
+         uint32_t ref = (uint32_t)sp->depth_stencil_ref;
+         depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+         depth_att.imageView = nvrm_image_view_to_handle(fb->views[ref]);
+         if (rp && ref < rp->attachment_count) {
+            depth_att.loadOp = rp->atts[ref].load_op;
+            stencil_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            stencil_att.imageView = depth_att.imageView;
+            stencil_att.loadOp = rp->atts[ref].stencil_load_op;
+            if (pRenderPassBegin->clearValueCount > ref &&
+                pRenderPassBegin->pClearValues) {
+               if (depth_att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+                  depth_att.clearValue = pRenderPassBegin->pClearValues[ref];
+               if (stencil_att.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+                  stencil_att.clearValue = pRenderPassBegin->pClearValues[ref];
+            }
+            ri.pStencilAttachment = &stencil_att;
+         }
+         ri.pDepthAttachment = &depth_att;
+      }
+   } else if (pRenderPassBegin->clearValueCount && pRenderPassBegin->pClearValues) {
+      /* Minimal fallback: single colour clear without FB views */
+      colors[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+      colors[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      colors[0].clearValue = pRenderPassBegin->pClearValues[0];
+      n_color = 1;
    }
+
+   ri.colorAttachmentCount = n_color;
+   ri.pColorAttachments = n_color ? colors : NULL;
    nvrm_CmdBeginRendering(commandBuffer, &ri);
 }
 
