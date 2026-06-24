@@ -128,6 +128,12 @@ int nv_rm_export_object_to_fd(struct nv_rm_device *dev, uint32_t h_parent,
 int nv_rm_import_object_from_fd(struct nv_rm_device *dev, uint32_t h_parent,
                                 int import_fd, uint32_t *h_object_out);
 
+/**
+ * tick97: NVOS57 share policy on an RM object (requires libdrm_nvidia).
+ * share_all_dup: convenience RS_SHARE_TYPE_ALL + DUP_OBJECT compose.
+ */
+int nv_rm_share_object_all_dup(struct nv_rm_device *dev, uint32_t h_object);
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 

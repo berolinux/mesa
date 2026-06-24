@@ -271,6 +271,8 @@ nv_rm_device_ensure_vaspace(struct nv_rm_device *dev)
 #if defined(HAVE_LIBDRM_NVIDIA)
    int ret;
    uint32_t h_vas = 0;
+   uint32_t big_page = 0;
+   uint32_t flags = NV_VASPACE_ALLOCATION_FLAGS_NONE;
    uint64_t va_size = 0, va_base = 0;
 
    if (!dev || !dev->nvdev)
@@ -278,11 +280,37 @@ nv_rm_device_ensure_vaspace(struct nv_rm_device *dev)
    if (dev->vas_ready && dev->h_vaspace)
       return 0;
 
+   /* tick97: wire probe max_page_size into FERMI_VASPACE_A bigPageSize */
+   big_page = nvidia_rm_vaspace_normalize_big_page(dev->info.max_page_size);
+   /*
+    * Private VAS: allow PTE fallback into sysmem if FB PTE heap is tight;
+    * on Turing+ with UVM-style faulting, enable page faulting when we have
+    * a non-default big page (implies real GPU probe succeeded).
+    */
+   flags = NV_VASPACE_ALLOCATION_FLAGS_RETRY_PTE_ALLOC_IN_SYS;
+   if (big_page != 0 && dev->info.architecture >= 0x160 /* Turing-ish */)
+      flags |= NV_VASPACE_ALLOCATION_FLAGS_ENABLE_PAGE_FAULTING;
+
    /* Default: let RM pick size/base (pass 0); index = create new private VAS */
    ret = nvidia_rm_vaspace_alloc(dev->nvdev, &h_vas,
                                  NV_VASPACE_ALLOCATION_INDEX_GPU_NEW,
-                                 NV_VASPACE_ALLOCATION_FLAGS_NONE,
-                                 0, 0, 0, &va_size, &va_base);
+                                 flags, 0, 0, big_page, &va_size, &va_base);
+   if (ret != 0 && (flags & NV_VASPACE_ALLOCATION_FLAGS_ENABLE_PAGE_FAULTING)) {
+      /* Retry without page-faulting if RM rejects the flag combination */
+      flags &= ~NV_VASPACE_ALLOCATION_FLAGS_ENABLE_PAGE_FAULTING;
+      h_vas = 0;
+      ret = nvidia_rm_vaspace_alloc(dev->nvdev, &h_vas,
+                                    NV_VASPACE_ALLOCATION_INDEX_GPU_NEW,
+                                    flags, 0, 0, big_page, &va_size, &va_base);
+   }
+   if (ret != 0 && big_page != 0) {
+      /* Retry with RM-default big page if normalized size was rejected */
+      h_vas = 0;
+      ret = nvidia_rm_vaspace_alloc(dev->nvdev, &h_vas,
+                                    NV_VASPACE_ALLOCATION_INDEX_GPU_NEW,
+                                    NV_VASPACE_ALLOCATION_FLAGS_RETRY_PTE_ALLOC_IN_SYS,
+                                    0, 0, 0, &va_size, &va_base);
+   }
    if (ret != 0) {
       /* Fall back to device-global VAS reference if private alloc fails */
       h_vas = 0;
@@ -598,6 +626,20 @@ nv_rm_import_object_from_fd(struct nv_rm_device *dev, uint32_t h_parent,
                                           h_object_out);
 #else
    (void)dev; (void)h_parent; (void)import_fd; (void)h_object_out;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_share_object_all_dup(struct nv_rm_device *dev, uint32_t h_object)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev || !h_object)
+      return -EINVAL;
+   return nvidia_rm_share_object_all_dup(dev->nvdev, h_object);
+#else
+   (void)dev;
+   (void)h_object;
    return -ENOSYS;
 #endif
 }
