@@ -1609,11 +1609,184 @@ nvgpu_texture_barrier(struct pipe_context *pctx, unsigned flags)
    nvgpu_push_finish(ctx, &push, true);
 }
 
+/* ---- queries (occlusion / timestamp via REPORT_SEMAPHORE) ---- */
+
+static struct pipe_query *
+nvgpu_create_query(struct pipe_context *pctx, unsigned query_type, unsigned index)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_query *q;
+   struct nv_rm_bo_req req;
+   (void)index;
+
+   if (query_type != PIPE_QUERY_OCCLUSION_COUNTER &&
+       query_type != PIPE_QUERY_OCCLUSION_PREDICATE &&
+       query_type != PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE &&
+       query_type != PIPE_QUERY_TIMESTAMP &&
+       query_type != PIPE_QUERY_TIME_ELAPSED &&
+       query_type != PIPE_QUERY_GPU_FINISHED)
+      return NULL;
+   if (!ctx->screen || !ctx->screen->rm)
+      return NULL;
+
+   q = CALLOC_STRUCT(nvgpu_query);
+   if (!q)
+      return NULL;
+   q->type = query_type;
+   memset(&req, 0, sizeof(req));
+   req.size = 64; /* 4-word report + padding */
+   req.alignment = 256;
+   req.vram = false;
+   req.cpu_access = true;
+   req.no_scanout = true;
+   req.map_gpu_va = true;
+   q->bo = nv_rm_bo_alloc(ctx->screen->rm, &req);
+   if (!q->bo) {
+      FREE(q);
+      return NULL;
+   }
+   q->map = nv_rm_bo_map(q->bo);
+   q->gpu_addr = nv_rm_bo_gpu_offset(q->bo);
+   if (q->map)
+      memset(q->map, 0, 64);
+   return (struct pipe_query *)q;
+}
+
+static void
+nvgpu_destroy_query(struct pipe_context *pctx, struct pipe_query *pq)
+{
+   struct nvgpu_query *q = (struct nvgpu_query *)pq;
+   (void)pctx;
+   if (!q)
+      return;
+   if (q->bo) {
+      if (q->map)
+         nv_rm_bo_unmap(q->bo);
+      nv_rm_bo_free(q->bo);
+   }
+   FREE(q);
+}
+
+static bool
+nvgpu_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_query *q = (struct nvgpu_query *)pq;
+   struct nv_push push;
+
+   if (!q)
+      return false;
+   if (q->map)
+      memset(q->map, 0, 64);
+   q->result = 0;
+   q->result_ready = false;
+   q->active = true;
+
+   if (q->type == PIPE_QUERY_OCCLUSION_COUNTER ||
+       q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+       q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE) {
+      if (!nvgpu_push_start(ctx, &push, 16))
+         return false;
+      nv_3d_set_zpass_pixel_count(&push, true);
+      nvgpu_push_finish(ctx, &push, false);
+      ctx->active_occlusion = pq;
+   }
+   return true;
+}
+
+static bool
+nvgpu_end_query(struct pipe_context *pctx, struct pipe_query *pq)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_query *q = (struct nvgpu_query *)pq;
+   struct nv_push push;
+   bool zpass;
+
+   if (!q || !q->gpu_addr)
+      return false;
+   q->active = false;
+   zpass = (q->type == PIPE_QUERY_OCCLUSION_COUNTER ||
+            q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
+            q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
+
+   if (!nvgpu_push_start(ctx, &push, 32))
+      return false;
+   if (zpass) {
+      nv_3d_report_query_release(&push, q->gpu_addr, 1, true, false);
+      nv_3d_set_zpass_pixel_count(&push, false);
+      if (ctx->active_occlusion == pq)
+         ctx->active_occlusion = NULL;
+   } else {
+      /* timestamp / gpu_finished: non-zpass report release */
+      nv_3d_report_query_release(&push, q->gpu_addr, 1, false, false);
+   }
+   nvgpu_push_finish(ctx, &push, true);
+
+   /* Host snapshot when mapped (path A); GPU may still be writing — poll in get */
+   if (q->map) {
+      volatile uint32_t *dw = q->map;
+      q->result = dw[0];
+      if (dw[0] || dw[1] || dw[2] || dw[3])
+         q->result_ready = true;
+   }
+   return true;
+}
+
+static bool
+nvgpu_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
+                       bool wait, union pipe_query_result *result)
+{
+   struct nvgpu_query *q = (struct nvgpu_query *)pq;
+   volatile uint32_t *dw;
+   uint64_t deadline_ns;
+   (void)pctx;
+
+   if (!q || !result)
+      return false;
+
+   if (q->map) {
+      dw = q->map;
+      if (wait) {
+         deadline_ns = 2000000000ull; /* 2s coarse */
+         while (!dw[0] && !dw[1] && deadline_ns) {
+            /* spin briefly; no proper sema wait yet */
+            deadline_ns -= 1000;
+         }
+      }
+      q->result = ((uint64_t)dw[1] << 32) | dw[0];
+      if (!q->result && dw[0] == 0 && dw[1] == 0 && !wait)
+         return false; /* not ready */
+      q->result_ready = true;
+   }
+
+   switch (q->type) {
+   case PIPE_QUERY_OCCLUSION_COUNTER:
+      result->u64 = q->result;
+      break;
+   case PIPE_QUERY_OCCLUSION_PREDICATE:
+   case PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE:
+      result->b = q->result != 0;
+      break;
+   case PIPE_QUERY_TIMESTAMP:
+   case PIPE_QUERY_TIME_ELAPSED:
+      result->u64 = q->result;
+      break;
+   case PIPE_QUERY_GPU_FINISHED:
+      result->b = q->result_ready || q->result != 0;
+      break;
+   default:
+      result->u64 = q->result;
+      break;
+   }
+   return true;
+}
+
 static void
 nvgpu_render_condition(struct pipe_context *pctx, struct pipe_query *pq,
                        bool condition, enum pipe_render_cond_flag mode)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_query *q = (struct nvgpu_query *)pq;
    struct nv_push push;
    (void)mode;
    if (!pq) {
@@ -1628,6 +1801,8 @@ nvgpu_render_condition(struct pipe_context *pctx, struct pipe_query *pq,
    }
    ctx->cond_render_active = true;
    ctx->cond_render_inverted = condition;
+   if (q && q->gpu_addr)
+      ctx->cond_render_gpu_addr = q->gpu_addr;
    if (ctx->cond_render_gpu_addr && nvgpu_push_start(ctx, &push, 32)) {
       nv_3d_set_conditional_render(&push, ctx->cond_render_gpu_addr,
                                    ctx->cond_render_inverted);
@@ -1755,6 +1930,11 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.memory_barrier = nvgpu_memory_barrier;
    ctx->base.texture_barrier = nvgpu_texture_barrier;
    ctx->base.render_condition = nvgpu_render_condition;
+   ctx->base.create_query = nvgpu_create_query;
+   ctx->base.destroy_query = nvgpu_destroy_query;
+   ctx->base.begin_query = nvgpu_begin_query;
+   ctx->base.end_query = nvgpu_end_query;
+   ctx->base.get_query_result = nvgpu_get_query_result;
    ctx->base.clear_buffer = nvgpu_clear_buffer;
    ctx->base.launch_grid = nvgpu_launch_grid;
 

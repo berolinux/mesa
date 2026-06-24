@@ -108,6 +108,21 @@ struct nvgpu_context {
    uint64_t cond_render_gpu_addr;
    bool cond_render_active;
    bool cond_render_inverted;
+   struct pipe_query *active_occlusion; /* non-NULL while begin_query active */
+};
+
+/* Occlusion / timestamp query backed by RM sema BO (report semaphore target).
+ * pipe_query is an incomplete/opaque type in some mesa builds; store as
+ * first-member compatible layout without embedding incomplete type. */
+struct nvgpu_query {
+   void *pipe_q_pad;      /* unused; keeps pointer identity as pipe_query* */
+   enum pipe_query_type type;
+   struct nv_rm_bo *bo;
+   void *map;
+   uint64_t gpu_addr;
+   uint64_t result;       /* host snapshot after end/get */
+   bool active;
+   bool result_ready;
 };
 
 static inline struct nvgpu_context *

@@ -1057,15 +1057,32 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
       if (sh == 0) sh = 1;
       if (dw == 0) dw = 1;
       if (dh == 0) dh = 1;
-      /* Unscaled CE pitch blit (scaled/filter needs 3D path later) */
+      /* Unscaled CE pitch/BL blit; scaled/LINEAR filter needs 3D/TEX later */
       w = sw < dw ? sw : dw;
       h = sh < dh ? sh : dh;
+      /* Layer/depth offset: treat z offset as layer * full 2D size when array */
+      {
+         int32_t sz0 = b->srcOffsets[0].z;
+         int32_t dz0 = b->dstOffsets[0].z;
+         uint64_t layer_stride_s = (uint64_t)spitch *
+            (src->vk.extent.height ? src->vk.extent.height : 1);
+         uint64_t layer_stride_d = (uint64_t)dpitch *
+            (dst->vk.extent.height ? dst->vk.extent.height : 1);
+         if (sz0 > 0)
+            saddr += (uint64_t)sz0 * layer_stride_s;
+         if (dz0 > 0)
+            daddr += (uint64_t)dz0 * layer_stride_d;
+      }
       soff = saddr + (uint64_t)sy0 * spitch + (uint64_t)sx0 * sbpp;
       doff = daddr + (uint64_t)dy0 * dpitch + (uint64_t)dx0 * dbpp;
       line_len = w * (sbpp < dbpp ? sbpp : dbpp);
       if (src->is_blocklinear || dst->is_blocklinear)
          nv_copy_emit_image_2d_bl(&cmd->push, soff, doff, w, h, sbpp,
-                                  spitch, dpitch, 0, 0, 0, 0,
+                                  spitch, dpitch,
+                                  (uint32_t)(sx0 > 0 ? sx0 : 0),
+                                  (uint32_t)(sy0 > 0 ? sy0 : 0),
+                                  (uint32_t)(dx0 > 0 ? dx0 : 0),
+                                  (uint32_t)(dy0 > 0 ? dy0 : 0),
                                   src->is_blocklinear, dst->is_blocklinear,
                                   src->gobs_width, src->gobs_height,
                                   dst->gobs_width, dst->gobs_height);
@@ -1074,6 +1091,9 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
                                spitch, dpitch, h);
    }
    nv_push_wfi(&cmd->push);
+   /* Invalidate tex caches so subsequent samples see blit dst */
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_emit_texture_barrier(&cmd->push);
 }
 
 VKAPI_ATTR void VKAPI_CALL

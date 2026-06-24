@@ -492,6 +492,73 @@ nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
    return nv_sass_emit_raw(b, imm, hi);
 }
 
+/* VOTE class hi (Maxwell approx): ANY/ALL/BALLOT/ELECT variants in low bits */
+#define NV_SASS_VOTE_HI_BASE    0x50d80000u
+#define NV_SASS_VOTE_MODE_ANY   0x0u
+#define NV_SASS_VOTE_MODE_ALL   0x1u
+#define NV_SASS_VOTE_MODE_BALLOT 0x2u
+#define NV_SASS_VOTE_MODE_ELECT 0x3u
+
+bool
+nv_sass_emit_vote_any(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, cond_reg);
+   if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
+      return false;
+   return nv_sass_emit_raw(b, (uint32_t)rd,
+                           NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_ANY);
+}
+
+bool
+nv_sass_emit_vote_all(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, cond_reg);
+   if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
+      return false;
+   return nv_sass_emit_raw(b, (uint32_t)rd,
+                           NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_ALL);
+}
+
+bool
+nv_sass_emit_vote_ballot(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, cond_reg);
+   if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
+      return false;
+   return nv_sass_emit_raw(b, (uint32_t)rd,
+                           NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_BALLOT);
+}
+
+bool
+nv_sass_emit_elect(struct nv_sass_buf *b, uint8_t rd)
+{
+   nv_sass_note_reg(b, rd);
+   return nv_sass_emit_raw(b, (uint32_t)rd,
+                           NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_ELECT);
+}
+
+bool
+nv_sass_emit_pixld_comp(struct nv_sass_buf *b, uint8_t rd, uint8_t sr_idx)
+{
+   return nv_sass_emit_s2r(b, rd, sr_idx);
+}
+
+bool
+nv_sass_emit_frag_coord(struct nv_sass_buf *b, uint8_t rd_base)
+{
+   /* Four consecutive regs: x,y,z,w — provisional S2R indices until IPA wired */
+   if (!nv_sass_emit_s2r(b, rd_base + 0, NV_SASS_SR_FRAGMENT_X))
+      return false;
+   if (!nv_sass_emit_s2r(b, rd_base + 1, NV_SASS_SR_FRAGMENT_Y))
+      return false;
+   if (!nv_sass_emit_s2r(b, rd_base + 2, NV_SASS_SR_FRAGMENT_Z))
+      return false;
+   return nv_sass_emit_s2r(b, rd_base + 3, NV_SASS_SR_FRAGMENT_W);
+}
+
 bool
 nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank,
                  uint16_t offset_dwords)

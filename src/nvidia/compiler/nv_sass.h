@@ -204,6 +204,17 @@ extern "C" {
 #define NV_SASS_SR_PM5          9
 #define NV_SASS_SR_PM6          10
 #define NV_SASS_SR_PM7          11
+/* PIXLD-style fragment inputs via S2R (IPA preferred; indices provisional) */
+#define NV_SASS_SR_FRAGMENT_X   12
+#define NV_SASS_SR_FRAGMENT_Y   13
+#define NV_SASS_SR_FRAGMENT_Z   14
+#define NV_SASS_SR_FRAGMENT_W   15
+#define NV_SASS_SR_SAMPLE_IDX   16
+#define NV_SASS_SR_SAMPLE_MASK  17
+#define NV_SASS_SR_LAYER        18
+#define NV_SASS_SR_VIEWPORT     19
+#define NV_SASS_SR_POINT_X      20
+#define NV_SASS_SR_POINT_Y      21
 
 struct nv_sass_buf {
    uint32_t *dwords;     /* owned array; 2 dwords per instruction */
@@ -287,7 +298,16 @@ bool nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
                        uint8_t rb_data, uint8_t atom_op);
 bool nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset);
 bool nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
-                           uint8_t pred, bool not_pred);
+                           uint8_t pred, bool invert);
+/* Vote / ballot / elect (warp collective; Maxwell VOTE class approx) */
+bool nv_sass_emit_vote_any(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg);
+bool nv_sass_emit_vote_all(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg);
+bool nv_sass_emit_vote_ballot(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg);
+bool nv_sass_emit_elect(struct nv_sass_buf *b, uint8_t rd);
+/* PIXLD: load fragment attribute component (stand-in: S2R + mov) */
+bool nv_sass_emit_pixld_comp(struct nv_sass_buf *b, uint8_t rd, uint8_t sr_idx);
+/* Load frag_coord x/y/z/w into rd..rd+3 via four S2R (IPA path later) */
+bool nv_sass_emit_frag_coord(struct nv_sass_buf *b, uint8_t rd_base);
 
 /* Copy first min(count, dst_cap_dwords) into dst; returns dwords copied. */
 uint32_t nv_sass_buf_copy_out(const struct nv_sass_buf *b,

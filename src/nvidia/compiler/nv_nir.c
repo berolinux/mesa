@@ -721,20 +721,81 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    }
 
    case nir_intrinsic_load_sample_id:
-      /* SR sample index (Maxwell+; index refined per SM doc) */
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM0); /* coarse stand-in */
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_SAMPLE_IDX);
       break;
 
    case nir_intrinsic_load_sample_pos:
+      /* Sample position: x in rd, y in rd+1 (2-component result) */
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM1);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_PM2);
       break;
 
    case nir_intrinsic_load_sample_mask_in:
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM2);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_SAMPLE_MASK);
       break;
+
+   case nir_intrinsic_load_layer_id:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LAYER);
+      break;
+
+   case nir_intrinsic_load_point_coord:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_POINT_X);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_POINT_Y);
+      break;
+
+   case nir_intrinsic_vote_any:
+   case nir_intrinsic_vote_all: {
+      uint8_t cond = src_reg_reload(sb, &intr->src[0]);
+      rd = ssa_reg_dst(&intr->def);
+      ok = (op == nir_intrinsic_vote_any)
+              ? nv_sass_emit_vote_any(sb, rd, cond)
+              : nv_sass_emit_vote_all(sb, rd, cond);
+      break;
+   }
+
+   case nir_intrinsic_ballot: {
+      uint8_t cond = src_reg_reload(sb, &intr->src[0]);
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_vote_ballot(sb, rd, cond);
+      break;
+   }
+
+   case nir_intrinsic_elect:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_elect(sb, rd);
+      break;
+
+   case nir_intrinsic_read_invocation:
+   case nir_intrinsic_read_first_invocation: {
+      uint8_t val = src_reg_reload(sb, &intr->src[0]);
+      rd = ssa_reg_dst(&intr->def);
+      if (op == nir_intrinsic_read_first_invocation) {
+         /* elect lane 0 then shfl idx 0 */
+         ok = nv_sass_emit_shfl(sb, rd, val, 0, 0);
+      } else {
+         uint8_t inv = src_reg_reload(sb, &intr->src[1]);
+         ok = nv_sass_emit_shfl(sb, rd, val, inv, 0);
+      }
+      break;
+   }
+
+   case nir_intrinsic_quad_broadcast:
+   case nir_intrinsic_quad_swap_horizontal:
+   case nir_intrinsic_quad_swap_vertical:
+   case nir_intrinsic_quad_swap_diagonal: {
+      uint8_t val = src_reg_reload(sb, &intr->src[0]);
+      rd = ssa_reg_dst(&intr->def);
+      /* SHFL mode 1 = BFLY / quad patterns approximated as indexed shfl */
+      ok = nv_sass_emit_shfl(sb, rd, val, 0, 1);
+      break;
+   }
 
    case nir_intrinsic_load_vertex_id:
       rd = ssa_reg_dst(&intr->def);
@@ -768,8 +829,9 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       break;
 
    case nir_intrinsic_load_view_index:
+      /* Multiview view index; single-view defaults to 0, else S2R viewport/layer */
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_VIEWPORT);
       break;
 
    case nir_intrinsic_load_local_invocation_index:
@@ -779,6 +841,10 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       break;
 
    case nir_intrinsic_load_frag_coord:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_frag_coord(sb, rd);
+      break;
+
    case nir_intrinsic_load_per_vertex_input:
    case nir_intrinsic_store_deref:
    case nir_intrinsic_load_deref:
