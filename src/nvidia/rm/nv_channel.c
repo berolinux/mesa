@@ -395,3 +395,31 @@ nv_channel_wait_idle(struct nv_channel *ch, uint64_t timeout_ns)
    return nvidia_userd_wait_gpfifo_idle(ch->userd, ch->gpfifo_put, timeout_ns);
 #endif
 }
+
+int
+nv_channel_notifier_status(struct nv_channel *ch, uint16_t *status_out,
+                           uint32_t *info32_out)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch; (void)status_out; (void)info32_out;
+   return -ENOSYS;
+#else
+   if (!ch || !ch->error_notifier)
+      return -EINVAL;
+   return nvidia_notifier_status(ch->error_notifier, status_out, info32_out);
+#endif
+}
+
+int
+nv_channel_check_notifier(struct nv_channel *ch, bool clear_on_ok,
+                          uint64_t timeout_ns)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch; (void)clear_on_ok; (void)timeout_ns;
+   return -ENOSYS;
+#else
+   if (!ch || !ch->error_notifier)
+      return -EINVAL;
+   return nvidia_notifier_wait(ch->error_notifier, clear_on_ok, timeout_ns);
+#endif
+}

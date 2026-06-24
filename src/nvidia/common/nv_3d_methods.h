@@ -1140,42 +1140,55 @@ nv_3d_emit_draw_indexed_indirect_mme_kick(struct nv_push *p,
 }
 
 /*
- * MME macro indices reserved by the nvrm/nvgpu indirect path C scaffolding.
- * Real microcode is derived incrementally from binary-driver traces; until
- * then we upload a minimal END-only stub so CALL_MME_MACRO is well-defined
- * (returns immediately) and method state (MEM_ADDRESS, shadow RAM) is primed.
+ * MME macro indices — see nv_mme.h for program builder and ISA notes.
+ * Real indirect-draw microcode is incremental; current upload uses programs
+ * from nv_mme_build_indirect_draw_programs (END-only stubs until RE completes).
  */
-#define NV_MME_MACRO_DRAW_INDIRECT           0
-#define NV_MME_MACRO_DRAW_INDEXED_INDIRECT   1
-#define NV_MME_MACRO_COUNT                   2
+#include "nv_mme.h"
 
-/* Maxwell/Pascal MME: single END instruction (stops macro execution).
- * Encoding is generation-specific; 0x00000001 is the common END opcode
- * used by open-gpu-doc class headers / public MME research dumps. */
+#define NV_MME_MACRO_DRAW_INDIRECT           NV_MME_SLOT_DRAW_INDIRECT
+#define NV_MME_MACRO_DRAW_INDEXED_INDIRECT   NV_MME_SLOT_DRAW_INDEXED_INDIRECT
+#define NV_MME_MACRO_COUNT                   NV_MME_SLOT_COUNT
+
+/* Re-export END insn for callers that included nv_3d_methods.h only */
+#ifndef NV_MME_INSN_END
 #define NV_MME_INSN_END                      0x00000001u
+#endif
 
 /**
- * Upload minimal MME stubs for indirect draw macros (END-only).
+ * Upload indirect-draw MME programs (from nv_mme_build_indirect_draw_programs).
  * Returns true if methods were emitted; sets *uploaded_out = true.
+ * Sets *stubs_out = true when programs are still END-only (path A/B required).
  * Call once during 3D channel init (device or first cmd buffer).
  */
 static inline bool
 nv_3d_mme_upload_indirect_stubs(struct nv_push *p, bool *uploaded_out)
 {
-   static const uint32_t end_only[] = { NV_MME_INSN_END };
-   uint32_t ram_off = 0;
+   struct nv_mme_program progs[NV_MME_SLOT_COUNT];
+   unsigned i, n;
    if (!p)
       return false;
+   n = nv_mme_build_indirect_draw_programs(progs);
    nv_3d_mme_set_shadow_ram_control(p,
       NVC597_SET_MME_SHADOW_RAM_CONTROL_MODE_METHOD_TRACK);
-   nv_3d_mme_upload_macro(p, NV_MME_MACRO_DRAW_INDIRECT, ram_off,
-                          end_only, 1);
-   ram_off += 4; /* room for future multi-insn macros */
-   nv_3d_mme_upload_macro(p, NV_MME_MACRO_DRAW_INDEXED_INDIRECT, ram_off,
-                          end_only, 1);
+   for (i = 0; i < n; i++) {
+      if (!progs[i].insn_count)
+         continue;
+      nv_3d_mme_upload_macro(p, progs[i].slot, progs[i].ram_offset,
+                             progs[i].insns, progs[i].insn_count);
+   }
    if (uploaded_out)
       *uploaded_out = true;
    return true;
+}
+
+/** True when indirect MME programs are not yet real (host A/B still needed). */
+static inline bool
+nv_3d_mme_indirect_is_stub(void)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_COUNT];
+   nv_mme_build_indirect_draw_programs(progs);
+   return nv_mme_programs_are_stubs(progs);
 }
 
 /**

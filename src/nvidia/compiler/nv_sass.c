@@ -172,6 +172,41 @@ nv_sass_emit_imad_rrrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
 }
 
 bool
+nv_sass_emit_imul_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb)
+{
+   /* IMUL via IMAD Rd, Ra, Rb, RZ (rc=255 zero reg convention) */
+   return nv_sass_emit_imad_rrrr(b, rd, ra, rb, 0xff);
+}
+
+bool
+nv_sass_emit_local_invocation_index(struct nv_sass_buf *b, uint8_t rd,
+                                    uint8_t rtmp0, uint8_t rtmp1,
+                                    uint8_t rtmp2)
+{
+   /* flat = tid.x + tid.y * ntid.x + tid.z * ntid.x * ntid.y
+    * temps: rtmp0=tid.y, rtmp1=ntid.x, rtmp2=tid.z / ntid.y product */
+   if (!nv_sass_emit_s2r(b, rd, NV_SASS_SR_TID_X))
+      return false;
+   if (!nv_sass_emit_s2r(b, rtmp0, NV_SASS_SR_TID_Y))
+      return false;
+   if (!nv_sass_emit_s2r(b, rtmp1, NV_SASS_SR_NTID_X))
+      return false;
+   if (!nv_sass_emit_imul_rrr(b, rtmp0, rtmp0, rtmp1)) /* tid.y * ntid.x */
+      return false;
+   if (!nv_sass_emit_iadd_rrr(b, rd, rd, rtmp0))
+      return false;
+   if (!nv_sass_emit_s2r(b, rtmp2, NV_SASS_SR_TID_Z))
+      return false;
+   if (!nv_sass_emit_s2r(b, rtmp0, NV_SASS_SR_NTID_Y))
+      return false;
+   if (!nv_sass_emit_imul_rrr(b, rtmp1, rtmp1, rtmp0)) /* ntid.x * ntid.y */
+      return false;
+   if (!nv_sass_emit_imul_rrr(b, rtmp2, rtmp2, rtmp1)) /* tid.z * plane */
+      return false;
+   return nv_sass_emit_iadd_rrr(b, rd, rd, rtmp2);
+}
+
+bool
 nv_sass_emit_lop3(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
                   uint8_t rb, uint8_t rc, uint8_t lut)
 {

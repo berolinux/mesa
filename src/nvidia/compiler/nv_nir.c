@@ -867,9 +867,9 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       break;
 
    case nir_intrinsic_load_local_invocation_index:
-      /* tid.x + tid.y*ntid.x + ... approximated as tid.x for now */
+      /* flat = tid.x + tid.y*ntid.x + tid.z*ntid.x*ntid.y (temps R250-252) */
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X);
+      ok = nv_sass_emit_local_invocation_index(sb, rd, 250, 251, 252);
       break;
 
    case nir_intrinsic_load_frag_coord:

@@ -109,6 +109,20 @@ nv_channel_submit_and_wait(struct nv_channel *ch, uint64_t wait_timeout_ns);
 int
 nv_channel_flush(struct nv_channel *ch);
 
+/**
+ * Poll channel error notifier (nvidia_notification_t in error_notifier BO).
+ * Clears status to DONE_SUCCESS after successful read when clear_on_ok is set.
+ * Returns 0 if idle/success, -EIO if error status, -ETIMEDOUT, -EINVAL.
+ */
+int
+nv_channel_check_notifier(struct nv_channel *ch, bool clear_on_ok,
+                          uint64_t timeout_ns);
+
+/** Non-blocking notifier peek: 0=ok/idle, -EIO=error, -EAGAIN=in progress. */
+int
+nv_channel_notifier_status(struct nv_channel *ch, uint16_t *status_out,
+                           uint32_t *info32_out);
+
 #ifdef __cplusplus
 }
 #endif

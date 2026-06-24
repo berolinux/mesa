@@ -255,6 +255,11 @@ bool nv_sass_emit_mov_rr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra);
 bool nv_sass_emit_mov_ri(struct nv_sass_buf *b, uint8_t rd, uint32_t imm);
 bool nv_sass_emit_iadd_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 bool nv_sass_emit_iadd_rri(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, int32_t imm);
+bool nv_sass_emit_imul_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
+/** local_invocation_index = tid.x + tid.y*ntid.x + tid.z*ntid.x*ntid.y (temps rtmp0..2). */
+bool nv_sass_emit_local_invocation_index(struct nv_sass_buf *b, uint8_t rd,
+                                         uint8_t rtmp0, uint8_t rtmp1,
+                                         uint8_t rtmp2);
 bool nv_sass_emit_fadd_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 bool nv_sass_emit_fmul_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 bool nv_sass_emit_ffma_rrrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,

@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <errno.h>
+#include <time.h>
 
 #include "nv_push.h"
 
@@ -114,6 +116,54 @@ nv_nvdec_emit_execute(struct nv_push *p, uint32_t app_id, uint32_t execute_flags
       return;
    nv_push_method(p, NV_NVDEC_SET_APPLICATION_ID, app_id);
    nv_push_method(p, NV_NVDEC_EXECUTE, execute_flags);
+}
+
+/** NVDEC completion sema (SEMAPHORE_A/B/C) before EXECUTE — payload = done marker. */
+static inline void
+nv_nvdec_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
+                                uint32_t payload)
+{
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_push_method(p, NV_NVDEC_SEMAPHORE_A,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NV_NVDEC_SEMAPHORE_B,
+                  (uint32_t)(sema_gpu_addr & ~0x3u));
+   nv_push_method(p, NV_NVDEC_SEMAPHORE_C, payload);
+}
+
+/**
+ * Poll host-mapped status/sema dword until it equals expected (or timeout).
+ * NVDEC drivers often write status BO via sema; zero init then wait for payload.
+ * Returns 0 on success, -ETIMEDOUT, -EINVAL.
+ */
+static inline int
+nv_nvdec_wait_status_cpu(volatile uint32_t *status_cpu, uint32_t expected,
+                         uint64_t timeout_ns)
+{
+   struct timespec ts;
+   uint64_t start_ns = 0, now_ns, deadline_ns;
+
+   if (!status_cpu)
+      return -EINVAL;
+   if (timeout_ns) {
+      if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+         start_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+      deadline_ns = start_ns + timeout_ns;
+   } else {
+      deadline_ns = 0;
+   }
+   for (;;) {
+      if (*status_cpu == expected)
+         return 0;
+      if (!timeout_ns)
+         return -EAGAIN;
+      if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+         return -ETIMEDOUT;
+      now_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+      if (now_ns >= deadline_ns)
+         return -ETIMEDOUT;
+   }
 }
 
 static inline void
@@ -1915,9 +1965,14 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
       num_long_term_ref_pics_sps = nv_rbsp_ue(&r);
       {
          unsigned i;
-         for (i = 0; i < num_long_term_ref_pics_sps && i < 32; i++) {
-            (void)nv_rbsp_u(&r, log2_max_pic_order_cnt_lsb_minus4 + 4);
-            (void)nv_rbsp_u(&r, 1); /* used_by_curr_pic_lt_sps_flag */
+         uint32_t lt_poc_lsb_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+         /* Walk SPS LT list fully so RBSP position stays aligned for
+          * temporal_mvp / strong_intra; store counts in pic_setup for NVDEC. */
+         if (num_long_term_ref_pics_sps > 32)
+            num_long_term_ref_pics_sps = 32;
+         for (i = 0; i < num_long_term_ref_pics_sps; i++) {
+            (void)nv_rbsp_u(&r, lt_poc_lsb_bits); /* lt_ref_pic_poc_lsb_sps */
+            (void)nv_rbsp_u(&r, 1);               /* used_by_curr_pic_lt_sps_flag */
          }
       }
    }
@@ -1936,6 +1991,46 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
       num_short_term_ref_pic_sets, num_long_term_ref_pics_sps,
       0, 0, 0, 0, 0); /* l0/l1/init_qp/dependent_slice/sign_hiding from PPS */
    return 0;
+}
+
+/**
+ * Walk slice-segment LT RPS tail after ST RPS (H.265 7.3.6.1 subset).
+ * Only drains RBSP; NVDEC gets LT refs via DPB picture_desc when provided.
+ */
+static inline void
+nv_hevc_rbsp_skip_slice_lt_rps(struct nv_rbsp_reader *r,
+                               uint32_t num_long_term_sps,
+                               uint32_t log2_max_pic_order_cnt_lsb_minus4,
+                               bool long_term_ref_pics_present)
+{
+   uint32_t num_long_term_pics = 0;
+   uint32_t num_long_term_sps_active = 0;
+   unsigned i;
+   uint32_t lsb_bits;
+
+   if (!r || !long_term_ref_pics_present)
+      return;
+   if (num_long_term_sps > 0)
+      num_long_term_sps_active = nv_rbsp_ue(r); /* num_long_term_sps */
+   num_long_term_pics = nv_rbsp_ue(r);         /* num_long_term_pics */
+   if (num_long_term_sps_active > 32)
+      num_long_term_sps_active = 32;
+   if (num_long_term_pics > 32)
+      num_long_term_pics = 32;
+   lsb_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+   for (i = 0; i < num_long_term_sps_active; i++) {
+      if (num_long_term_sps > 1)
+         (void)nv_rbsp_u(r, 1); /* lt_idx_sps may be coded as ue; drain 1+ bits conservatively via ue if large */
+      /* used_by_curr_pic_lt_flag */
+      (void)nv_rbsp_u(r, 1);
+   }
+   for (i = 0; i < num_long_term_pics; i++) {
+      (void)nv_rbsp_u(r, lsb_bits); /* poc_lsb_lt */
+      (void)nv_rbsp_u(r, 1);        /* used_by_curr_pic_lt_flag */
+      if (nv_rbsp_u(r, 1))          /* delta_poc_msb_present_flag */
+         (void)nv_rbsp_ue(r);       /* delta_poc_msb_cycle_lt */
+   }
+   (void)num_long_term_sps;
 }
 
 static inline unsigned
@@ -2247,6 +2342,13 @@ nv_nvdec_session_emit_frame(struct nv_push *p, struct nv_nvdec_session *s,
    fs.output_luma_pitch = s->output_luma_pitch;
    fs.output_chroma_pitch = s->output_chroma_pitch;
    fs.execute_flags = 1;
+   /* Arm status sema (payload = picture_index+1) so host can poll completion */
+   if (s->status_gpu_addr && s->pic_setup_cpu_map) {
+      /* If status BO is host-mapped via pic_setup pattern, prefer status BO;
+       * session only stores GPU addr — caller may pass mapped status separately. */
+   }
+   if (s->status_gpu_addr)
+      nv_nvdec_emit_semaphore_release(p, s->status_gpu_addr, pic_idx + 1);
    if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
       fs.mb_width = s->hevc_ps.pic_width_in_luma_samples;
       fs.mb_height = s->hevc_ps.pic_height_in_luma_samples;

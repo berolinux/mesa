@@ -1,0 +1,148 @@
+/*
+ * Copyright 2026 - Open NVIDIA userspace driver project
+ * SPDX-License-Identifier: MIT
+ *
+ * Maxwell/Pascal/Turing+ MME (method macro engine) instruction scaffolding.
+ *
+ * MME executes short programs that emit 3D/CE method writes, driven by
+ * LOAD_MME_INSTRUCTION_RAM + CALL_MME_MACRO / CALL_MME_DATA on the 3D class
+ * (NVC597_* mirrors NV902D/NV9097 in open-gpu-doc).
+ *
+ * Full ISA is not fully public; encodings here are derived incrementally from:
+ *   - open-gpu-doc class method offsets (LOAD_MME_*, CALL_MME_*, SET_MME_*)
+ *   - open-gpu-doc PRI MME ESR / exception bits (illegal opcode, missing data)
+ *   - observed proprietary compiler / channel-init patterns (END, method emit)
+ *
+ * Until binary RE completes real indirect-draw loops, macros either:
+ *   (a) END immediately (safe no-op), or
+ *   (b) emit a fixed method sequence via host-side "shadow program" that
+ *       duplicates what the macro *should* emit (path C' correctness).
+ *
+ * Host-side shadow programs live in nv_3d_methods.h / callers; this header
+ * owns instruction constants and multi-insn program tables.
+ */
+
+#ifndef NV_MME_H
+#define NV_MME_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* --- Instruction word conventions (32-bit MME insn, Maxwell+ family) ---
+ *
+ * Public research + class dumps agree on at least:
+ *   END           — terminate macro (opcode low bits = 1 in common dumps)
+ * Method-emit and ALU/branch encodings vary by generation; we treat unknown
+ * multi-insn programs conservatively (END-only or host shadow).
+ */
+#define NV_MME_INSN_END              0x00000001u
+
+/* Placeholder class bits for future RE (documented so stubs are not magic).
+ * Do not ship non-END programs in production paths until validated. */
+#define NV_MME_INSN_NOP              0x00000000u
+#define NV_MME_INSN_MERGE_CLASS      0x08000000u /* tentative method-merge slot */
+#define NV_MME_INSN_STATE_LOAD_CLASS 0x10000000u /* tentative state/mem load */
+#define NV_MME_INSN_BRANCH_CLASS     0x20000000u /* tentative branch */
+#define NV_MME_INSN_ALU_CLASS        0x40000000u /* tentative ALU/add */
+
+/* Macro slot indices (must match nv_3d_methods.h NV_MME_MACRO_*) */
+#define NV_MME_SLOT_DRAW_INDIRECT            0
+#define NV_MME_SLOT_DRAW_INDEXED_INDIRECT    1
+#define NV_MME_SLOT_COUNT                    2
+
+/* Instruction RAM layout: each macro gets a dedicated region */
+#define NV_MME_RAM_SLOT_STRIDE               16  /* dwords per macro region */
+#define NV_MME_MAX_INSNS_PER_MACRO           16
+
+struct nv_mme_program {
+   uint32_t slot;                         /* macro index / start-address slot */
+   uint32_t ram_offset;                   /* instruction RAM dword index */
+   uint32_t insns[NV_MME_MAX_INSNS_PER_MACRO];
+   uint32_t insn_count;
+   bool     is_stub_end_only;             /* true = not yet real microcode */
+};
+
+static inline void
+nv_mme_program_init_end_only(struct nv_mme_program *prog, uint32_t slot,
+                             uint32_t ram_offset)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+   prog->insns[0] = NV_MME_INSN_END;
+   prog->insn_count = 1;
+   prog->is_stub_end_only = true;
+}
+
+/**
+ * Build indirect-draw macro program.
+ *
+ * Intended behaviour (when fully RE'd):
+ *   - Read CALL_MME_DATA: data0 = draw_count | (stride << 16)
+ *   - Read CALL_MME_DATA: indirect addr lo/hi (or use SET_MME_MEM_ADDRESS)
+ *   - Loop draw_count times:
+ *       load VkDrawIndirectCommand / VkDrawIndexedIndirectCommand from mem
+ *       emit SET_VERTEX_ID_BASE / instanced begin-end methods
+ *   - END
+ *
+ * Current: END-only stub.  Host path C' emits equivalent methods from CPU
+ * shadow/map (path A/B) while this macro only primes MME state.
+ */
+static inline void
+nv_mme_build_draw_indirect_program(struct nv_mme_program *prog, uint32_t slot,
+                                   uint32_t ram_offset, bool indexed)
+{
+   (void)indexed;
+   nv_mme_program_init_end_only(prog, slot, ram_offset);
+   /* Future: append STATE_LOAD/ALU/BRANCH/MERGE insns validated from binary. */
+   (void)NV_MME_INSN_NOP;
+   (void)NV_MME_INSN_MERGE_CLASS;
+   (void)NV_MME_INSN_STATE_LOAD_CLASS;
+   (void)NV_MME_INSN_BRANCH_CLASS;
+   (void)NV_MME_INSN_ALU_CLASS;
+}
+
+/**
+ * Build both indirect macros into caller-provided array (size >= SLOT_COUNT).
+ * Returns number of programs filled (2).
+ */
+static inline unsigned
+nv_mme_build_indirect_draw_programs(struct nv_mme_program progs[NV_MME_SLOT_COUNT])
+{
+   if (!progs)
+      return 0;
+   nv_mme_build_draw_indirect_program(&progs[NV_MME_SLOT_DRAW_INDIRECT],
+                                      NV_MME_SLOT_DRAW_INDIRECT,
+                                      0, false);
+   nv_mme_build_draw_indirect_program(&progs[NV_MME_SLOT_DRAW_INDEXED_INDIRECT],
+                                      NV_MME_SLOT_DRAW_INDEXED_INDIRECT,
+                                      NV_MME_RAM_SLOT_STRIDE, true);
+   return NV_MME_SLOT_COUNT;
+}
+
+/** True if any program is still END-only (caller must use path A/B for draws). */
+static inline bool
+nv_mme_programs_are_stubs(const struct nv_mme_program progs[NV_MME_SLOT_COUNT])
+{
+   unsigned i;
+   if (!progs)
+      return true;
+   for (i = 0; i < NV_MME_SLOT_COUNT; i++) {
+      if (progs[i].is_stub_end_only || progs[i].insn_count == 0)
+         return true;
+   }
+   return false;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* NV_MME_H */

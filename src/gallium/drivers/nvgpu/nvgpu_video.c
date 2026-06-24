@@ -43,8 +43,10 @@ struct nvgpu_video_codec {
    struct nv_rm_bo *pic_setup_bo;
    void *pic_setup_map;
    struct nv_rm_bo *status_bo;
+   void *status_map;
    uint32_t class_nvdec;
    uint32_t app_id;
+   uint32_t last_frame_sema_payload;
    uint8_t *frame_bs;
    uint32_t frame_bs_used;
    uint32_t frame_bs_cap;
@@ -120,6 +122,13 @@ nvgpu_video_ensure_bos(struct nvgpu_video_codec *dec)
       req.no_scanout = true;
       req.map_gpu_va = true;
       dec->status_bo = nv_rm_bo_alloc(screen->rm, &req);
+      if (dec->status_bo) {
+         dec->status_map = nv_rm_bo_map(dec->status_bo);
+         if (dec->status_map)
+            memset(dec->status_map, 0, NVGPU_VID_STATUS_BO_SIZE);
+      }
+   } else if (dec->status_bo && !dec->status_map) {
+      dec->status_map = nv_rm_bo_map(dec->status_bo);
    }
    return dec->bitstream_bo && dec->pic_setup_bo && dec->status_bo &&
           dec->bitstream_map;
@@ -640,12 +649,31 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
    nv_nvdec_session_set_status_bo(&dec->session, st_gpu);
    nv_nvdec_session_pack_pic_setup(&dec->session);
 
+   /* Pre-arm sema payload (picture_index+1 written by NVDEC sema release) */
+   dec->last_frame_sema_payload = (dec->session.next_picture_index + 1);
+   if (dec->status_map)
+      *(volatile uint32_t *)dec->status_map = 0;
+
    if (!nvgpu_push_start(ctx, &push, 256))
       goto out_clear;
 
    if (nv_nvdec_session_emit_frame(&push, &dec->session, bs_gpu, bs_size) == 0)
       r = 0;
    nvgpu_push_finish(ctx, &push, true);
+
+   /* Wait for NVDEC sema on status BO, else channel GPFIFO idle as fallback */
+   if (r == 0 && dec->status_map) {
+      if (nv_nvdec_wait_status_cpu((volatile uint32_t *)dec->status_map,
+                                   dec->last_frame_sema_payload,
+                                   2000000000ull) != 0) {
+         if (ctx->channel)
+            (void)nv_channel_wait_idle(ctx->channel, 2000000000ull);
+      }
+   } else if (r == 0 && ctx->channel) {
+      (void)nv_channel_wait_idle(ctx->channel, 2000000000ull);
+   }
+   if (ctx->channel)
+      (void)nv_channel_check_notifier(ctx->channel, true, 0);
 
    dec->session.next_picture_index =
       (dec->session.next_picture_index + 1) & 15u;
