@@ -168,6 +168,39 @@ nv_channel_submit_wait_sema(struct nv_channel *ch,
                             volatile uint32_t *sema_cpu, uint32_t sema_payload,
                             uint64_t wait_timeout_ns, bool check_notifier);
 
+/**
+ * G1 vertical slice (hardware path): SET_OBJECT copy class, pitch buffer copy
+ * with CE one-word sema on LAUNCH_DMA, flush + wait sema GEQ (+ optional
+ * notifier).  sema_cpu must be host-mapped sema BO; reset to 0 before call
+ * (or pass sema_reset=true).  class_copy 0 uses ch->info->class_copy.
+ *
+ * Returns 0 on sema completion; negative errno on encode/submit/wait failure.
+ * Without HAVE_LIBDRM_NVIDIA returns -ENOSYS (use host selftest for encode-only).
+ */
+int
+nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
+                                  uint32_t class_copy,
+                                  uint64_t src_gpu_addr,
+                                  uint64_t dst_gpu_addr,
+                                  uint32_t size_bytes,
+                                  uint64_t sema_gpu_addr,
+                                  volatile uint32_t *sema_cpu,
+                                  uint32_t sema_payload,
+                                  bool sema_reset,
+                                  uint64_t wait_timeout_ns,
+                                  bool check_notifier);
+
+/** G1 sema-only CE fence (no data transfer) + submit/wait. */
+int
+nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
+                                  uint32_t class_copy,
+                                  uint64_t sema_gpu_addr,
+                                  volatile uint32_t *sema_cpu,
+                                  uint32_t sema_payload,
+                                  bool sema_reset,
+                                  uint64_t wait_timeout_ns,
+                                  bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

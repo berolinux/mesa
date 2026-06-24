@@ -215,33 +215,37 @@ nv_smoke_selftest_g1_ce_sema_push(const uint32_t *trace_push,
    if (memcmp(buf, buf_b, (size_t)n * 4) != 0)
       return -111;
 
-   /* Standalone sema-only release (DATA_TRANSFER_TYPE_NONE + sema) */
-   memset(buf_b, 0, sizeof(buf_b));
-   nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
-   nv_push_set_subch(&p, NV_PUSH_SUBCH_COPY);
-   nv_copy_emit_semaphore_release(&p, sema_gpu, sema_payload);
-   n = nv_push_dw_count(&p);
-   if (n < 6)
-      return -112;
-   saw_launch = false;
-   for (i = 0; i + 1 < n; i++) {
-      uint32_t hdr = buf_b[i];
-      uint32_t data = buf_b[i + 1];
-      uint32_t method = (hdr & 0x1fff) << 2;
-      if ((hdr >> 29) != 0)
-         continue;
-      if (method == NVC6B5_LAUNCH_DMA) {
-         if ((data & 0x3u) != NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE)
-            return -113;
-         if ((data & (0x3u << 3)) !=
-             NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD)
-            return -114;
-         saw_launch = true;
+   /* Standalone sema-only release (DATA_TRANSFER_TYPE_NONE + sema) — separate buf */
+   {
+      uint32_t n_sema;
+      memset(buf_b, 0, sizeof(buf_b));
+      nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
+      nv_push_set_subch(&p, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_semaphore_release(&p, sema_gpu, sema_payload);
+      n_sema = nv_push_dw_count(&p);
+      if (n_sema < 6)
+         return -112;
+      saw_launch = false;
+      for (i = 0; i + 1 < n_sema; i++) {
+         uint32_t hdr = buf_b[i];
+         uint32_t data = buf_b[i + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_LAUNCH_DMA) {
+            if ((data & 0x3u) != NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE)
+               return -113;
+            if ((data & (0x3u << 3)) !=
+                NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD)
+               return -114;
+            saw_launch = true;
+         }
       }
+      if (!saw_launch)
+         return -115;
    }
-   if (!saw_launch)
-      return -115;
 
+   /* Trace compare against copy+sema stream in buf (not sema-only scratch) */
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
@@ -308,8 +312,54 @@ nv_smoke_selftest_host(void)
    if (!(sph.sph[0] & (1u << 11))) /* does_global_store bit */
       return -65;
 
+   /* Self-golden: G1 stream must match itself via trace_compare path */
+   {
+      uint32_t g1a[128], g1b[128];
+      uint32_t na = 0, nb = 0;
+      r = nv_smoke_selftest_g1_ce_sema_push(NULL, 0, g1a,
+                                            (uint32_t)(sizeof(g1a) / 4), &na);
+      if (r != 0)
+         return -130 + r;
+      r = nv_smoke_selftest_g1_ce_sema_push(g1a, na, g1b,
+                                            (uint32_t)(sizeof(g1b) / 4), &nb);
+      if (r != 0)
+         return -140 + r; /* -141 size, -142 mismatch, etc. */
+      if (na != nb)
+         return -145;
+   }
+
    return 0;
 }
+
+/**
+ * Capture G1 CE sema push dwords for external golden files / HW compare.
+ * Returns 0 and sets *dwords_out; negative on failure.
+ */
+static inline int
+nv_smoke_capture_g1_push(uint32_t *out, uint32_t out_cap_dwords,
+                         uint32_t *dwords_out)
+{
+   return nv_smoke_selftest_g1_ce_sema_push(NULL, 0, out, out_cap_dwords,
+                                            dwords_out);
+}
+
+/**
+ * Load optional external golden from caller-supplied buffer (binary capture
+ * from --dump-g1 or HW trace).  NULL/0 trace = skip (return 0).
+ */
+static inline int
+nv_smoke_selftest_g1_against_trace(const uint32_t *trace_push,
+                                   uint32_t trace_dwords)
+{
+   if (!trace_push || !trace_dwords)
+      return 0;
+   return nv_smoke_selftest_g1_ce_sema_push(trace_push, trace_dwords,
+                                            NULL, 0, NULL);
+}
+
+/* Non-inline entry for meson-linked libnvidia_common / tools */
+int nv_smoke_selftest_host_run(void);
+int nv_smoke_selftest_host_run_verbose(int verbose);
 
 #ifdef __cplusplus
 }

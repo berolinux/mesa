@@ -4,6 +4,8 @@
  */
 
 #include "nv_channel.h"
+#include "nv_copy_methods.h"
+#include "nv_push.h"
 #include "nv_rm.h"
 
 #include <errno.h>
@@ -520,4 +522,92 @@ nv_channel_submit_wait_sema(struct nv_channel *ch,
    (void)check_notifier;
    return -ENOSYS;
 #endif
+}
+
+int
+nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
+                                  uint32_t class_copy,
+                                  uint64_t src_gpu_addr,
+                                  uint64_t dst_gpu_addr,
+                                  uint32_t size_bytes,
+                                  uint64_t sema_gpu_addr,
+                                  volatile uint32_t *sema_cpu,
+                                  uint32_t sema_payload,
+                                  bool sema_reset,
+                                  uint64_t wait_timeout_ns,
+                                  bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 64;
+   uint32_t cc;
+
+   if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   cc = class_copy;
+   if (!cc && ch->info)
+      cc = ch->info->class_copy;
+   if (!cc)
+      return -EINVAL;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   nv_copy_set_object(&push, cc);
+   nv_copy_emit_buffer_copy_with_sema(&push, src_gpu_addr, dst_gpu_addr,
+                                      size_bytes, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
+                                  uint32_t class_copy,
+                                  uint64_t sema_gpu_addr,
+                                  volatile uint32_t *sema_cpu,
+                                  uint32_t sema_payload,
+                                  bool sema_reset,
+                                  uint64_t wait_timeout_ns,
+                                  bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 32;
+   uint32_t cc;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   cc = class_copy;
+   if (!cc && ch->info)
+      cc = ch->info->class_copy;
+   if (!cc)
+      return -EINVAL;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   nv_copy_set_object(&push, cc);
+   nv_copy_emit_semaphore_release(&push, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
 }
