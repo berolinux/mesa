@@ -590,6 +590,61 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       break;
    }
 
+   case nir_intrinsic_load_ssbo: {
+      /* SSBO load via global (descriptor supplies base; offset in src[1]) */
+      rd = ssa_reg_dst(&intr->def);
+      ra = src_reg_reload(sb, &intr->src[1]); /* byte offset / address proxy */
+      ok = nv_sass_emit_ldg_u32(sb, rd, ra);
+      break;
+   }
+
+   case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_input: {
+      /* Attribute fetch approximation: MOV from fixed R slot by location */
+      uint32_t loc = 0;
+      rd = ssa_reg_dst(&intr->def);
+      if (nir_intrinsic_has_base(intr))
+         loc = nir_intrinsic_base(intr);
+      else if (nir_intrinsic_has_component(intr))
+         loc = nir_intrinsic_component(intr);
+      /* R1..R15 reserved as input attribute temps in early isel */
+      ra = (uint8_t)(1 + (loc & 0x0f));
+      ok = nv_sass_emit_mov_rr(sb, rd, ra);
+      break;
+   }
+
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_per_vertex_output: {
+      /* Output write: MOV to fixed R slot by location (FS color / VS pos proxy) */
+      uint32_t loc = 0;
+      rb = src_reg_reload(sb, &intr->src[0]);
+      if (nir_intrinsic_has_base(intr))
+         loc = nir_intrinsic_base(intr);
+      rd = (uint8_t)(16 + (loc & 0x0f)); /* R16+ as output temps */
+      ok = nv_sass_emit_mov_rr(sb, rd, rb);
+      return ok;
+   }
+
+   case nir_intrinsic_load_barycentric_pixel:
+   case nir_intrinsic_load_barycentric_centroid:
+   case nir_intrinsic_load_barycentric_sample:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
+      break;
+
+   case nir_intrinsic_demote:
+   case nir_intrinsic_terminate:
+   case nir_intrinsic_terminate_if:
+      /* Kill pixel / terminate invocation — approximate via EXIT for now */
+      return nv_sass_emit_exit(sb);
+
+   case nir_intrinsic_load_sample_id:
+   case nir_intrinsic_load_sample_pos:
+   case nir_intrinsic_load_sample_mask_in:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      break;
+
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_front_face:
    case nir_intrinsic_load_vertex_id:
@@ -598,15 +653,8 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_draw_id:
    case nir_intrinsic_load_primitive_id:
-   case nir_intrinsic_load_sample_id:
-   case nir_intrinsic_load_sample_pos:
-   case nir_intrinsic_load_sample_mask_in:
    case nir_intrinsic_load_view_index:
-   case nir_intrinsic_load_input:
-   case nir_intrinsic_load_interpolated_input:
    case nir_intrinsic_load_per_vertex_input:
-   case nir_intrinsic_store_output:
-   case nir_intrinsic_store_per_vertex_output:
    case nir_intrinsic_store_deref:
    case nir_intrinsic_load_deref:
    case nir_intrinsic_copy_deref:
