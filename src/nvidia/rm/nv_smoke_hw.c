@@ -114,7 +114,7 @@ nv_smoke_hw_dump_channel_trace(struct nv_channel *ch, const char *tag)
          if (ch->push_cpu[i] == 0x20040004u) {
             fprintf(stderr,
                     "%s: sema_block@dw%u: hdr=%08x hi=%08x lo=%08x "
-                    "payload=%08x exec=%08x (blob exec=0x1001; open modes 2/3)\n",
+                    "payload=%08x exec=%08x (blob 0x1001 / vdpau 0x2 / open hdrs)\n",
                     t, i,
                     ch->push_cpu[i], ch->push_cpu[i + 1], ch->push_cpu[i + 2],
                     ch->push_cpu[i + 3],
@@ -182,7 +182,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
               "sched=%d schedule_rc=%d doorbell=%d submit=%d sema_only=%d remap=%d host_sema=%d hs_mode=%d\n"
               "  USERD GPGet=%u GPPut=%u host_gpfifo_put=%u (GPGet!=GPPut => ring not consumed)\n"
               "  host_sema ok, CE fails => kickoff works; fix CE class/methods or h_obj_copy alloc\n"
-              "  hs_mode: 0=open>>2 1=open&~3 2=blob0x1001>>2 3=blob0x1001&~3 (pass5 glcore b6c952)\n"
+              "  hs_mode: 2/3=blob0x1001 4/5=vdpau0x2 0/1=open_hdrs (pass8; sticky after ok)\n"
               "  host_sema fail => schedule/doorbell/GPPut (not CE)\n"
               "  g1_eng_rc!=0 / h_copy=0 => RmAlloc copy under channel failed (engine context)\n"
               "  g1_notif non-zero => channel error notifier (method/engine fault)\n"

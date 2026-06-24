@@ -345,7 +345,7 @@ nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
 
 /**
  * Host sema with silicon A/B mode ladder (pass5 / 610.43.02 glcore b6c952).
- * Tries blob execute 0x1001 + addr encodings, then open-header bitfields.
+ * Tries blob 0x1001, then vdpau 0x2 (pass8), then open-header bitfields last.
  * On success writes winning mode into *mode_used_out (if non-NULL).
  * On total failure mode_used_out gets last attempted mode.
  */

@@ -155,7 +155,7 @@ main(int argc, char **argv)
            "    2) ch_rc=-5: GPFIFO class ladder (C86F..C36F) / TSG / USERD / VASpace / error ctx\n"
            "    3) sready/g1_pre/g1_sched/doorbell: A06F_BIND+SCHEDULE first (pass6), GPPut, token@+0x90\n"
            "    4) g1_host_sema!=0: kickoff/channel (not CE); fix step 3 before CE methods\n"
-           "       hs_mode tries 2=blob0x1001>>2, 3=blob&~3, 0=open>>2, 1=open&~3 (sticky after ok)\n"
+           "       hs_mode: 2/3=blob0x1001, 4/5=vdpau0x2, 0/1=open_hdrs (pass8; sticky after ok)\n"
            "    5) host_sema ok, g1_rc fail: CE class ladder / SET_OBJECT subch4 / VA;\n"
            "       tick82 also tries CE copy+host sema (g1_ce_hs) when CE sema fails\n"
            "    6) g1_userd_get unchanged: GPPut/doorbell not running on silicon\n"

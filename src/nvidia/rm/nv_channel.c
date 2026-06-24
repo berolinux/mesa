@@ -1616,14 +1616,18 @@ nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
 }
 
 /*
- * Host sema mode ladder (pass5 RE / glcore 610.43.02 @ b6c938-b6c959):
- *   blob execute 0x1001 first (matches proprietary emit), then open bitfields.
+ * Host sema mode ladder (pass5/8 RE / glcore 610.43.02 @ b6c938-b6c959,
+ * vdpau @ 28c33-28c9a):
+ *   1) blob execute 0x1001 (glcore/eglcore/vksc primary)
+ *   2) vdpau execute 0x0002 (pass8 alt; same 0x20040004 inc4 block)
+ *   3) open bitfields 0x01100002 last (pass8: only debug noise in blob, not emit)
  *   For each execute, try addr>>2 (clc36f) then addr&~3 (blob stores full lo).
- * Order prioritizes silicon bring-up fidelity over theoretical header purity.
  */
 static const enum nv_host_sema_mode nv_host_sema_try_order[NV_HOST_SEMA_MODE_COUNT] = {
    NV_HOST_SEMA_MODE_BLOB_SHIFT2,
    NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+   NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
+   NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
    NV_HOST_SEMA_MODE_OPEN_SHIFT2,
    NV_HOST_SEMA_MODE_OPEN_ALIGN4,
 };

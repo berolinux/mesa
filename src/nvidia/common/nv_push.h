@@ -59,14 +59,19 @@ extern "C" {
  * Open-header release execute: OPERATION_RELEASE | WFI_DIS | SIZE_4BYTE
  *   = 0x2 | (1<<20) | (1<<24) = 0x01100002
  *
+ * Pass8 RE: 0x01100002 appears in glcore only as debug/config table loads
+ * (a4498e etc), NEVER as pushbuffer sema execute. Keep open-header modes as
+ * last-resort theoretical A/B only; primary is blob 0x1001, then vdpau 0x2.
+ *
  * Blob (610.43.02 glcore @ b6c952) hardcodes SEMAPHORED = 0x1001 after inc4
- * sema block 0x20040004. Pass5 RE: try this first on silicon if open bits fail.
+ * sema block 0x20040004. Pass8 vdpau @ 28c9a uses execute = 0x00000002.
  */
 #define NVC36F_SEMAPHORED_RELEASE_OPEN_HDRS      \
    (NVC36F_SEMAPHORED_OPERATION_RELEASE |        \
     NVC36F_SEMAPHORED_RELEASE_WFI_DIS |          \
     NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE)
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_610       0x00001001u
+#define NVC36F_SEMAPHORED_RELEASE_VDPAU_610      0x00000002u
 
 /* Host sema emit modes for silicon A/B (nv_channel_gpfifo_host_sema_submit). */
 enum nv_host_sema_mode {
@@ -74,7 +79,9 @@ enum nv_host_sema_mode {
    NV_HOST_SEMA_MODE_OPEN_ALIGN4 = 1, /* execute=open hdrs; SEMAPHOREB = addr&~3 */
    NV_HOST_SEMA_MODE_BLOB_SHIFT2 = 2, /* execute=0x1001; addr>>2 (clc36f style) */
    NV_HOST_SEMA_MODE_BLOB_ALIGN4 = 3, /* execute=0x1001; addr&~3 (blob b6c959 lo) */
-   NV_HOST_SEMA_MODE_COUNT       = 4,
+   NV_HOST_SEMA_MODE_VDPAU_SHIFT2 = 4, /* execute=0x2; addr>>2 (pass8 vdpau 28c9a) */
+   NV_HOST_SEMA_MODE_VDPAU_ALIGN4 = 5, /* execute=0x2; addr&~3 */
+   NV_HOST_SEMA_MODE_COUNT        = 6,
 };
 
 /* GPFIFO entry (NV506F/NVC36F) */
@@ -217,9 +224,11 @@ nv_host_sema_addr_lo(uint64_t sema_gpu_addr, enum nv_host_sema_mode mode)
    switch (mode) {
    case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
    case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
+   case NV_HOST_SEMA_MODE_VDPAU_SHIFT2:
       return (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu);
    case NV_HOST_SEMA_MODE_OPEN_ALIGN4:
    case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
+   case NV_HOST_SEMA_MODE_VDPAU_ALIGN4:
    default:
       return (uint32_t)(sema_gpu_addr & ~0x3u);
    }
@@ -232,6 +241,9 @@ nv_host_sema_execute(enum nv_host_sema_mode mode)
    case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
    case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
       return NVC36F_SEMAPHORED_RELEASE_BLOB_610;
+   case NV_HOST_SEMA_MODE_VDPAU_SHIFT2:
+   case NV_HOST_SEMA_MODE_VDPAU_ALIGN4:
+      return NVC36F_SEMAPHORED_RELEASE_VDPAU_610;
    case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
    case NV_HOST_SEMA_MODE_OPEN_ALIGN4:
    default:
@@ -241,8 +253,8 @@ nv_host_sema_execute(enum nv_host_sema_mode mode)
 
 /**
  * Host semaphore release with explicit silicon A/B mode.
- * Default callers use NV_HOST_SEMA_MODE_OPEN_SHIFT2 (clc36f-faithful).
- * Smoke/host_sema_submit ladders try BLOB_* modes first (matches glcore 0x1001).
+ * Smoke/host_sema_submit ladders try BLOB 0x1001 first (glcore b6c952), then
+ * VDPAU 0x2 (pass8 28c9a), then open-header bitfields last (theoretical only).
  */
 static inline void
 nv_push_sema_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
