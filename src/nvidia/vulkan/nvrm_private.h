@@ -97,6 +97,37 @@ struct nvrm_image {
    bool     is_blocklinear;  /* OPTIMAL tiled layout (TEXHEAD_BL / NVC6B5 BL) */
 };
 
+
+/* VkEvent: 4-byte GPU semaphore (host-mappable), payload 0=reset, 1=set */
+struct nvrm_event {
+   struct vk_object_base base;
+   struct nvrm_device *device;
+   struct nv_rm_bo *bo;
+   void *map;
+   uint64_t sema_gpu_addr;
+   uint32_t sema_value; /* last CPU-side value mirror */
+};
+
+/* VkQueryPool: contiguous sema/report slots in a single host-mappable BO */
+enum nvrm_query_kind {
+   NVRM_QUERY_OCCLUSION = 0,
+   NVRM_QUERY_TIMESTAMP = 1,
+   NVRM_QUERY_PIPELINE_STATS = 2,
+};
+
+#define NVRM_QUERY_SLOT_BYTES  16  /* 4 dwords report structure */
+
+struct nvrm_query_pool {
+   struct vk_object_base base;
+   struct nvrm_device *device;
+   struct nv_rm_bo *bo;
+   void *map;
+   uint64_t base_gpu_addr;
+   uint32_t query_count;
+   enum nvrm_query_kind kind;
+   VkQueryType vk_type;
+};
+
 struct nvrm_graphics_pipeline; /* defined in nvrm_pipeline.c */
 
 struct nvrm_sampler {
@@ -209,6 +240,16 @@ struct nvrm_cmd_buffer {
    bool dyn_sample_mask_valid;
    float dyn_blend_const[4];
    bool dyn_blend_const_valid;
+   float dyn_line_width;
+   bool dyn_line_width_valid;
+   /* Conditional rendering (predication via RENDER_ENABLE memory) */
+   bool cond_render_active;
+   uint64_t cond_render_gpu_addr;
+   bool cond_render_inverted;
+   /* Active query (single occlusion/timestamp at a time, simplified) */
+   struct nvrm_query_pool *active_query_pool;
+   uint32_t active_query_index;
+   bool active_query_is_occlusion;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
@@ -222,6 +263,9 @@ VK_DEFINE_HANDLE_CASTS(nvrm_buffer, vk.base, VkBuffer, VK_OBJECT_TYPE_BUFFER)
 VK_DEFINE_HANDLE_CASTS(nvrm_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
 VK_DEFINE_HANDLE_CASTS(nvrm_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
+VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_event, base, VkEvent, VK_OBJECT_TYPE_EVENT)
+VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_query_pool, base, VkQueryPool,
+                               VK_OBJECT_TYPE_QUERY_POOL)
 
 extern struct vk_physical_device_dispatch_table nvrm_physical_device_entrypoints;
 extern struct vk_device_dispatch_table nvrm_device_entrypoints;
@@ -416,6 +460,34 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, Vk
                                                VkPipelineStageFlags2 stageMask);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
                                                const VkEvent *pEvents, const VkDependencyInfo *pDependencyInfos);
+
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
+                                                const VkAllocationCallbacks *pAllocator, VkEvent *pEvent);
+VKAPI_ATTR void VKAPI_CALL nvrm_DestroyEvent(VkDevice device, VkEvent event,
+                                             const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_GetEventStatus(VkDevice device, VkEvent event);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_SetEvent(VkDevice device, VkEvent event);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_ResetEvent(VkDevice device, VkEvent event);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
+                                                    const VkAllocationCallbacks *pAllocator, VkQueryPool *pQueryPool);
+VKAPI_ATTR void VKAPI_CALL nvrm_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
+                                                 const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
+                                                        uint32_t firstQuery, uint32_t queryCount,
+                                                        size_t dataSize, void *pData, VkDeviceSize stride,
+                                                        VkQueryResultFlags flags);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                                                  uint32_t firstQuery, uint32_t queryCount);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                                              uint32_t query, VkQueryControlFlags flags);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                                            uint32_t query);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdWriteTimestamp2(VkCommandBuffer commandBuffer, VkPipelineStageFlags2 stage,
+                                                   VkQueryPool queryPool, uint32_t query);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetLineWidth(VkCommandBuffer commandBuffer, float lineWidth);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdBeginConditionalRenderingEXT(VkCommandBuffer commandBuffer,
+                                                                const VkConditionalRenderingBeginInfoEXT *pConditionalRenderingBegin);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetViewport(VkCommandBuffer commandBuffer,
                                                uint32_t firstViewport, uint32_t viewportCount,
                                                const VkViewport *pViewports);

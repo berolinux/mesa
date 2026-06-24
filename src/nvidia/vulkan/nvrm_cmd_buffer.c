@@ -157,6 +157,11 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    cmd->dyn_sample_mask_valid = false;
    cmd->dyn_sample_mask = 0xffffffffu;
    cmd->dyn_blend_const_valid = false;
+   cmd->dyn_line_width_valid = false;
+   cmd->dyn_line_width = 1.0f;
+   cmd->cond_render_active = false;
+   cmd->cond_render_gpu_addr = 0;
+   cmd->active_query_pool = NULL;
    cmd->push_const_dwords = 0;
    cmd->push_const_dirty = false;
    cmd->prim_restart_enable = false;
@@ -208,24 +213,130 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    nvrm_cmd_emit_full_invalidate(cmd);
 }
 
-/* VkEvent is implemented as a 4-byte GPU semaphore in host-mappable memory
- * (same pattern as fences).  SetEvent releases sema=1; ResetEvent writes 0
- * via CPU or sema release 0; WaitEvents acquires sema>=1 then optionally
- * invalidates caches. */
+/* ---- VkEvent / VkQueryPool object management + cmd recording ---- */
+
+static struct nv_rm_bo *
+nvrm_alloc_sema_bo(struct nvrm_device *dev, uint32_t size, void **map_out,
+                   uint64_t *gpu_out)
+{
+   struct nv_rm_bo_req req;
+   struct nv_rm_bo *bo;
+   if (!dev || !dev->rm)
+      return NULL;
+   memset(&req, 0, sizeof(req));
+   req.size = size < 16 ? 16 : size;
+   req.alignment = 256;
+   req.vram = false;
+   req.cpu_access = true;
+   req.no_scanout = true;
+   req.map_gpu_va = true;
+   bo = nv_rm_bo_alloc(dev->rm, &req);
+   if (!bo)
+      return NULL;
+   if (map_out)
+      *map_out = nv_rm_bo_map(bo);
+   if (gpu_out)
+      *gpu_out = nv_rm_bo_gpu_offset(bo);
+   return bo;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_CreateEvent(VkDevice _device, const VkEventCreateInfo *pCreateInfo,
+                 const VkAllocationCallbacks *pAllocator, VkEvent *pEvent)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   struct nvrm_event *ev;
+   (void)pCreateInfo;
+   (void)pAllocator;
+   ev = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*ev), 8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!ev)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   vk_object_base_init(&device->vk, &ev->base, VK_OBJECT_TYPE_EVENT);
+   ev->device = device;
+   ev->bo = nvrm_alloc_sema_bo(device, 16, &ev->map, &ev->sema_gpu_addr);
+   if (!ev->bo) {
+      vk_object_base_finish(&ev->base);
+      vk_free2(&device->vk.alloc, pAllocator, ev);
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+   if (ev->map)
+      memset(ev->map, 0, 16);
+   ev->sema_value = 0;
+   *pEvent = nvrm_event_to_handle(ev);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_DestroyEvent(VkDevice _device, VkEvent _event,
+                  const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   VK_FROM_HANDLE(nvrm_event, ev, _event);
+   if (!ev)
+      return;
+   if (ev->bo) {
+      if (ev->map)
+         nv_rm_bo_unmap(ev->bo);
+      nv_rm_bo_free(ev->bo);
+   }
+   vk_object_base_finish(&ev->base);
+   vk_free2(&device->vk.alloc, pAllocator, ev);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_GetEventStatus(VkDevice _device, VkEvent _event)
+{
+   VK_FROM_HANDLE(nvrm_event, ev, _event);
+   (void)_device;
+   if (!ev)
+      return VK_EVENT_RESET;
+   if (ev->map) {
+      uint32_t v = *(volatile uint32_t *)ev->map;
+      ev->sema_value = v;
+      return v ? VK_EVENT_SET : VK_EVENT_RESET;
+   }
+   return ev->sema_value ? VK_EVENT_SET : VK_EVENT_RESET;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_SetEvent(VkDevice _device, VkEvent _event)
+{
+   VK_FROM_HANDLE(nvrm_event, ev, _event);
+   (void)_device;
+   if (!ev)
+      return VK_ERROR_UNKNOWN;
+   if (ev->map)
+      *(volatile uint32_t *)ev->map = 1;
+   ev->sema_value = 1;
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_ResetEvent(VkDevice _device, VkEvent _event)
+{
+   VK_FROM_HANDLE(nvrm_event, ev, _event);
+   (void)_device;
+   if (!ev)
+      return VK_ERROR_UNKNOWN;
+   if (ev->map)
+      *(volatile uint32_t *)ev->map = 0;
+   ev->sema_value = 0;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                   const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_event, ev, event);
    (void)pDependencyInfo;
-   (void)event;
-   /* Without a real event object BO yet, emit WFI + sema release on a
-    * placeholder: when event objects are wired, use event->sema_gpu_addr. */
-   if (!cmd || !cmd->push_map)
+   if (!cmd || !cmd->push_map || !ev || !ev->sema_gpu_addr)
       return;
    nv_push_wfi(&cmd->push);
-   /* Event object integration: see nvrm_event in a follow-up; for now
-    * WFI is sufficient for single-queue in-order semantics. */
+   nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1);
+   ev->sema_value = 1;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -233,11 +344,13 @@ nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                     VkPipelineStageFlags2 stageMask)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)event;
+   VK_FROM_HANDLE(nvrm_event, ev, event);
    (void)stageMask;
-   if (!cmd || !cmd->push_map)
+   if (!cmd || !cmd->push_map || !ev || !ev->sema_gpu_addr)
       return;
    nv_push_wfi(&cmd->push);
+   nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0);
+   ev->sema_value = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -246,13 +359,249 @@ nvrm_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
                     const VkDependencyInfo *pDependencyInfos)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)eventCount;
-   (void)pEvents;
+   uint32_t i;
    (void)pDependencyInfos;
    if (!cmd || !cmd->push_map)
       return;
-   /* Wait = WFI + full invalidate (conservative; sema acquire when events exist) */
+   for (i = 0; i < eventCount && pEvents; i++) {
+      VK_FROM_HANDLE(nvrm_event, ev, pEvents[i]);
+      if (ev && ev->sema_gpu_addr)
+         nv_push_host_semaphore_acquire(&cmd->push, ev->sema_gpu_addr, 1);
+   }
    nvrm_cmd_emit_full_invalidate(cmd);
+}
+
+static uint64_t
+nvrm_query_slot_addr(struct nvrm_query_pool *qp, uint32_t query)
+{
+   if (!qp || query >= qp->query_count)
+      return 0;
+   return qp->base_gpu_addr + (uint64_t)query * NVRM_QUERY_SLOT_BYTES;
+}
+
+static void *
+nvrm_query_slot_map(struct nvrm_query_pool *qp, uint32_t query)
+{
+   if (!qp || !qp->map || query >= qp->query_count)
+      return NULL;
+   return (uint8_t *)qp->map + (size_t)query * NVRM_QUERY_SLOT_BYTES;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_CreateQueryPool(VkDevice _device, const VkQueryPoolCreateInfo *pCreateInfo,
+                     const VkAllocationCallbacks *pAllocator,
+                     VkQueryPool *pQueryPool)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   struct nvrm_query_pool *qp;
+   uint32_t bytes;
+   if (!pCreateInfo || !pCreateInfo->queryCount)
+      return VK_ERROR_INITIALIZATION_FAILED;
+   qp = vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*qp), 8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!qp)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   vk_object_base_init(&device->vk, &qp->base, VK_OBJECT_TYPE_QUERY_POOL);
+   qp->device = device;
+   qp->query_count = pCreateInfo->queryCount;
+   qp->vk_type = pCreateInfo->queryType;
+   if (pCreateInfo->queryType == VK_QUERY_TYPE_OCCLUSION)
+      qp->kind = NVRM_QUERY_OCCLUSION;
+   else if (pCreateInfo->queryType == VK_QUERY_TYPE_TIMESTAMP)
+      qp->kind = NVRM_QUERY_TIMESTAMP;
+   else
+      qp->kind = NVRM_QUERY_PIPELINE_STATS;
+   bytes = qp->query_count * NVRM_QUERY_SLOT_BYTES;
+   if (bytes < 256)
+      bytes = 256;
+   qp->bo = nvrm_alloc_sema_bo(device, bytes, &qp->map, &qp->base_gpu_addr);
+   if (!qp->bo) {
+      vk_object_base_finish(&qp->base);
+      vk_free2(&device->vk.alloc, pAllocator, qp);
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+   }
+   if (qp->map)
+      memset(qp->map, 0, bytes);
+   *pQueryPool = nvrm_query_pool_to_handle(qp);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_DestroyQueryPool(VkDevice _device, VkQueryPool _pool,
+                      const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, _pool);
+   if (!qp)
+      return;
+   if (qp->bo) {
+      if (qp->map)
+         nv_rm_bo_unmap(qp->bo);
+      nv_rm_bo_free(qp->bo);
+   }
+   vk_object_base_finish(&qp->base);
+   vk_free2(&device->vk.alloc, pAllocator, qp);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_GetQueryPoolResults(VkDevice _device, VkQueryPool _pool,
+                         uint32_t firstQuery, uint32_t queryCount,
+                         size_t dataSize, void *pData, VkDeviceSize stride,
+                         VkQueryResultFlags flags)
+{
+   VK_FROM_HANDLE(nvrm_query_pool, qp, _pool);
+   uint32_t i;
+   (void)_device;
+   if (!qp || !pData || !queryCount)
+      return VK_ERROR_UNKNOWN;
+   for (i = 0; i < queryCount; i++) {
+      uint32_t qi = firstQuery + i;
+      uint32_t *slot = (uint32_t *)nvrm_query_slot_map(qp, qi);
+      uint8_t *dst = (uint8_t *)pData + (size_t)i * (size_t)stride;
+      uint64_t val = 0;
+      if (!slot || (size_t)(i + 1) * (size_t)stride > dataSize)
+         continue;
+      /* Report structure: dword0 = payload/counter, dword1-3 = timestamp/extra */
+      if (flags & VK_QUERY_RESULT_64_BIT) {
+         val = ((uint64_t)slot[1] << 32) | slot[0];
+         if (!val && qp->kind == NVRM_QUERY_OCCLUSION)
+            val = slot[0];
+         *(uint64_t *)dst = val;
+         if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+            *(uint64_t *)(dst + 8) = slot[0] || slot[1] ? 1 : 0;
+      } else {
+         *(uint32_t *)dst = slot[0];
+         if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+            *(uint32_t *)(dst + 4) = slot[0] ? 1 : 0;
+      }
+   }
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                       uint32_t firstQuery, uint32_t queryCount)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, queryPool);
+   uint32_t i;
+   (void)cmd;
+   if (!qp || !qp->map)
+      return;
+   for (i = 0; i < queryCount; i++) {
+      void *slot = nvrm_query_slot_map(qp, firstQuery + i);
+      if (slot)
+         memset(slot, 0, NVRM_QUERY_SLOT_BYTES);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                   uint32_t query, VkQueryControlFlags flags)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, queryPool);
+   (void)flags;
+   if (!cmd || !cmd->push_map || !qp)
+      return;
+   cmd->active_query_pool = qp;
+   cmd->active_query_index = query;
+   cmd->active_query_is_occlusion = (qp->kind == NVRM_QUERY_OCCLUSION);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   if (cmd->active_query_is_occlusion)
+      nv_3d_set_zpass_pixel_count(&cmd->push, true);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                 uint32_t query)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, queryPool);
+   uint64_t addr;
+   if (!cmd || !cmd->push_map || !qp)
+      return;
+   addr = nvrm_query_slot_addr(qp, query);
+   if (!addr)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   if (qp->kind == NVRM_QUERY_OCCLUSION) {
+      nv_3d_report_query_release(&cmd->push, addr, 0, true, true);
+      nv_3d_set_zpass_pixel_count(&cmd->push, false);
+   } else {
+      /* Timestamp / stats: pipeline semaphore release with 4-word structure */
+      nv_3d_report_query_release(&cmd->push, addr, 0, false, false);
+   }
+   if (cmd->active_query_pool == qp)
+      cmd->active_query_pool = NULL;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+                        VkPipelineStageFlags2 stage,
+                        VkQueryPool queryPool, uint32_t query)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, queryPool);
+   uint64_t addr;
+   (void)stage;
+   if (!cmd || !cmd->push_map || !qp)
+      return;
+   addr = nvrm_query_slot_addr(qp, query);
+   if (!addr)
+      return;
+   nv_push_wfi(&cmd->push);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_report_query_release(&cmd->push, addr, 0, false, false);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetLineWidth(VkCommandBuffer commandBuffer, float lineWidth)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->dyn_line_width = lineWidth;
+   cmd->dyn_line_width_valid = true;
+   if (cmd->push_map)
+      nv_3d_emit_line_width(&cmd->push, lineWidth);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdBeginConditionalRenderingEXT(
+   VkCommandBuffer commandBuffer,
+   const VkConditionalRenderingBeginInfoEXT *pInfo)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, buf, pInfo ? pInfo->buffer : VK_NULL_HANDLE);
+   uint64_t addr = 0;
+   bool inverted = false;
+   if (!cmd || !cmd->push_map || !pInfo)
+      return;
+   if (buf)
+      addr = (buf->addr ? buf->addr : (buf->bo ? nv_rm_bo_gpu_offset(buf->bo) : 0))
+             + pInfo->offset;
+   inverted = !!(pInfo->flags & VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT);
+   cmd->cond_render_active = true;
+   cmd->cond_render_gpu_addr = addr;
+   cmd->cond_render_inverted = inverted;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   /* USE_RENDER_ENABLE: hardware compares memory word; inverted uses always-false
+    * when predicate is non-zero is approximated via override (refined later). */
+   nv_3d_set_render_enable_memory(&cmd->push, addr,
+      inverted ? NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_FALSE
+               : NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   if (!cmd || !cmd->push_map)
+      return;
+   cmd->cond_render_active = false;
+   cmd->cond_render_gpu_addr = 0;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_set_render_enable_memory(&cmd->push, 0,
+      NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
 }
 
 VKAPI_ATTR void VKAPI_CALL
