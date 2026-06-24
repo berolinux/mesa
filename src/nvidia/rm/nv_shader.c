@@ -6,6 +6,7 @@
 #include "nv_shader.h"
 
 #include "nv_rm.h"
+#include "nv_sph.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -148,14 +149,27 @@ nv_shader_upload_code(struct nv_shader *sh, const void *code, uint32_t code_size
 {
    struct nv_rm_bo *bo;
    uint64_t gpu = 0;
-   static const uint8_t zero_placeholder[NV_SHADER_MIN_CODE_SIZE];
+   uint8_t sph_buf[512];
+   struct nv_sph_blob sph_blob;
+   const void *upload = code;
+   uint32_t upload_size = code_size;
+   uint32_t regs = register_count ? register_count : 8;
 
    if (!sh || !sh->rm)
       return -1;
 
+   /* No external binary: build Maxwell+ SPH + EXIT SASS stub */
    if (!code || !code_size) {
-      code = zero_placeholder;
-      code_size = NV_SHADER_MIN_CODE_SIZE;
+      nv_sph_build_trivial(&sph_blob,
+                           nv_sph_type_from_shader_kind((int)sh->kind), regs);
+      if (sph_blob.total_bytes > sizeof(sph_buf))
+         return -1;
+      nv_sph_serialise(&sph_blob, sph_buf, sizeof(sph_buf));
+      upload = sph_buf;
+      upload_size = sph_blob.total_bytes;
+      regs = sph_blob.sph[1] & 0x3f;
+      if (regs < 4)
+         regs = 8;
    }
 
    if (sh->code_bo) {
@@ -164,18 +178,31 @@ nv_shader_upload_code(struct nv_shader *sh, const void *code, uint32_t code_size
       sh->code_bo = NULL;
    }
 
-   bo = nv_shader_alloc_upload_bo(sh->rm, code, code_size,
+   bo = nv_shader_alloc_upload_bo(sh->rm, upload, upload_size,
                                   NV_SHADER_MIN_CODE_SIZE, &gpu);
    if (!bo)
       return -1;
 
    sh->code_bo = bo;
    sh->code_gpu_addr = gpu;
-   sh->code_size = code_size;
-   if (register_count)
-      sh->register_count = register_count;
+   sh->code_size = upload_size;
+   sh->register_count = regs;
    sh->uploaded = true;
    return 0;
+}
+
+/**
+ * Compile path entry: when NIR is attached, eventually lower to SASS.
+ * Currently falls back to SPH+EXIT stub (same as upload_code NULL path).
+ */
+int
+nv_shader_compile_nir_stub(struct nv_shader *sh)
+{
+   if (!sh)
+      return -1;
+   if (sh->uploaded)
+      return 0;
+   return nv_shader_upload_code(sh, NULL, 0, sh->register_count ? sh->register_count : 8);
 }
 
 int

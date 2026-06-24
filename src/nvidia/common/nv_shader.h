@@ -75,6 +75,10 @@ nv_shader_emit_bind(struct nv_push *p, const struct nv_shader *sh,
 void
 nv_shader_fill_stage_defaults(struct nv_shader *sh);
 
+/** Build SPH+EXIT (or later NIR->SASS) and upload; no-op if already uploaded. */
+int
+nv_shader_compile_nir_stub(struct nv_shader *sh);
+
 #ifdef __cplusplus
 }
 #endif

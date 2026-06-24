@@ -30,15 +30,33 @@ extern "C" {
 #define NVC6B5_PITCH_OUT                0x0414
 #define NVC6B5_LINE_LENGTH_IN           0x0418
 #define NVC6B5_LINE_COUNT               0x041c
+#define NVC6B5_SET_DST_BLOCK_SIZE       0x070c
+#define NVC6B5_SET_DST_WIDTH            0x0710
+#define NVC6B5_SET_DST_HEIGHT           0x0714
+#define NVC6B5_SET_DST_DEPTH            0x0718
+#define NVC6B5_SET_DST_LAYER            0x071c
+#define NVC6B5_SET_DST_ORIGIN           0x0720
+#define NVC6B5_SET_SRC_BLOCK_SIZE       0x0728
+#define NVC6B5_SET_SRC_WIDTH            0x072c
+#define NVC6B5_SET_SRC_HEIGHT           0x0730
+#define NVC6B5_SET_SRC_DEPTH            0x0734
+#define NVC6B5_SET_SRC_LAYER            0x0738
+#define NVC6B5_SET_SRC_ORIGIN           0x073c
 
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED     0x1
 #define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED 0x2
 #define NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE                (1u << 2)
+#define NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_BLOCKLINEAR    0
 #define NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH          (1u << 7)
+#define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_BLOCKLINEAR    0
 #define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH          (1u << 8)
 #define NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE           (1u << 9)
+#define NVC6B5_LAUNCH_DMA_REMIX_DISABLE                    0
 #define NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL                 0
 #define NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL                 0
+
+/* Block size: log2 gobs in each dimension; 0 = one gob (8x8x1 for height fermi) */
+#define NVC6B5_BLOCK_SIZE_ONE_GOB_EACH  0x00001000  /* GOB_HEIGHT_FERMI_8 in bits 15:12 */
 
 /** SET_OBJECT for copy class on COPY subchannel. */
 static inline void
@@ -130,6 +148,97 @@ nv_copy_push_image_2d(struct nv_push *p, uint32_t class_copy,
       nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
    nv_copy_emit_image_2d(p, src_gpu_addr, dst_gpu_addr,
                          line_length, pitch_in, pitch_out, line_count);
+   nv_push_wfi(p);
+}
+
+/**
+ * Blocklinear <-> pitch or blocklinear <-> blocklinear 2D copy via NVC6B5.
+ * When src_bl/dst_bl is false, that side uses pitch layout (PITCH_IN/OUT set).
+ * width/height in elements (pixels); bpp used only for pitch line_length.
+ * origin_x/y are pixel offsets into the surface.
+ */
+static inline void
+nv_copy_emit_image_2d_bl(struct nv_push *p,
+                         uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                         uint32_t width, uint32_t height, uint32_t bpp,
+                         uint32_t pitch_in, uint32_t pitch_out,
+                         uint32_t src_origin_x, uint32_t src_origin_y,
+                         uint32_t dst_origin_x, uint32_t dst_origin_y,
+                         bool src_bl, bool dst_bl,
+                         uint32_t src_bl_w, uint32_t src_bl_h,
+                         uint32_t dst_bl_w, uint32_t dst_bl_h)
+{
+   uint32_t launch;
+   uint32_t line_len = width * (bpp ? bpp : 1);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+
+   if (src_bl) {
+      nv_push_method(p, NVC6B5_SET_SRC_BLOCK_SIZE,
+                     NVC6B5_BLOCK_SIZE_ONE_GOB_EACH |
+                     ((src_bl_w & 0xf)) | ((src_bl_h & 0xf) << 4));
+      nv_push_method(p, NVC6B5_SET_SRC_WIDTH, width);
+      nv_push_method(p, NVC6B5_SET_SRC_HEIGHT, height);
+      nv_push_method(p, NVC6B5_SET_SRC_DEPTH, 1);
+      nv_push_method(p, NVC6B5_SET_SRC_LAYER, 0);
+      nv_push_method(p, NVC6B5_SET_SRC_ORIGIN,
+                     (src_origin_x & 0xffff) | ((src_origin_y & 0xffff) << 16));
+   } else {
+      nv_push_method(p, NVC6B5_PITCH_IN, pitch_in ? pitch_in : line_len);
+   }
+
+   if (dst_bl) {
+      nv_push_method(p, NVC6B5_SET_DST_BLOCK_SIZE,
+                     NVC6B5_BLOCK_SIZE_ONE_GOB_EACH |
+                     ((dst_bl_w & 0xf)) | ((dst_bl_h & 0xf) << 4));
+      nv_push_method(p, NVC6B5_SET_DST_WIDTH, width);
+      nv_push_method(p, NVC6B5_SET_DST_HEIGHT, height);
+      nv_push_method(p, NVC6B5_SET_DST_DEPTH, 1);
+      nv_push_method(p, NVC6B5_SET_DST_LAYER, 0);
+      nv_push_method(p, NVC6B5_SET_DST_ORIGIN,
+                     (dst_origin_x & 0xffff) | ((dst_origin_y & 0xffff) << 16));
+   } else {
+      nv_push_method(p, NVC6B5_PITCH_OUT, pitch_out ? pitch_out : line_len);
+   }
+
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, line_len);
+   nv_push_method(p, NVC6B5_LINE_COUNT, height ? height : 1);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE;
+   if (!src_bl)
+      launch |= NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH;
+   if (!dst_bl)
+      launch |= NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+static inline void
+nv_copy_push_image_2d_bl(struct nv_push *p, uint32_t class_copy,
+                         uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                         uint32_t width, uint32_t height, uint32_t bpp,
+                         uint32_t pitch_in, uint32_t pitch_out,
+                         uint32_t src_ox, uint32_t src_oy,
+                         uint32_t dst_ox, uint32_t dst_oy,
+                         bool src_bl, bool dst_bl)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_image_2d_bl(p, src_gpu_addr, dst_gpu_addr,
+                            width, height, bpp, pitch_in, pitch_out,
+                            src_ox, src_oy, dst_ox, dst_oy,
+                            src_bl, dst_bl, 0, 0, 0, 0);
    nv_push_wfi(p);
 }
 

@@ -186,6 +186,82 @@ extern "C" {
 #define NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS 0
 #define NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE     (1u << 2)
 
+/* Fixed-function / texture pool / channel init (nvidia-3d fermi init) */
+#define NVC597_SET_RASTER_ENABLE                0x037c
+#define NVC597_SET_SAMPLER_BINDING              0x1234
+#define NVC597_SET_SAMPLER_BINDING_V_INDEPENDENTLY      0x0
+#define NVC597_SET_SAMPLER_BINDING_V_VIA_HEADER_BINDING 0x1
+#define NVC597_SET_DEPTH_TEST                   0x12cc
+#define NVC597_SET_FILL_MODE                    0x12d0
+#define NVC597_SET_FILL_MODE_V_POINT            0x1
+#define NVC597_SET_FILL_MODE_V_WIREFRAME        0x2
+#define NVC597_SET_FILL_MODE_V_SOLID            0x3
+#define NVC597_SET_SHADE_MODE                   0x12d4
+#define NVC597_SET_SHADE_MODE_V_OGL_SMOOTH      0x1d01
+#define NVC597_SET_SHADE_MODE_V_OGL_FLAT        0x1d00
+#define NVC597_SET_DEPTH_WRITE                  0x12e8
+#define NVC597_SET_DEPTH_FUNC                   0x130c
+#define NVC597_SET_DEPTH_FUNC_V_OGL_NEVER       0x200
+#define NVC597_SET_DEPTH_FUNC_V_OGL_LESS        0x201
+#define NVC597_SET_DEPTH_FUNC_V_OGL_EQUAL       0x202
+#define NVC597_SET_DEPTH_FUNC_V_OGL_LEQUAL      0x203
+#define NVC597_SET_DEPTH_FUNC_V_OGL_GREATER     0x204
+#define NVC597_SET_DEPTH_FUNC_V_OGL_NOTEQUAL    0x205
+#define NVC597_SET_DEPTH_FUNC_V_OGL_GEQUAL      0x206
+#define NVC597_SET_DEPTH_FUNC_V_OGL_ALWAYS      0x207
+#define NVC597_INVALIDATE_SAMPLER_CACHE         0x1330
+#define NVC597_INVALIDATE_TEXTURE_HEADER_CACHE  0x1334
+#define NVC597_SET_BLEND_SEPARATE_FOR_ALPHA     0x133c
+#define NVC597_SET_BLEND_COLOR_OP               0x1340
+#define NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD 0x8006
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF     0x1344
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF       0x1348
+#define NVC597_SET_BLEND_ALPHA_OP               0x134c
+#define NVC597_SET_BLEND_ALPHA_SOURCE_COEFF     0x1350
+#define NVC597_SET_BLEND_ALPHA_DEST_COEFF       0x1354
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE  0x4001
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ZERO 0x4000
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA 0x4302
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA 0x4303
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_ZERO   0x4000
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_ONE    0x4001
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA 0x4303
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_SRC_ALPHA 0x4302
+#define NVC597_SET_BLEND(i)                     (0x1360 + (i) * 4)
+#define NVC597_SET_STENCIL_TEST                 0x1380
+#define NVC597_SET_STENCIL_OP_FAIL              0x1384
+#define NVC597_SET_STENCIL_OP_ZFAIL             0x1388
+#define NVC597_SET_STENCIL_OP_ZPASS             0x138c
+#define NVC597_SET_STENCIL_FUNC                 0x1390
+#define NVC597_SET_STENCIL_FUNC_REF             0x1394
+#define NVC597_SET_STENCIL_MASK                 0x139c
+#define NVC597_SET_WINDOW_ORIGIN                0x13ac
+#define NVC597_SET_WINDOW_ORIGIN_MODE_UPPER_LEFT 0x0
+#define NVC597_SET_WINDOW_ORIGIN_FLIP_Y_TRUE    (1u << 4)
+#define NVC597_SET_POINT_SIZE                   0x1518
+#define NVC597_SET_TEX_SAMPLER_POOL_A           0x155c
+#define NVC597_SET_TEX_SAMPLER_POOL_B           0x1560
+#define NVC597_SET_TEX_SAMPLER_POOL_C           0x1564
+#define NVC597_SET_TEX_HEADER_POOL_A            0x1574
+#define NVC597_SET_TEX_HEADER_POOL_B            0x1578
+#define NVC597_SET_TEX_HEADER_POOL_C            0x157c
+#define NVC597_SET_SPH_VERSION                  0x16a4
+#define NVC597_SET_ZCULL_BOUNDS                 0x196c
+#define NVC597_SET_LOGIC_OP                     0x19c4
+#define NVC597_OGL_SET_CULL                     0x1918
+#define NVC597_OGL_SET_FRONT_FACE               0x191c
+#define NVC597_OGL_SET_FRONT_FACE_V_CW          0x900
+#define NVC597_OGL_SET_FRONT_FACE_V_CCW         0x901
+#define NVC597_OGL_SET_CULL_FACE                0x1920
+#define NVC597_OGL_SET_CULL_FACE_V_FRONT        0x404
+#define NVC597_OGL_SET_CULL_FACE_V_BACK         0x405
+#define NVC597_OGL_SET_CULL_FACE_V_FRONT_AND_BACK 0x408
+#define NVC597_SET_CT_WRITE(i)                  (0x1a00 + (i) * 4)
+#define NVC597_SET_LINE_WIDTH_FLOAT             0x0d40
+#define NVC597_SET_PROVOKING_VERTEX             0x0d68
+#define NVC597_SET_PROVOKING_VERTEX_V_FIRST     0x0
+#define NVC597_SET_PROVOKING_VERTEX_V_LAST      0x1
+
 /* Pipeline stage index (j in SET_PIPELINE_SHADER(j)) */
 #define NV_3D_PIPE_STAGE_VERTEX                 0
 #define NV_3D_PIPE_STAGE_TESS_INIT              1
@@ -637,6 +713,135 @@ nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                   NVC36F_SEMAPHORED_OPERATION_RELEASE |
                   NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
                   NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+}
+
+/** One-time channel defaults (subset of nvidia-3d fermi initChannel). */
+static inline void
+nv_3d_emit_channel_init_defaults(struct nv_push *p, uint32_t spa_major,
+                                 uint32_t spa_minor, uint32_t sph_cur,
+                                 uint32_t sph_oldest)
+{
+   nv_3d_set_spa_version(p, spa_major, spa_minor);
+   nv_push_method(p, NVC597_SET_SPH_VERSION,
+                  (sph_cur & 0xffff) | ((sph_oldest & 0xffff) << 16));
+   nv_push_method(p, NVC597_SET_WINDOW_ORIGIN,
+                  NVC597_SET_WINDOW_ORIGIN_MODE_UPPER_LEFT |
+                  NVC597_SET_WINDOW_ORIGIN_FLIP_Y_TRUE);
+   nv_push_method(p, NVC597_SET_ZCULL_BOUNDS, 0);
+   nv_push_method(p, NVC597_SET_RASTER_ENABLE, 1);
+   nv_push_method(p, NVC597_SET_SHADE_MODE, NVC597_SET_SHADE_MODE_V_OGL_SMOOTH);
+   nv_push_method(p, NVC597_SET_FILL_MODE, NVC597_SET_FILL_MODE_V_SOLID);
+}
+
+/** Map pipe_compare_func (0..7) to OGL depth/stencil func value. */
+static inline uint32_t
+nv_3d_ogl_cmp_func(unsigned pipe_func)
+{
+   static const uint32_t tbl[8] = {
+      NVC597_SET_DEPTH_FUNC_V_OGL_NEVER,
+      NVC597_SET_DEPTH_FUNC_V_OGL_LESS,
+      NVC597_SET_DEPTH_FUNC_V_OGL_EQUAL,
+      NVC597_SET_DEPTH_FUNC_V_OGL_LEQUAL,
+      NVC597_SET_DEPTH_FUNC_V_OGL_GREATER,
+      NVC597_SET_DEPTH_FUNC_V_OGL_NOTEQUAL,
+      NVC597_SET_DEPTH_FUNC_V_OGL_GEQUAL,
+      NVC597_SET_DEPTH_FUNC_V_OGL_ALWAYS,
+   };
+   return pipe_func < 8 ? tbl[pipe_func] : NVC597_SET_DEPTH_FUNC_V_OGL_LESS;
+}
+
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR  0x4306
+
+/** Map pipe_blendfactor (common subset) to OGL blend coeff. */
+static inline uint32_t
+nv_3d_ogl_blend_factor(unsigned pipe_factor, bool is_alpha)
+{
+   (void)is_alpha;
+   switch (pipe_factor) {
+   case 1:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;   /* ONE */
+   case 0:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ZERO;  /* ZERO */
+   case 2:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA;
+   case 3:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA;
+   case 4:  return NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR;
+   default: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;
+   }
+}
+
+/**
+ * Emit blend/ZSA/rasterizer from Gallium-like state (passed as opaque fields
+ * to avoid requiring pipe headers in every TU).
+ *
+ * blend_enable: rt0 blend enable
+ * rgb/alpha func & factors: pipe enum values (see p_defines.h)
+ * colormask: 4-bit RGBA write mask for CT0
+ * depth_enabled/writemask/func: depth state
+ * stencil_enabled: front stencil only (simplified)
+ * cull_face: 0=none, 1=front, 2=back, 3=front_and_back
+ * front_ccw: non-zero => CCW front face
+ * fill_mode: 0=fill, 1=line, 2=point
+ * smooth_shade: non-zero => smooth, else flat
+ */
+static inline void
+nv_3d_emit_blend_zsa_raster(struct nv_push *p,
+                            bool blend_enable,
+                            unsigned rgb_func, unsigned rgb_src, unsigned rgb_dst,
+                            unsigned alpha_func, unsigned alpha_src, unsigned alpha_dst,
+                            unsigned colormask,
+                            bool depth_enabled, bool depth_writemask, unsigned depth_func,
+                            bool stencil_enabled,
+                            unsigned cull_face, bool front_ccw,
+                            unsigned fill_mode, bool smooth_shade)
+{
+   uint32_t fill = NVC597_SET_FILL_MODE_V_SOLID;
+   if (fill_mode == 1)
+      fill = NVC597_SET_FILL_MODE_V_WIREFRAME;
+   else if (fill_mode == 2)
+      fill = NVC597_SET_FILL_MODE_V_POINT;
+
+   nv_push_method(p, NVC597_SET_FILL_MODE, fill);
+   nv_push_method(p, NVC597_SET_SHADE_MODE,
+                  smooth_shade ? NVC597_SET_SHADE_MODE_V_OGL_SMOOTH
+                               : NVC597_SET_SHADE_MODE_V_OGL_FLAT);
+   nv_push_method(p, NVC597_OGL_SET_FRONT_FACE,
+                  front_ccw ? NVC597_OGL_SET_FRONT_FACE_V_CCW
+                            : NVC597_OGL_SET_FRONT_FACE_V_CW);
+   if (cull_face) {
+      uint32_t dir = NVC597_OGL_SET_CULL_FACE_V_BACK;
+      if (cull_face == 1)
+         dir = NVC597_OGL_SET_CULL_FACE_V_FRONT;
+      else if (cull_face == 3)
+         dir = NVC597_OGL_SET_CULL_FACE_V_FRONT_AND_BACK;
+      nv_push_method(p, NVC597_OGL_SET_CULL, 1);
+      nv_push_method(p, NVC597_OGL_SET_CULL_FACE, dir);
+   } else {
+      nv_push_method(p, NVC597_OGL_SET_CULL, 0);
+   }
+
+   nv_push_method(p, NVC597_SET_DEPTH_TEST, depth_enabled ? 1 : 0);
+   nv_push_method(p, NVC597_SET_DEPTH_WRITE, depth_writemask ? 1 : 0);
+   nv_push_method(p, NVC597_SET_DEPTH_FUNC, nv_3d_ogl_cmp_func(depth_func));
+
+   nv_push_method(p, NVC597_SET_STENCIL_TEST, stencil_enabled ? 1 : 0);
+
+   nv_push_method(p, NVC597_SET_BLEND(0), blend_enable ? 1 : 0);
+   if (blend_enable) {
+      nv_push_method(p, NVC597_SET_BLEND_SEPARATE_FOR_ALPHA, 1);
+      nv_push_method(p, NVC597_SET_BLEND_COLOR_OP, NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD);
+      nv_push_method(p, NVC597_SET_BLEND_COLOR_SOURCE_COEFF,
+                     nv_3d_ogl_blend_factor(rgb_src, false));
+      nv_push_method(p, NVC597_SET_BLEND_COLOR_DEST_COEFF,
+                     nv_3d_ogl_blend_factor(rgb_dst, false));
+      nv_push_method(p, NVC597_SET_BLEND_ALPHA_OP, NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD);
+      nv_push_method(p, NVC597_SET_BLEND_ALPHA_SOURCE_COEFF,
+                     nv_3d_ogl_blend_factor(alpha_src, true));
+      nv_push_method(p, NVC597_SET_BLEND_ALPHA_DEST_COEFF,
+                     nv_3d_ogl_blend_factor(alpha_dst, true));
+      (void)rgb_func;
+      (void)alpha_func;
+   }
+
+   /* CT write mask: low 4 bits RGBA */
+   nv_push_method(p, NVC597_SET_CT_WRITE(0), colormask & 0xf);
 }
 
 static inline void

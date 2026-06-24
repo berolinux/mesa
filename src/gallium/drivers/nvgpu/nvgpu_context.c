@@ -18,6 +18,8 @@
 #include "nv_copy_methods.h"
 #include "nv_shader.h"
 #include "nv_fence.h"
+#include "nv_tex.h"
+#include "nv_sph.h"
 
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -238,7 +240,7 @@ nvgpu_ensure_shader_uploaded(struct nvgpu_context *ctx,
 
    /* NIR->ISA not implemented yet: upload zero placeholder so hardware
     * pipeline bind methods are exercised.  Compiler will replace this. */
-   if (nv_shader_upload_code(scso->nvsh, NULL, 0, 16) == 0) {
+   if (nv_shader_compile_nir_stub(scso->nvsh) == 0) {
       if (!ctx->program_region_base && scso->nvsh->code_gpu_addr)
          ctx->program_region_base = scso->nvsh->code_gpu_addr;
    }
@@ -520,6 +522,147 @@ nvgpu_emit_vertex_state(struct nvgpu_context *ctx, struct nv_push *push)
    }
 }
 
+/* One-time 3D channel defaults + texture pool bind. */
+static void
+nvgpu_ensure_3d_init(struct nvgpu_context *ctx, struct nv_push *push)
+{
+   const struct nv_device_info *di = ctx->screen->info;
+
+   if (!ctx->channel_init_emitted) {
+      uint32_t spa_maj = 5, spa_min = 3; /* Ampere-class default; refined by arch later */
+      if (di) {
+         if (di->architecture >= 0x170) { spa_maj = 7; spa_min = 0; }
+         else if (di->architecture >= 0x160) { spa_maj = 6; spa_min = 0; }
+      }
+      nv_3d_emit_channel_init_defaults(push, spa_maj, spa_min, 5, 3);
+      ctx->channel_init_emitted = true;
+   }
+
+   if (!ctx->tex_pool && ctx->screen->rm)
+      ctx->tex_pool = nv_tex_pool_create(ctx->screen->rm, 64);
+
+   if (ctx->tex_pool && !ctx->tex_pool_bound) {
+      nv_tex_pool_emit_bind(push, ctx->tex_pool);
+      ctx->tex_pool_bound = true;
+   }
+}
+
+/* Emit blend / depth-stencil / rasterizer from bound CSO pointers. */
+static void
+nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
+{
+   const struct pipe_blend_state *blend = ctx->blend;
+   const struct pipe_depth_stencil_alpha_state *zsa = ctx->zsa;
+   const struct pipe_rasterizer_state *rs = ctx->rs;
+   bool blend_en = false;
+   unsigned rgb_func = 0, rgb_src = 1, rgb_dst = 0;
+   unsigned a_func = 0, a_src = 1, a_dst = 0;
+   unsigned cm = 0xf;
+   bool depth_en = false, depth_wr = true;
+   unsigned depth_fn = 1; /* LESS */
+   bool stencil_en = false;
+   unsigned cull = 0;
+   bool front_ccw = false;
+   unsigned fill = 0;
+   bool smooth = true;
+
+   if (blend) {
+      blend_en = blend->rt[0].blend_enable;
+      rgb_func = blend->rt[0].rgb_func;
+      rgb_src = blend->rt[0].rgb_src_factor;
+      rgb_dst = blend->rt[0].rgb_dst_factor;
+      a_func = blend->rt[0].alpha_func;
+      a_src = blend->rt[0].alpha_src_factor;
+      a_dst = blend->rt[0].alpha_dst_factor;
+      cm = blend->rt[0].colormask;
+   }
+   if (zsa) {
+      depth_en = zsa->depth_enabled;
+      depth_wr = zsa->depth_writemask;
+      depth_fn = zsa->depth_func;
+      stencil_en = zsa->stencil[0].enabled;
+   }
+   if (rs) {
+      cull = rs->cull_face;
+      front_ccw = rs->front_ccw;
+      fill = rs->fill_front; /* 0 fill, 1 line, 2 point in pipe */
+      smooth = !rs->flatshade;
+   }
+
+   nv_3d_emit_blend_zsa_raster(push, blend_en, rgb_func, rgb_src, rgb_dst,
+                               a_func, a_src, a_dst, cm,
+                               depth_en, depth_wr, depth_fn, stencil_en,
+                               cull, front_ccw, fill, smooth);
+}
+
+/* Upload FS sampler views into tex pool as pitch 2D headers (slot = view index). */
+static void
+nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
+{
+   unsigned i, n;
+   (void)push;
+
+   if (!ctx->tex_pool)
+      return;
+
+   n = ctx->num_samplers[PIPE_SHADER_FRAGMENT];
+   for (i = 0; i < n && i < PIPE_MAX_SAMPLERS; i++) {
+      struct pipe_sampler_view *sv = ctx->samplers[PIPE_SHADER_FRAGMENT][i];
+      struct nvgpu_resource *res;
+      struct nv_tex_desc desc;
+      struct nv_tex_entry ent;
+      struct pipe_sampler_state *ss = NULL;
+      unsigned pitch, w, h;
+
+      if (!sv || !sv->texture)
+         continue;
+      res = nvgpu_resource(sv->texture);
+      if (!res)
+         continue;
+
+      memset(&desc, 0, sizeof(desc));
+      w = sv->texture->width0;
+      h = sv->texture->height0;
+      pitch = align(util_format_get_stride(sv->format, w), 128);
+      desc.gpu_addr = res->gpu_offset;
+      desc.width = w;
+      desc.height = h;
+      desc.pitch = pitch;
+      nv_tex_format_from_pipe((unsigned)sv->format, &desc.components, &desc.data_type);
+      desc.src_x = NV_TEX_SRC_R;
+      desc.src_y = NV_TEX_SRC_G;
+      desc.src_z = NV_TEX_SRC_B;
+      desc.src_w = NV_TEX_SRC_A;
+      desc.normalized_coords = true;
+      desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+      desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
+      desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
+
+      if (i < ctx->num_sampler_cso && ctx->sampler_cso[i])
+         ss = ctx->sampler_cso[i];
+      if (ss) {
+         if (ss->wrap_s == PIPE_TEX_WRAP_REPEAT)
+            desc.addr_u = NV_TEX_SAMP_ADDR_WRAP;
+         else if (ss->wrap_s == PIPE_TEX_WRAP_MIRROR_REPEAT)
+            desc.addr_u = NV_TEX_SAMP_ADDR_MIRROR;
+         if (ss->wrap_t == PIPE_TEX_WRAP_REPEAT)
+            desc.addr_v = NV_TEX_SAMP_ADDR_WRAP;
+         if (ss->min_img_filter == PIPE_TEX_FILTER_NEAREST)
+            desc.min_filt = NV_TEX_SAMP_FILT_NEAREST;
+         if (ss->mag_img_filter == PIPE_TEX_FILTER_NEAREST)
+            desc.mag_filt = NV_TEX_SAMP_FILT_NEAREST;
+      }
+
+      nv_tex_encode_pitch_2d(&desc, &ent);
+      nv_tex_pool_set_entry(ctx->tex_pool, (int)i, &ent);
+   }
+
+   if (n)
+      nv_tex_invalidate_caches(push);
+}
+
 /* Emit bound VS/FS via SET_PIPELINE_SHADER (placeholder code until compiler). */
 static void
 nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
@@ -599,8 +742,10 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
    else
       nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
 
+   nvgpu_ensure_3d_init(ctx, &push);
    /* Program RTs/ZETA before CLEAR_SURFACE (required for HW to have a target) */
    nvgpu_emit_framebuffer(ctx, &push);
+   nvgpu_emit_fixed_func(ctx, &push);
    nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth, stencil);
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);
@@ -642,7 +787,10 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       else
          nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
 
+      nvgpu_ensure_3d_init(ctx, &push);
       nvgpu_emit_framebuffer(ctx, &push);
+      nvgpu_emit_fixed_func(ctx, &push);
+      nvgpu_emit_textures(ctx, &push);
       nvgpu_emit_shaders(ctx, &push);
       nvgpu_emit_vertex_state(ctx, &push);
 
@@ -698,36 +846,51 @@ nvgpu_resource_copy_region(struct pipe_context *pctx,
       return;
    }
 
-   /* 2D linear/pitch textures: multi-line NVC6B5 (blocklinear needs CE later) */
+   /* 2D textures: pitch multi-line or blocklinear NVC6B5 */
    if ((dst->target == PIPE_TEXTURE_2D || dst->target == PIPE_TEXTURE_RECT ||
         dst->target == PIPE_TEXTURE_2D_ARRAY) &&
        (src->target == PIPE_TEXTURE_2D || src->target == PIPE_TEXTURE_RECT ||
         src->target == PIPE_TEXTURE_2D_ARRAY) &&
-       dres->linear && sres->linear &&
        src_box->depth <= 1 && dst_level == 0 && src_level == 0) {
       unsigned bpp = util_format_get_blocksize(src->format);
       unsigned src_stride = align(util_format_get_stride(src->format, src->width0), 128);
       unsigned dst_stride = align(util_format_get_stride(dst->format, dst->width0), 128);
-      uint32_t line_len = (uint32_t)src_box->width * bpp;
-      uint32_t lines = (uint32_t)src_box->height;
+      uint32_t w = (uint32_t)src_box->width;
+      uint32_t h = (uint32_t)src_box->height;
+      bool src_bl = !sres->linear;
+      bool dst_bl = !dres->linear;
       unsigned layer = src_box->z;
 
-      if (!line_len || !lines)
+      if (!w || !h)
          return;
 
-      saddr = sres->gpu_offset +
-              (uint64_t)layer * src_stride * src->height0 +
-              (uint64_t)src_box->y * src_stride +
-              (uint64_t)src_box->x * bpp;
-      daddr = dres->gpu_offset +
-              (uint64_t)dstz * dst_stride * dst->height0 +
-              (uint64_t)dsty * dst_stride +
-              (uint64_t)dstx * bpp;
+      saddr = sres->gpu_offset;
+      daddr = dres->gpu_offset;
+      if (!src_bl) {
+         saddr += (uint64_t)layer * src_stride * src->height0 +
+                  (uint64_t)src_box->y * src_stride +
+                  (uint64_t)src_box->x * bpp;
+      }
+      if (!dst_bl) {
+         daddr += (uint64_t)dstz * dst_stride * dst->height0 +
+                  (uint64_t)dsty * dst_stride +
+                  (uint64_t)dstx * bpp;
+      }
 
-      if (!nvgpu_push_start(ctx, &push, 64))
+      if (!nvgpu_push_start(ctx, &push, 128))
          return;
-      nv_copy_push_image_2d(&push, class_copy, saddr, daddr,
-                            line_len, src_stride, dst_stride, lines);
+      if (src_bl || dst_bl) {
+         nv_copy_push_image_2d_bl(&push, class_copy, saddr, daddr,
+                                  w, h, bpp, src_stride, dst_stride,
+                                  src_bl ? (uint32_t)src_box->x : 0,
+                                  src_bl ? (uint32_t)src_box->y : 0,
+                                  dst_bl ? (uint32_t)dstx : 0,
+                                  dst_bl ? (uint32_t)dsty : 0,
+                                  src_bl, dst_bl);
+      } else {
+         nv_copy_push_image_2d(&push, class_copy, saddr, daddr,
+                               w * bpp, src_stride, dst_stride, h);
+      }
       nvgpu_push_finish(ctx, &push, true);
       return;
    }
@@ -799,6 +962,8 @@ nvgpu_destroy_context(struct pipe_context *pctx)
 
    util_unreference_framebuffer_state(&ctx->fb);
 
+   if (ctx->tex_pool)
+      nv_tex_pool_destroy(ctx->tex_pool);
    if (ctx->fence)
       nv_fence_destroy(ctx->fence);
    if (ctx->channel)
@@ -874,7 +1039,18 @@ nvgpu_bind_sampler_states(struct pipe_context *pctx,
                           enum pipe_shader_type shader,
                           unsigned start, unsigned num, void **states)
 {
-   (void)pctx; (void)shader; (void)start; (void)num; (void)states;
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   unsigned i;
+   if (shader != PIPE_SHADER_FRAGMENT)
+      return;
+   for (i = 0; i < num; i++) {
+      unsigned slot = start + i;
+      if (slot >= PIPE_MAX_SAMPLERS)
+         break;
+      ctx->sampler_cso[slot] = states ? states[i] : NULL;
+   }
+   if (start + num > ctx->num_sampler_cso)
+      ctx->num_sampler_cso = start + num;
 }
 
 static void

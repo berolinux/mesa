@@ -16,6 +16,7 @@ struct nv_push;
 struct nv_channel;
 struct nv_shader;
 struct nv_fence;
+struct nv_tex_pool;
 
 #define NVGPU_PUSH_DWORDS  (64 * 1024)
 
@@ -54,6 +55,14 @@ struct nvgpu_context {
    /* Program region base for SET_PROGRAM_REGION (first uploaded shader BO) */
    uint64_t program_region_base;
    bool program_region_emitted;
+   bool channel_init_emitted;
+
+   /* Texture/sampler header pool (shared across draws) */
+   struct nv_tex_pool *tex_pool;
+   bool tex_pool_bound;
+   /* Cached sampler state pointers for FS (slot 0..N) */
+   void *sampler_cso[PIPE_MAX_SAMPLERS];
+   unsigned num_sampler_cso;
 
    /* Bound state (minimal) */
    void *fs;
