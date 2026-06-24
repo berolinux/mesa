@@ -2869,8 +2869,10 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
       nv_compute_emit_dispatch_materialized(&cmd->push, &desc, qmd_addr,
                                             qmd_host, class_compute);
    } else if (qmd_addr && indirect_addr) {
-      /* Path B: materialize placeholder QMD, CE-patch grid from indirect BO */
-      nv_qmd_materialize(&desc, qmd_tmp, qmd_host);
+      /* Path B: placeholder QMD + cache inv; CE-patch CTA_RASTER from indirect */
+      nv_qmd_prepare_indirect_placeholder(qmd_tmp, &desc, 0, 0);
+      if (qmd_host)
+         memcpy(qmd_host, qmd_tmp, NV_QMD_BYTES);
       nv_copy_patch_qmd_grid_from_indirect(&cmd->push, class_copy,
                                            indirect_addr, qmd_addr);
       if (class_compute)
@@ -3417,10 +3419,29 @@ nvrm_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
                           uint32_t maxDrawCount, uint32_t stride)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
+   uint32_t rec_stride = stride ? stride : NV_VK_DRAW_INDIRECT_STRIDE_DEFAULT;
    uint32_t n = nvrm_read_draw_count(cmd, countBuffer, countBufferOffset,
                                      maxDrawCount);
-   if (n)
-      nvrm_CmdDrawIndirect(commandBuffer, buffer, offset, n, stride);
+   void *unmap = NULL;
+   const uint32_t *base = NULL;
+
+   if (!cmd || !cmd->push_map || !n || !buf)
+      return;
+   if (cmd->bound_gfx_pipeline) {
+      nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
+   }
+   nvrm_cmd_emit_push_constants(cmd);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   base = nvrm_try_map_indirect_u32(buf, offset, rec_stride * n, &unmap);
+   if (!base)
+      base = nvrm_indirect_path_b_shadow(cmd, buf, offset, rec_stride * n, &unmap);
+   if (base)
+      nv_3d_emit_draw_indirect_count_host(&cmd->push, topo, false, base,
+                                          rec_stride, &n, maxDrawCount);
+   nvrm_unmap_indirect(unmap);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -3431,9 +3452,34 @@ nvrm_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
                                  uint32_t maxDrawCount, uint32_t stride)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
+   uint32_t rec_stride = stride ? stride :
+      NV_VK_DRAWINDEXED_INDIRECT_STRIDE_DEFAULT;
    uint32_t n = nvrm_read_draw_count(cmd, countBuffer, countBufferOffset,
                                      maxDrawCount);
-   if (n)
-      nvrm_CmdDrawIndexedIndirect(commandBuffer, buffer, offset, n, stride);
+   void *unmap = NULL;
+   const uint32_t *base = NULL;
+
+   if (!cmd || !cmd->push_map || !n || !buf)
+      return;
+   if (cmd->bound_gfx_pipeline) {
+      nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
+   }
+   if (cmd->index_valid) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_index_buffer(&cmd->push, cmd->index_addr, cmd->index_size,
+                             cmd->index_type_size);
+   }
+   nvrm_cmd_emit_push_constants(cmd);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   base = nvrm_try_map_indirect_u32(buf, offset, rec_stride * n, &unmap);
+   if (!base)
+      base = nvrm_indirect_path_b_shadow(cmd, buf, offset, rec_stride * n, &unmap);
+   if (base)
+      nv_3d_emit_draw_indirect_count_host(&cmd->push, topo, true, base,
+                                          rec_stride, &n, maxDrawCount);
+   nvrm_unmap_indirect(unmap);
 }
 

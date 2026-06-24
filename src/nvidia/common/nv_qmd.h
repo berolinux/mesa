@@ -473,6 +473,79 @@ nv_qmd_patch_grid(uint32_t qmd[NV_QMD_DWORDS],
 #define NV_QMD_OFF_CTA_RASTER_DEPTH_DW   (14u * 4u)  /* low 16 of bits 463:448 */
 
 /**
+ * QMD completion semaphore release (v02.02 SEMAPHORE_RELEASE_ENABLE0 + address).
+ * Proprietary driver chains dependent QMDs via DEPENDENT_QMD_POINTER; we expose
+ * a single release slot so CPU/GPU can wait on dispatch completion.
+ *
+ * sema_gpu_addr: 16-byte aligned semaphore structure VA (payload in low dword).
+ * sema_value: value written on completion (RELEASE_REDUCTION add/set in full driver).
+ */
+static inline void
+nv_qmd_set_semaphore_release0(uint32_t qmd[NV_QMD_DWORDS],
+                              uint64_t sema_gpu_addr, uint32_t sema_value)
+{
+   if (!qmd)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0, 1);
+   /* Semaphore0 address lower/upper MW fields — approximate dword placement
+    * from clc3c0qmd: often around bits 576+; store in reserved high dwords
+    * used by our materialize path until exact MW is validated. */
+   qmd[20] = (uint32_t)(sema_gpu_addr & 0xffffffffu);
+   qmd[21] = (uint32_t)(sema_gpu_addr >> 32);
+   qmd[22] = sema_value;
+}
+
+/** Enable dependent QMD schedule (pointer in qmd[23..24] as QMD VA >> 8). */
+static inline void
+nv_qmd_set_dependent_qmd(uint32_t qmd[NV_QMD_DWORDS], uint64_t next_qmd_gpu_addr)
+{
+   uint32_t shift8;
+   if (!qmd)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_DEPENDENT_QMD_SCHEDULE_ENABLE, 1);
+   shift8 = (uint32_t)(next_qmd_gpu_addr >> 8);
+   qmd[23] = shift8;
+   qmd[24] = 0;
+}
+
+/**
+ * Invalidate caches on QMD schedule (texture/shader) — set bits in QMD so
+ * SEND_PCAS with invalidate is not strictly required for every launch.
+ */
+static inline void
+nv_qmd_set_cache_invalidate_all(uint32_t qmd[NV_QMD_DWORDS])
+{
+   if (!qmd)
+      return;
+   nv_qmd_set(qmd, NV_QMD_F_INVALIDATE_TEXTURE_HEADER_CACHE, 1);
+   nv_qmd_set(qmd, NV_QMD_F_INVALIDATE_TEXTURE_SAMPLER_CACHE, 1);
+   nv_qmd_set(qmd, NV_QMD_F_INVALIDATE_TEXTURE_DATA_CACHE, 1);
+}
+
+/**
+ * Prepare QMD for indirect dispatch path B: placeholder grid 1x1x1,
+ * cache invalidates on, optional sema release for CPU wait.
+ */
+static inline void
+nv_qmd_prepare_indirect_placeholder(uint32_t qmd[NV_QMD_DWORDS],
+                                    const struct nv_qmd_desc *desc,
+                                    uint64_t sema_gpu_addr,
+                                    uint32_t sema_value)
+{
+   struct nv_qmd_desc d;
+   if (!qmd || !desc)
+      return;
+   d = *desc;
+   d.grid_x = 1;
+   d.grid_y = 1;
+   d.grid_z = 1;
+   nv_qmd_encode(&d, qmd);
+   nv_qmd_set_cache_invalidate_all(qmd);
+   if (sema_gpu_addr)
+      nv_qmd_set_semaphore_release0(qmd, sema_gpu_addr, sema_value);
+}
+
+/**
  * Compute required global LMEM BO size for a given per-thread local requirement.
  *
  * NVIDIA programs SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_* with a per-SM size

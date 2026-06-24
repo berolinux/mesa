@@ -1473,11 +1473,15 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    struct nv_push push;
    struct nvgpu_shader_cso *cs = ctx->cs;
    uint32_t class_compute = di ? di->class_compute : 0;
+   uint32_t class_copy = di ? di->class_copy : 0;
    uint64_t prog = 0;
    uint32_t regs = 16;
    uint32_t gx, gy, gz;
    uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
    uint8_t sass_ver = 0x50;
+   uint32_t qmd_tmp[NV_QMD_DWORDS];
+   bool indirect_gpu_only = false;
+   uint64_t indirect_gpu = 0;
 
    if (!info)
       return;
@@ -1498,7 +1502,7 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    cta_y = info->block[1] ? info->block[1] : 1;
    cta_z = info->block[2] ? info->block[2] : 1;
 
-   /* Indirect compute: host-read indirect resource if mapped (path A) */
+   /* Indirect compute: path A host-read; path B GPU-only via CE patch QMD */
    if (info->indirect) {
       struct nvgpu_resource *ib = nvgpu_resource(info->indirect);
       const uint32_t *ind = NULL;
@@ -1509,6 +1513,11 @@ nvgpu_launch_grid(struct pipe_context *pctx,
          gx = ind[0] ? ind[0] : 1;
          gy = ind[1] ? ind[1] : 1;
          gz = ind[2] ? ind[2] : 1;
+      } else if (ib && ib->bo) {
+         indirect_gpu = nv_rm_bo_gpu_offset(ib->bo) +
+            (uint64_t)info->indirect_offset;
+         indirect_gpu_only = indirect_gpu != 0;
+         gx = gy = gz = 1; /* placeholder until CE patch */
       }
    }
 
@@ -1567,7 +1576,40 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       }
    }
 
-   nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+   if (indirect_gpu_only && indirect_gpu) {
+      /* Path B: placeholder QMD in push BO tail is unavailable; inline QMD
+       * upload with grid 1x1x1 then CE-patch from indirect GPU address.
+       * Without a dedicated qmd_bo we still encode and launch with host grid
+       * fallback when CE patch target is missing. */
+      nv_qmd_prepare_indirect_placeholder(qmd_tmp, &desc, 0, 0);
+      if (class_copy)
+         nv_copy_set_object(&push, class_copy);
+      /* No stable QMD GPU address without scratch BO: fall back to direct
+       * dispatch with grid=1 (safe) unless push BO can host QMD. */
+      if (ctx->push_bo) {
+         uint64_t qmd_addr = nv_rm_bo_gpu_offset(ctx->push_bo);
+         void *qmd_host = nv_rm_bo_map(ctx->push_bo);
+         if (qmd_host) {
+            memcpy(qmd_host, qmd_tmp, NV_QMD_BYTES);
+            nv_rm_bo_unmap(ctx->push_bo);
+         }
+         if (qmd_addr) {
+            nv_copy_patch_qmd_grid_from_indirect(&push, class_copy,
+                                                 indirect_gpu, qmd_addr);
+            if (class_compute)
+               nv_compute_set_object(&push, class_compute);
+            else
+               nv_push_set_subch(&push, NV_PUSH_SUBCH_COMPUTE);
+            nv_compute_emit_inline_qmd_launch(&push, qmd_addr, qmd_tmp, true);
+         } else {
+            nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+         }
+      } else {
+         nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+      }
+   } else {
+      nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+   }
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);
 }

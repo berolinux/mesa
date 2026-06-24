@@ -857,6 +857,88 @@ nv_3d_emit_draw_indexed_indirect_multi(struct nv_push *p, uint32_t topology_nv,
    }
 }
 
+/**
+ * GPU-side indirect draw scaffolding (pre-MME falcon path).
+ *
+ * Proprietary driver uses MME macros / falcon microcode to loop over indirect
+ * draw records entirely on GPU.  Until MME program upload is wired, we provide:
+ *  1. nv_3d_indirect_draw_params — describes indirect buffer layout
+ *  2. nv_3d_emit_draw_indirect_from_shadow_dwords — consume host-mirrored
+ *     records (after CE shadow copy, same as path B in nvrm/nvgpu)
+ *  3. nv_3d_emit_draw_auto_from_count_bo — SET_DRAW_AUTO_* when only a count
+ *     is needed (transform-feedback draw indirect style)
+ *
+ * Callers with a host-mappable indirect BO use path A (emit_draw_indirect_multi
+ * directly).  GPU-only BOs CE-copy into a shadow BO then call (2).
+ */
+struct nv_3d_indirect_draw_params {
+   uint64_t indirect_gpu_addr;  /* source indirect buffer VA */
+   uint64_t shadow_gpu_addr;    /* optional host-mappable shadow VA */
+   uint32_t draw_count;         /* max draws (or exact if known) */
+   uint32_t stride_bytes;       /* 16 non-indexed, 20 indexed */
+   bool indexed;
+   uint32_t topology_nv;
+};
+
+/** Max indirect draws we materialize via shadow/host path in one call */
+#define NV_3D_INDIRECT_MAX_DRAWS_HOST  256u
+
+static inline void
+nv_3d_emit_draw_indirect_from_shadow_dwords(struct nv_push *p,
+                                            uint32_t topology_nv,
+                                            bool indexed,
+                                            const uint32_t *shadow_dwords,
+                                            uint32_t shadow_dword_count,
+                                            uint32_t draw_count,
+                                            uint32_t stride_bytes)
+{
+   uint32_t stride = stride_bytes ? stride_bytes :
+      (indexed ? 20u : 16u);
+   uint32_t stride_dw = stride / 4u;
+   uint32_t max_draws, d;
+   if (!p || !shadow_dwords || !draw_count || !stride_dw)
+      return;
+   max_draws = shadow_dword_count / stride_dw;
+   if (max_draws > draw_count)
+      max_draws = draw_count;
+   if (max_draws > NV_3D_INDIRECT_MAX_DRAWS_HOST)
+      max_draws = NV_3D_INDIRECT_MAX_DRAWS_HOST;
+   if (indexed)
+      nv_3d_emit_draw_indexed_indirect_multi(p, topology_nv, shadow_dwords,
+                                             max_draws, stride);
+   else
+      nv_3d_emit_draw_indirect_multi(p, topology_nv, shadow_dwords,
+                                     max_draws, stride);
+   (void)d;
+}
+
+/**
+ * Indirect multi-draw with optional count buffer (VkDrawIndirectCount path).
+ * When count_host is non-NULL, use *count_host clamped to max_draw_count.
+ * When only count_gpu_addr is known (GPU-only count BO), callers should
+ * CE-copy 4 bytes to shadow then pass count_host; pure GPU loop is MME TBD.
+ */
+static inline void
+nv_3d_emit_draw_indirect_count_host(struct nv_push *p, uint32_t topology_nv,
+                                    bool indexed,
+                                    const uint32_t *indirect_base,
+                                    uint32_t stride_bytes,
+                                    const uint32_t *count_host,
+                                    uint32_t max_draw_count)
+{
+   uint32_t n = max_draw_count;
+   if (count_host && *count_host < n)
+      n = *count_host;
+   if (!n || !indirect_base)
+      return;
+   if (indexed)
+      nv_3d_emit_draw_indexed_indirect_multi(p, topology_nv, indirect_base,
+                                             n, stride_bytes);
+   else
+      nv_3d_emit_draw_indirect_multi(p, topology_nv, indirect_base,
+                                     n, stride_bytes);
+}
+
 static inline void
 nv_3d_emit_draw_index_buffer(struct nv_push *p, uint32_t first, uint32_t count)
 {

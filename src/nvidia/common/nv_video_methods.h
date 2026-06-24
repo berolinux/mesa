@@ -905,6 +905,381 @@ nv_nal_is_slice(const struct nv_nal_unit *nal)
    return nal->nal_type >= 1 && nal->nal_type <= 5;
 }
 
+/* ---- Minimal RBSP / Exp-Golomb reader for SPS/PPS subset parse ---- */
+
+struct nv_rbsp_reader {
+   const uint8_t *data;
+   uint32_t size;
+   uint32_t bit_pos; /* absolute bit index into data */
+};
+
+static inline void
+nv_rbsp_init(struct nv_rbsp_reader *r, const uint8_t *data, uint32_t size)
+{
+   if (!r)
+      return;
+   r->data = data;
+   r->size = size;
+   r->bit_pos = 0;
+}
+
+/** Read up to 32 bits (big-endian within stream). Returns 0 on underrun. */
+static inline uint32_t
+nv_rbsp_u(struct nv_rbsp_reader *r, unsigned nbits)
+{
+   uint32_t v = 0;
+   unsigned i;
+   if (!r || !r->data || !nbits || nbits > 32)
+      return 0;
+   for (i = 0; i < nbits; i++) {
+      uint32_t byte_i = r->bit_pos / 8;
+      uint32_t bit_i = 7 - (r->bit_pos % 8);
+      if (byte_i >= r->size)
+         return v;
+      v = (v << 1) | ((r->data[byte_i] >> bit_i) & 1u);
+      r->bit_pos++;
+   }
+   return v;
+}
+
+static inline uint32_t
+nv_rbsp_ue(struct nv_rbsp_reader *r)
+{
+   unsigned lz = 0;
+   if (!r)
+      return 0;
+   while (lz < 32) {
+      uint32_t byte_i = r->bit_pos / 8;
+      uint32_t bit_i = 7 - (r->bit_pos % 8);
+      uint32_t bit;
+      if (byte_i >= r->size)
+         break;
+      bit = (r->data[byte_i] >> bit_i) & 1u;
+      r->bit_pos++;
+      if (bit)
+         break;
+      lz++;
+   }
+   if (lz == 0)
+      return 0;
+   if (lz >= 32)
+      return 0xffffffffu;
+   return ((1u << lz) - 1u) + nv_rbsp_u(r, lz);
+}
+
+static inline int32_t
+nv_rbsp_se(struct nv_rbsp_reader *r)
+{
+   uint32_t ue = nv_rbsp_ue(r);
+   if (ue & 1u)
+      return (int32_t)((ue + 1u) / 2u);
+   return -(int32_t)(ue / 2u);
+}
+
+/**
+ * Parse H.264 SPS NAL (payload after NAL header byte) into pic_setup fields.
+ * Handles baseline/main/high profile_idc paths conservatively; skips VUI/HRD.
+ * Returns 0 on success, -1 on failure.
+ */
+static inline int
+nv_h264_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
+                      struct nv_nvdec_h264_pic_setup *ps)
+{
+   struct nv_rbsp_reader r;
+   uint8_t profile_idc, level_idc, chroma_format_idc = 1;
+   uint32_t seq_parameter_set_id;
+   uint32_t log2_max_frame_num_minus4 = 0;
+   uint32_t pic_order_cnt_type = 0;
+   uint32_t log2_max_pic_order_cnt_lsb_minus4 = 0;
+   uint32_t delta_pic_order_always_zero_flag = 0;
+   uint32_t max_num_ref_frames;
+   uint32_t pic_width_in_mbs_minus1, pic_height_in_map_units_minus1;
+   uint32_t frame_mbs_only_flag = 1, mb_adaptive_frame_field_flag = 0;
+   uint32_t direct_8x8_inference_flag = 0;
+   if (!nal || nal_size < 4 || !ps)
+      return -1;
+   /* Skip NAL header (1 byte); RBSP may contain emulation prevention — ignore
+    * 0x03 for this minimal path (works for most SPS without EPB in early fields). */
+   nv_rbsp_init(&r, nal + 1, nal_size - 1);
+   profile_idc = (uint8_t)nv_rbsp_u(&r, 8);
+   (void)nv_rbsp_u(&r, 8); /* constraint_set flags + reserved_zero_2bits */
+   level_idc = (uint8_t)nv_rbsp_u(&r, 8);
+   (void)level_idc;
+   seq_parameter_set_id = nv_rbsp_ue(&r);
+   (void)seq_parameter_set_id;
+   if (profile_idc == 100 || profile_idc == 110 || profile_idc == 122 ||
+       profile_idc == 244 || profile_idc == 44 || profile_idc == 83 ||
+       profile_idc == 86 || profile_idc == 118 || profile_idc == 128 ||
+       profile_idc == 138 || profile_idc == 139 || profile_idc == 134) {
+      chroma_format_idc = (uint8_t)nv_rbsp_ue(&r);
+      if (chroma_format_idc == 3)
+         (void)nv_rbsp_u(&r, 1); /* separate_colour_plane_flag */
+      (void)nv_rbsp_ue(&r); /* bit_depth_luma_minus8 */
+      (void)nv_rbsp_ue(&r); /* bit_depth_chroma_minus8 */
+      (void)nv_rbsp_u(&r, 1); /* qpprime_y_zero_transform_bypass_flag */
+      if (nv_rbsp_u(&r, 1)) { /* seq_scaling_matrix_present_flag */
+         unsigned i, n = (chroma_format_idc != 3) ? 8u : 12u;
+         for (i = 0; i < n; i++) {
+            if (nv_rbsp_u(&r, 1)) {
+               unsigned j, last = 8, next = 8, size = (i < 6) ? 16u : 64u;
+               for (j = 0; j < size; j++) {
+                  if (next)
+                     next = (uint32_t)((int32_t)last + nv_rbsp_se(&r)) & 0xffu;
+                  last = next ? next : last;
+               }
+            }
+         }
+      }
+   }
+   log2_max_frame_num_minus4 = nv_rbsp_ue(&r);
+   pic_order_cnt_type = nv_rbsp_ue(&r);
+   if (pic_order_cnt_type == 0)
+      log2_max_pic_order_cnt_lsb_minus4 = nv_rbsp_ue(&r);
+   else if (pic_order_cnt_type == 1) {
+      delta_pic_order_always_zero_flag = nv_rbsp_u(&r, 1);
+      (void)nv_rbsp_se(&r); /* offset_for_non_ref_pic */
+      (void)nv_rbsp_se(&r); /* offset_for_top_to_bottom_field */
+      {
+         uint32_t n = nv_rbsp_ue(&r), k;
+         for (k = 0; k < n && k < 256; k++)
+            (void)nv_rbsp_se(&r);
+      }
+   }
+   max_num_ref_frames = nv_rbsp_ue(&r);
+   (void)nv_rbsp_u(&r, 1); /* gaps_in_frame_num_value_allowed_flag */
+   pic_width_in_mbs_minus1 = nv_rbsp_ue(&r);
+   pic_height_in_map_units_minus1 = nv_rbsp_ue(&r);
+   frame_mbs_only_flag = nv_rbsp_u(&r, 1);
+   if (!frame_mbs_only_flag)
+      mb_adaptive_frame_field_flag = nv_rbsp_u(&r, 1);
+   direct_8x8_inference_flag = nv_rbsp_u(&r, 1);
+   /* frame_cropping / vui ignored */
+
+   nv_nvdec_h264_apply_sps_pps(ps,
+      pic_width_in_mbs_minus1 + 1,
+      pic_height_in_map_units_minus1 + 1,
+      frame_mbs_only_flag,
+      mb_adaptive_frame_field_flag,
+      direct_8x8_inference_flag,
+      chroma_format_idc,
+      log2_max_frame_num_minus4,
+      pic_order_cnt_type,
+      log2_max_pic_order_cnt_lsb_minus4,
+      delta_pic_order_always_zero_flag,
+      0, 0, /* entropy/pic_order from PPS */
+      max_num_ref_frames ? max_num_ref_frames - 1 : 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+   return 0;
+}
+
+/**
+ * Parse H.264 PPS NAL (after header) and merge entropy/ref/qp fields into ps.
+ */
+static inline int
+nv_h264_parse_pps_nal(const uint8_t *nal, uint32_t nal_size,
+                      struct nv_nvdec_h264_pic_setup *ps)
+{
+   struct nv_rbsp_reader r;
+   uint32_t entropy_coding_mode_flag, pic_order_present_flag;
+   uint32_t num_slice_groups_minus1;
+   uint32_t num_ref_idx_l0, num_ref_idx_l1;
+   uint32_t weighted_pred_flag, weighted_bipred_idc;
+   int32_t pic_init_qp_minus26, chroma_qp_index_offset;
+   uint32_t deblocking_filter_control_present_flag;
+   uint32_t constrained_intra_pred_flag, redundant_pic_cnt_present_flag;
+   uint32_t transform_8x8_mode_flag = 0;
+   int32_t second_chroma_qp_index_offset = 0;
+   if (!nal || nal_size < 2 || !ps)
+      return -1;
+   nv_rbsp_init(&r, nal + 1, nal_size - 1);
+   (void)nv_rbsp_ue(&r); /* pic_parameter_set_id */
+   (void)nv_rbsp_ue(&r); /* seq_parameter_set_id */
+   entropy_coding_mode_flag = nv_rbsp_u(&r, 1);
+   pic_order_present_flag = nv_rbsp_u(&r, 1);
+   num_slice_groups_minus1 = nv_rbsp_ue(&r);
+   if (num_slice_groups_minus1 > 0) {
+      uint32_t sgmt = nv_rbsp_ue(&r);
+      if (sgmt == 0) {
+         uint32_t i;
+         for (i = 0; i <= num_slice_groups_minus1 && i < 8; i++)
+            (void)nv_rbsp_ue(&r);
+      } else if (sgmt == 2) {
+         uint32_t i;
+         for (i = 0; i < num_slice_groups_minus1 && i < 8; i++) {
+            (void)nv_rbsp_ue(&r);
+            (void)nv_rbsp_ue(&r);
+         }
+      } else if (sgmt == 3 || sgmt == 4 || sgmt == 5) {
+         (void)nv_rbsp_u(&r, 1);
+         (void)nv_rbsp_ue(&r);
+      } else if (sgmt == 6) {
+         uint32_t pic_size = nv_rbsp_ue(&r), i;
+         unsigned bits = 0, t = num_slice_groups_minus1;
+         while (t) { bits++; t >>= 1; }
+         if (!bits) bits = 1;
+         for (i = 0; i <= pic_size && i < 8192; i++)
+            (void)nv_rbsp_u(&r, bits);
+      }
+   }
+   num_ref_idx_l0 = nv_rbsp_ue(&r);
+   num_ref_idx_l1 = nv_rbsp_ue(&r);
+   weighted_pred_flag = nv_rbsp_u(&r, 1);
+   weighted_bipred_idc = nv_rbsp_u(&r, 2);
+   pic_init_qp_minus26 = nv_rbsp_se(&r);
+   (void)nv_rbsp_se(&r); /* pic_init_qs_minus26 */
+   chroma_qp_index_offset = nv_rbsp_se(&r);
+   deblocking_filter_control_present_flag = nv_rbsp_u(&r, 1);
+   constrained_intra_pred_flag = nv_rbsp_u(&r, 1);
+   redundant_pic_cnt_present_flag = nv_rbsp_u(&r, 1);
+   /* More RBSP data: transform_8x8 + second chroma offset (High profile) */
+   if (r.bit_pos / 8 < r.size) {
+      transform_8x8_mode_flag = nv_rbsp_u(&r, 1);
+      if (nv_rbsp_u(&r, 1)) { /* pic_scaling_matrix_present */
+         unsigned i;
+         for (i = 0; i < 8; i++)
+            if (nv_rbsp_u(&r, 1))
+               ; /* skip scaling list content — approximate */
+      }
+      second_chroma_qp_index_offset = nv_rbsp_se(&r);
+   }
+   ps->entropy_coding_mode_flag = entropy_coding_mode_flag;
+   ps->pic_order_present_flag = pic_order_present_flag;
+   ps->num_slice_groups_minus1 = num_slice_groups_minus1;
+   ps->num_ref_idx_l0_active_minus1 = num_ref_idx_l0;
+   ps->num_ref_idx_l1_active_minus1 = num_ref_idx_l1;
+   ps->l0_ref_count = num_ref_idx_l0 + 1;
+   ps->l1_ref_count = num_ref_idx_l1 + 1;
+   ps->weighted_pred_flag = weighted_pred_flag;
+   ps->weighted_bipred_idc = weighted_bipred_idc;
+   ps->pic_init_qp_minus26 = (uint32_t)pic_init_qp_minus26;
+   ps->chroma_qp_index_offset = (uint32_t)chroma_qp_index_offset;
+   ps->second_chroma_qp_index_offset = (uint32_t)second_chroma_qp_index_offset;
+   ps->deblocking_filter_control_present_flag =
+      deblocking_filter_control_present_flag;
+   ps->constrained_intra_pred_flag = constrained_intra_pred_flag;
+   ps->redundant_pic_cnt_present_flag = redundant_pic_cnt_present_flag;
+   ps->transform_8x8_mode_flag = transform_8x8_mode_flag;
+   return 0;
+}
+
+/**
+ * Scan Annex-B H.264 bitstream and fill pic_setup from first SPS+PPS pair.
+ * Returns number of parameter sets applied (0, 1, or 2).
+ */
+static inline unsigned
+nv_h264_pic_setup_from_annexb(const uint8_t *buf, uint32_t buf_size,
+                              struct nv_nvdec_h264_pic_setup *ps)
+{
+   const uint8_t *sps = NULL, *pps = NULL;
+   uint32_t sps_sz = 0, pps_sz = 0;
+   unsigned n = 0;
+   if (!ps)
+      return 0;
+   memset(ps, 0, sizeof(*ps));
+   nv_nal_find_param_sets_annexb(buf, buf_size, false,
+                                 &sps, &sps_sz, &pps, &pps_sz, NULL, NULL);
+   if (sps && sps_sz && nv_h264_parse_sps_nal(sps, sps_sz, ps) == 0)
+      n++;
+   if (pps && pps_sz && nv_h264_parse_pps_nal(pps, pps_sz, ps) == 0)
+      n++;
+   return n;
+}
+
+/**
+ * HEVC SPS subset: pic size, chroma, bit depths, coding/transform block sizes.
+ * Skips scaling lists / ST RPS / VUI. Returns 0 on success.
+ */
+static inline int
+nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
+                      struct nv_nvdec_hevc_pic_setup *ps)
+{
+   struct nv_rbsp_reader r;
+   uint32_t chroma_format_idc = 1;
+   uint32_t pic_width, pic_height;
+   uint32_t bit_depth_luma_minus8 = 0, bit_depth_chroma_minus8 = 0;
+   uint32_t log2_min_luma_coding_block_size_minus3;
+   uint32_t log2_diff_max_min_luma_coding_block_size;
+   uint32_t log2_min_transform_block_size_minus2;
+   uint32_t log2_diff_max_min_transform_block_size;
+   uint32_t max_transform_hierarchy_depth_inter;
+   uint32_t max_transform_hierarchy_depth_intra;
+   if (!nal || nal_size < 4 || !ps)
+      return -1;
+   /* HEVC NAL header is 2 bytes */
+   nv_rbsp_init(&r, nal + 2, nal_size > 2 ? nal_size - 2 : 0);
+   (void)nv_rbsp_u(&r, 4); /* sps_video_parameter_set_id */
+   (void)nv_rbsp_u(&r, 3); /* sps_max_sub_layers_minus1 */
+   (void)nv_rbsp_u(&r, 1); /* sps_temporal_id_nesting_flag */
+   /* profile_tier_level: 2+1+5 + 32 + 1 + 1 + 1 + 1 + 44 + 8 = skip conservatively */
+   (void)nv_rbsp_u(&r, 2);
+   (void)nv_rbsp_u(&r, 1);
+   (void)nv_rbsp_u(&r, 5);
+   (void)nv_rbsp_u(&r, 32);
+   (void)nv_rbsp_u(&r, 1);
+   (void)nv_rbsp_u(&r, 1);
+   (void)nv_rbsp_u(&r, 1);
+   (void)nv_rbsp_u(&r, 1);
+   (void)nv_rbsp_u(&r, 44);
+   (void)nv_rbsp_u(&r, 8); /* general_level_idc */
+   (void)nv_rbsp_ue(&r); /* sps_seq_parameter_set_id */
+   chroma_format_idc = nv_rbsp_ue(&r);
+   if (chroma_format_idc == 3)
+      (void)nv_rbsp_u(&r, 1);
+   pic_width = nv_rbsp_ue(&r);
+   pic_height = nv_rbsp_ue(&r);
+   if (nv_rbsp_u(&r, 1)) { /* conformance_window_flag */
+      (void)nv_rbsp_ue(&r);
+      (void)nv_rbsp_ue(&r);
+      (void)nv_rbsp_ue(&r);
+      (void)nv_rbsp_ue(&r);
+   }
+   bit_depth_luma_minus8 = nv_rbsp_ue(&r);
+   bit_depth_chroma_minus8 = nv_rbsp_ue(&r);
+   (void)nv_rbsp_ue(&r); /* log2_max_pic_order_cnt_lsb_minus4 */
+   if (nv_rbsp_u(&r, 1)) { /* sps_sub_layer_ordering_info_present_flag */
+      unsigned i;
+      for (i = 0; i < 1; i++) {
+         (void)nv_rbsp_ue(&r);
+         (void)nv_rbsp_ue(&r);
+         (void)nv_rbsp_ue(&r);
+      }
+   }
+   log2_min_luma_coding_block_size_minus3 = nv_rbsp_ue(&r);
+   log2_diff_max_min_luma_coding_block_size = nv_rbsp_ue(&r);
+   log2_min_transform_block_size_minus2 = nv_rbsp_ue(&r);
+   log2_diff_max_min_transform_block_size = nv_rbsp_ue(&r);
+   max_transform_hierarchy_depth_inter = nv_rbsp_ue(&r);
+   max_transform_hierarchy_depth_intra = nv_rbsp_ue(&r);
+   nv_nvdec_hevc_apply_sps_pps(ps, pic_width, pic_height, chroma_format_idc,
+      bit_depth_luma_minus8, bit_depth_chroma_minus8,
+      log2_min_luma_coding_block_size_minus3,
+      log2_diff_max_min_luma_coding_block_size,
+      log2_min_transform_block_size_minus2,
+      log2_diff_max_min_transform_block_size,
+      max_transform_hierarchy_depth_intra,
+      max_transform_hierarchy_depth_inter,
+      /* amp, sao, pcm, pcm_lf, strong_intra, temporal_mvp, log2_poc, num_strps,
+       * num_ltr, l0, l1, init_qp, dependent_slice, sign_data_hiding */
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+   return 0;
+}
+
+static inline unsigned
+nv_hevc_pic_setup_from_annexb(const uint8_t *buf, uint32_t buf_size,
+                              struct nv_nvdec_hevc_pic_setup *ps)
+{
+   const uint8_t *sps = NULL;
+   uint32_t sps_sz = 0;
+   if (!ps)
+      return 0;
+   memset(ps, 0, sizeof(*ps));
+   nv_nal_find_param_sets_annexb(buf, buf_size, true,
+                                 &sps, &sps_sz, NULL, NULL, NULL, NULL);
+   if (sps && sps_sz && nv_hevc_parse_sps_nal(sps, sps_sz, ps) == 0)
+      return 1;
+   return 0;
+}
+
 /* Build frame_setup + write pic_setup BO from codec struct; returns 0 on success */
 static inline int
 nv_nvdec_fill_frame_from_h264(struct nv_nvdec_frame_setup *fs,
