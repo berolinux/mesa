@@ -285,6 +285,45 @@ nvgpu_create_fs_state(struct pipe_context *pctx,
    return nvgpu_create_shader_state(pctx, cso, NV_SHADER_KIND_FRAGMENT);
 }
 
+static void *
+nvgpu_create_gs_state(struct pipe_context *pctx,
+                      const struct pipe_shader_state *cso)
+{
+   return nvgpu_create_shader_state(pctx, cso, NV_SHADER_KIND_GEOMETRY);
+}
+
+static void *
+nvgpu_create_tcs_state(struct pipe_context *pctx,
+                       const struct pipe_shader_state *cso)
+{
+   return nvgpu_create_shader_state(pctx, cso, NV_SHADER_KIND_TESS_CTRL);
+}
+
+static void *
+nvgpu_create_tes_state(struct pipe_context *pctx,
+                       const struct pipe_shader_state *cso)
+{
+   return nvgpu_create_shader_state(pctx, cso, NV_SHADER_KIND_TESS_EVAL);
+}
+
+static void
+nvgpu_bind_gs_state(struct pipe_context *pctx, void *s)
+{
+   nvgpu_context(pctx)->gs = s;
+}
+
+static void
+nvgpu_bind_tcs_state(struct pipe_context *pctx, void *s)
+{
+   nvgpu_context(pctx)->tcs = s;
+}
+
+static void
+nvgpu_bind_tes_state(struct pipe_context *pctx, void *s)
+{
+   nvgpu_context(pctx)->tes = s;
+}
+
 static void
 nvgpu_delete_shader_state(struct pipe_context *pctx, void *s)
 {
@@ -674,17 +713,44 @@ nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
       nv_tex_invalidate_caches(push);
 }
 
-/* Emit bound VS/FS via SET_PIPELINE_SHADER (placeholder code until compiler). */
+/* Bind CB0 for a shader stage if present. */
+static void
+nvgpu_emit_cb0(struct nvgpu_context *ctx, struct nv_push *push,
+               mesa_shader_stage stage, unsigned bind_group)
+{
+   if (!ctx->cb[stage][0].buffer)
+      return;
+   struct nvgpu_resource *res = nvgpu_resource(ctx->cb[stage][0].buffer);
+   uint64_t addr = (res ? res->gpu_offset : 0) + ctx->cb[stage][0].buffer_offset;
+   uint32_t sz = ctx->cb[stage][0].buffer_size;
+   if (!sz && res)
+      sz = (uint32_t)res->b.b.width0;
+   if (sz) {
+      nv_3d_set_constant_buffer_selector(push, (sz + 255u) & ~255u, addr);
+      nv_3d_bind_group_constant_buffer(push, bind_group, 0, true);
+   }
+}
+
+/* Emit bound VS/TCS/TES/GS/FS via SET_PIPELINE_SHADER. */
 static void
 nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
 {
    struct nvgpu_shader_cso *vs = ctx->vs;
+   struct nvgpu_shader_cso *tcs = ctx->tcs;
+   struct nvgpu_shader_cso *tes = ctx->tes;
+   struct nvgpu_shader_cso *gs = ctx->gs;
    struct nvgpu_shader_cso *fs = ctx->fs;
    uint64_t region = 0;
    bool region_once = false;
 
    if (vs)
       nvgpu_ensure_shader_uploaded(ctx, vs);
+   if (tcs)
+      nvgpu_ensure_shader_uploaded(ctx, tcs);
+   if (tes)
+      nvgpu_ensure_shader_uploaded(ctx, tes);
+   if (gs)
+      nvgpu_ensure_shader_uploaded(ctx, gs);
    if (fs)
       nvgpu_ensure_shader_uploaded(ctx, fs);
 
@@ -694,10 +760,23 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
       region_once = true;
    }
 
-   /* Disable unused geometry/tess stages */
-   nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS_INIT);
-   nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS);
-   nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_GEOMETRY);
+   /* Tess/geom: enable only when CSO present, else disable stage */
+   if (tcs && tcs->nvsh && tcs->nvsh->uploaded) {
+      nv_shader_emit_bind(push, tcs->nvsh, region_once ? region : 0, -1);
+      region_once = false;
+   } else {
+      nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS_INIT);
+   }
+   if (tes && tes->nvsh && tes->nvsh->uploaded) {
+      nv_shader_emit_bind(push, tes->nvsh, 0, -1);
+   } else {
+      nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS);
+   }
+   if (gs && gs->nvsh && gs->nvsh->uploaded) {
+      nv_shader_emit_bind(push, gs->nvsh, 0, -1);
+   } else {
+      nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_GEOMETRY);
+   }
 
    if (vs && vs->nvsh && vs->nvsh->uploaded) {
       nv_shader_emit_bind(push, vs->nvsh, region_once ? region : 0, -1);
@@ -706,33 +785,15 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
    if (fs && fs->nvsh && fs->nvsh->uploaded)
       nv_shader_emit_bind(push, fs->nvsh, region_once ? region : 0, -1);
 
-   /* Application constant buffers: bind CB0 for VS/FS if present */
-   if (ctx->cb[MESA_SHADER_VERTEX][0].buffer) {
-      struct nvgpu_resource *res =
-         nvgpu_resource(ctx->cb[MESA_SHADER_VERTEX][0].buffer);
-      uint64_t addr = (res ? res->gpu_offset : 0) +
-                      ctx->cb[MESA_SHADER_VERTEX][0].buffer_offset;
-      uint32_t sz = ctx->cb[MESA_SHADER_VERTEX][0].buffer_size;
-      if (!sz && res)
-         sz = (uint32_t)res->b.b.width0;
-      if (sz) {
-         nv_3d_set_constant_buffer_selector(push, (sz + 255u) & ~255u, addr);
-         nv_3d_bind_group_constant_buffer(push, NV_3D_BIND_GROUP_VERTEX, 0, true);
-      }
-   }
-   if (ctx->cb[MESA_SHADER_FRAGMENT][0].buffer) {
-      struct nvgpu_resource *res =
-         nvgpu_resource(ctx->cb[MESA_SHADER_FRAGMENT][0].buffer);
-      uint64_t addr = (res ? res->gpu_offset : 0) +
-                      ctx->cb[MESA_SHADER_FRAGMENT][0].buffer_offset;
-      uint32_t sz = ctx->cb[MESA_SHADER_FRAGMENT][0].buffer_size;
-      if (!sz && res)
-         sz = (uint32_t)res->b.b.width0;
-      if (sz) {
-         nv_3d_set_constant_buffer_selector(push, (sz + 255u) & ~255u, addr);
-         nv_3d_bind_group_constant_buffer(push, NV_3D_BIND_GROUP_PIXEL, 0, true);
-      }
-   }
+   /* Application constant buffers: CB0 per active stage */
+   nvgpu_emit_cb0(ctx, push, MESA_SHADER_VERTEX, NV_3D_BIND_GROUP_VERTEX);
+   if (tcs)
+      nvgpu_emit_cb0(ctx, push, MESA_SHADER_TESS_CTRL, NV_3D_BIND_GROUP_VERTEX);
+   if (tes)
+      nvgpu_emit_cb0(ctx, push, MESA_SHADER_TESS_EVAL, NV_3D_BIND_GROUP_VERTEX);
+   if (gs)
+      nvgpu_emit_cb0(ctx, push, MESA_SHADER_GEOMETRY, NV_3D_BIND_GROUP_VERTEX);
+   nvgpu_emit_cb0(ctx, push, MESA_SHADER_FRAGMENT, NV_3D_BIND_GROUP_PIXEL);
 }
 
 static void
@@ -1356,6 +1417,15 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.create_fs_state = nvgpu_create_fs_state;
    ctx->base.bind_fs_state = nvgpu_bind_fs_state;
    ctx->base.delete_fs_state = nvgpu_delete_shader_state;
+   ctx->base.create_gs_state = nvgpu_create_gs_state;
+   ctx->base.bind_gs_state = nvgpu_bind_gs_state;
+   ctx->base.delete_gs_state = nvgpu_delete_shader_state;
+   ctx->base.create_tcs_state = nvgpu_create_tcs_state;
+   ctx->base.bind_tcs_state = nvgpu_bind_tcs_state;
+   ctx->base.delete_tcs_state = nvgpu_delete_shader_state;
+   ctx->base.create_tes_state = nvgpu_create_tes_state;
+   ctx->base.bind_tes_state = nvgpu_bind_tes_state;
+   ctx->base.delete_tes_state = nvgpu_delete_shader_state;
    ctx->base.create_vertex_elements_state = nvgpu_create_vertex_elements_state;
    ctx->base.bind_vertex_elements_state = nvgpu_bind_vertex_elements_state;
    ctx->base.delete_vertex_elements_state = nvgpu_delete_vertex_elements_state;
