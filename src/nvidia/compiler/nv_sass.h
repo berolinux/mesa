@@ -178,6 +178,21 @@ extern "C" {
 #define NV_SASS_SR_NCTAID_X     43
 #define NV_SASS_SR_NCTAID_Y     44
 #define NV_SASS_SR_NCTAID_Z     45
+/* Graphics / fragment specials (Maxwell+ S2R indices; refined from
+ * public SM docs + binary compiler output patterns) */
+#define NV_SASS_SR_INVID        29   /* invocation / instance-related */
+#define NV_SASS_SR_VTXID        30   /* vertex index within draw */
+#define NV_SASS_SR_PRIMID       31   /* primitive ID */
+#define NV_SASS_SR_YDIR         48   /* fragment Y direction / front face proxy */
+#define NV_SASS_SR_THREADKILL   94   /* same as THREAD_KILL */
+#define NV_SASS_SR_WARPERROR    96
+#define NV_SASS_SR_PM1          5
+#define NV_SASS_SR_PM2          6
+#define NV_SASS_SR_PM3          7
+#define NV_SASS_SR_PM4          8
+#define NV_SASS_SR_PM5          9
+#define NV_SASS_SR_PM6          10
+#define NV_SASS_SR_PM7          11
 
 struct nv_sass_buf {
    uint32_t *dwords;     /* owned array; 2 dwords per instruction */

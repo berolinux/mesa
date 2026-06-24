@@ -666,6 +666,46 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
       break;
 
+   case nir_intrinsic_image_load:
+   case nir_intrinsic_bindless_image_load:
+      /* Image load via LDG from coordinate/address in src[0]; binding in src[0] descriptor */
+      rd = ssa_reg_dst(&intr->def);
+      ra = src_reg_reload(sb, &intr->src[0]);
+      ok = nv_sass_emit_ldg_u32(sb, rd, ra);
+      break;
+
+   case nir_intrinsic_image_store:
+   case nir_intrinsic_bindless_image_store:
+      ra = src_reg_reload(sb, &intr->src[0]); /* address / coord proxy */
+      rb = src_reg_reload(sb, &intr->src[3]); /* data (NIR image_store src layout) */
+      return nv_sass_emit_stg_u32(sb, ra, rb);
+
+   case nir_intrinsic_image_atomic:
+   case nir_intrinsic_image_atomic_swap:
+   case nir_intrinsic_bindless_image_atomic:
+   case nir_intrinsic_bindless_image_atomic_swap: {
+      uint8_t atom_op = NV_SASS_ATOM_OP_ADD;
+      rd = ssa_reg_dst(&intr->def);
+      ra = src_reg_reload(sb, &intr->src[0]);
+      rb = src_reg_reload(sb, &intr->src[3]);
+      if (op == nir_intrinsic_image_atomic_swap ||
+          op == nir_intrinsic_bindless_image_atomic_swap)
+         atom_op = NV_SASS_ATOM_OP_CAS;
+      ok = nv_sass_emit_atom(sb, rd, ra, rb, atom_op);
+      break;
+   }
+
+   case nir_intrinsic_image_size:
+   case nir_intrinsic_bindless_image_size:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_mov_ri(sb, rd, 0); /* size from descriptor TBD */
+      break;
+
+   case nir_intrinsic_image_samples:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      break;
+
    case nir_intrinsic_demote:
    case nir_intrinsic_terminate:
    case nir_intrinsic_terminate_if:
@@ -681,20 +721,28 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_vertex_id:
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X); /* proxy; real is VTXID SR */
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_VTXID);
       break;
 
    case nir_intrinsic_load_instance_id:
+   case nir_intrinsic_load_base_instance:
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_CTAID_X); /* proxy for instance */
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_INVID);
+      break;
+
+   case nir_intrinsic_load_primitive_id:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PRIMID);
+      break;
+
+   case nir_intrinsic_load_front_face:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_YDIR);
       break;
 
    case nir_intrinsic_load_frag_coord:
-   case nir_intrinsic_load_front_face:
-   case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_draw_id:
-   case nir_intrinsic_load_primitive_id:
    case nir_intrinsic_load_view_index:
    case nir_intrinsic_load_per_vertex_input:
    case nir_intrinsic_store_deref:
@@ -751,6 +799,19 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
    case nir_texop_txf:
    case nir_texop_txf_ms:
       ok = nv_sass_emit_tld(sb, rd, ra, tex_idx);
+      break;
+   case nir_texop_txs:
+   case nir_texop_query_levels:
+   case nir_texop_texture_samples:
+      /* Texture query: return placeholder; full query needs TLD4/TXQ class */
+      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      break;
+   case nir_texop_lod:
+      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      break;
+   case nir_texop_tg4:
+      /* Gather4: use TEX class (gather mode TBD in encoding) */
+      ok = nv_sass_emit_tex(sb, rd, ra, tex_idx);
       break;
    case nir_texop_tex:
    case nir_texop_txb:
