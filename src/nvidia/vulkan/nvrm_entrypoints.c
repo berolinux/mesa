@@ -75,6 +75,12 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdEndRendering, nvrm_CmdEndRendering);
    NVRM_SET(CmdDraw, nvrm_CmdDraw);
    NVRM_SET(CmdDrawIndexed, nvrm_CmdDrawIndexed);
+   NVRM_SET(CmdDrawIndirect, nvrm_CmdDrawIndirect);
+   NVRM_SET(CmdDrawIndexedIndirect, nvrm_CmdDrawIndexedIndirect);
+   NVRM_SET(CmdSetViewport, nvrm_CmdSetViewport);
+   NVRM_SET(CmdSetScissor, nvrm_CmdSetScissor);
+   NVRM_SET(CmdSetPrimitiveRestartEnable, nvrm_CmdSetPrimitiveRestartEnable);
+   NVRM_SET(CmdPushConstants, nvrm_CmdPushConstants);
    NVRM_SET(CmdDispatch, nvrm_CmdDispatch);
    NVRM_SET(CmdDispatchBase, nvrm_CmdDispatchBase);
    NVRM_SET(CmdDispatchIndirect, nvrm_CmdDispatchIndirect);

@@ -14,7 +14,8 @@
 
 #define NVRM_CMD_PUSH_DWORDS (32 * 1024)
 #define NVRM_QMD_SCRATCH_SIZE  4096  /* 256B QMD + padding, 256B aligned */
-#define NVRM_LMEM_SCRATCH_SIZE (256 * 1024)  /* global LMEM window for spills */
+/* Fallback LMEM BO when device SM count unknown (covers ~2 SMs at min granule) */
+#define NVRM_LMEM_SCRATCH_SIZE (2 * NV_LMEM_MIN_PER_SM_BYTES)
 
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
@@ -22,6 +23,9 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    struct nv_rm_bo_req req;
+   const struct nv_device_info *info;
+   uint32_t sm_count = 2;
+   uint64_t lmem_need;
    (void)pBeginInfo;
 
    if (!cmd->push_bo) {
@@ -49,21 +53,55 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       req.map_gpu_va = true;
       cmd->qmd_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
    }
-   /* Global LMEM backing for compute spill/scratch (SET_SHADER_LOCAL_MEMORY*) */
+   /* Global LMEM backing sized for SM count * per-SM window (conservative spill) */
+   info = cmd->device ? cmd->device->info : NULL;
+   if (info && info->tpc_count)
+      sm_count = info->tpc_count;
+   lmem_need = nv_lmem_total_bo_bytes(0 /* min spill */, sm_count);
+   if (lmem_need < NVRM_LMEM_SCRATCH_SIZE)
+      lmem_need = NVRM_LMEM_SCRATCH_SIZE;
+   if (lmem_need > 0x10000000ull) /* 256 MiB hard cap for cmd-buffer alloc */
+      lmem_need = 0x10000000ull;
    if (!cmd->lmem_bo && cmd->device && cmd->device->rm) {
       memset(&req, 0, sizeof(req));
-      req.size = NVRM_LMEM_SCRATCH_SIZE;
+      req.size = (uint32_t)lmem_need;
       req.alignment = 4096;
       req.vram = true;
       req.cpu_access = false;
       req.no_scanout = true;
       req.map_gpu_va = true;
       cmd->lmem_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+      if (cmd->lmem_bo)
+         cmd->lmem_bo_size = (uint32_t)lmem_need;
+   } else if (cmd->lmem_bo && cmd->lmem_bo_size < (uint32_t)lmem_need) {
+      /* Re-alloc larger if previous begin used smaller size (rare) */
+      nv_rm_bo_free(cmd->lmem_bo);
+      cmd->lmem_bo = NULL;
+      memset(&req, 0, sizeof(req));
+      req.size = (uint32_t)lmem_need;
+      req.alignment = 4096;
+      req.vram = true;
+      req.cpu_access = false;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      cmd->lmem_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+      if (cmd->lmem_bo)
+         cmd->lmem_bo_size = (uint32_t)lmem_need;
    }
    cmd->push_dw_used = 0;
    cmd->compute_init_done = false;
    cmd->lmem_programmed = false;
+   cmd->lmem_local_req = 0;
    cmd->bound_compute_pipeline = NULL;
+   cmd->bound_gfx_pipeline = NULL;
+   cmd->bound_set_count = 0;
+   cmd->dynamic_offset_count = 0;
+   cmd->index_valid = false;
+   cmd->push_const_dwords = 0;
+   cmd->push_const_dirty = false;
+   cmd->prim_restart_enable = false;
+   memset(cmd->bound_sets, 0, sizeof(cmd->bound_sets));
+   memset(cmd->vtx_binding, 0, sizeof(cmd->vtx_binding));
    if (cmd->push_map)
       nv_push_init(&cmd->push, cmd->push_map, cmd->push_dw_cap);
    return VK_SUCCESS;

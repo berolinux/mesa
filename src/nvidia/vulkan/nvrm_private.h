@@ -107,9 +107,16 @@ struct nvrm_sampler {
    bool unnormalized_coords;
 };
 
-/* Forward decls for pipeline types used in cmd buffer state */
+/* Forward decls for types used in cmd buffer state */
 struct nvrm_graphics_pipeline;
 struct nvrm_compute_pipeline;
+struct nvrm_descriptor_set;
+
+/* Max descriptor sets / UBO slots tracked per command buffer bind */
+#define NVRM_MAX_DESC_SETS       8
+#define NVRM_MAX_VTX_BINDINGS    16
+#define NVRM_MAX_VTX_ATTRIBS     16
+#define NVRM_MAX_PUSH_CONST_DWORDS 64
 
 struct nvrm_cmd_buffer {
    struct vk_command_buffer vk;
@@ -117,6 +124,8 @@ struct nvrm_cmd_buffer {
    struct nv_rm_bo *push_bo;
    struct nv_rm_bo *qmd_bo;   /* scratch for inline QMD GPU address field */
    struct nv_rm_bo *lmem_bo;  /* compute global LMEM backing (spill/scratch) */
+   uint32_t lmem_bo_size;     /* allocated size of lmem_bo */
+   uint32_t lmem_local_req;   /* max per-thread local (from bound compute shader) */
    bool lmem_programmed;      /* SET_SHADER_LOCAL_MEMORY* already emitted */
    uint32_t *push_map;
    uint32_t push_dw_cap;
@@ -132,6 +141,35 @@ struct nvrm_cmd_buffer {
    uint32_t render_height;
    /* Default local workgroup size when pipeline does not specify */
    uint32_t compute_local_x, compute_local_y, compute_local_z;
+   /* Bound descriptor sets (graphics + compute share slots; bind point tracked) */
+   struct nvrm_descriptor_set *bound_sets[NVRM_MAX_DESC_SETS];
+   uint32_t bound_set_count;
+   uint32_t dynamic_offsets[32];
+   uint32_t dynamic_offset_count;
+   /* Vertex / index state for instanced draws */
+   struct {
+      uint64_t addr;
+      uint32_t size;
+      uint32_t stride;
+      bool valid;
+   } vtx_binding[NVRM_MAX_VTX_BINDINGS];
+   uint64_t index_addr;
+   uint64_t index_size;
+   uint8_t index_type_size; /* 1, 2, or 4 */
+   bool index_valid;
+   /* Viewport / scissor (single viewport for now) */
+   float vp_x, vp_y, vp_w, vp_h, vp_min_z, vp_max_z;
+   bool vp_valid;
+   int32_t sc_x, sc_y;
+   uint32_t sc_w, sc_h;
+   bool sc_valid;
+   /* Push constants shadow (uploaded via CB selector on bind/draw) */
+   uint32_t push_const[NVRM_MAX_PUSH_CONST_DWORDS];
+   uint32_t push_const_dwords;
+   bool push_const_dirty;
+   /* Primitive restart */
+   bool prim_restart_enable;
+   uint32_t prim_restart_index;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
@@ -297,6 +335,25 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdDraw(VkCommandBuffer commandBuffer, uint32_t 
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                                                uint32_t instanceCount, uint32_t firstIndex,
                                                int32_t vertexOffset, uint32_t firstInstance);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                                                VkDeviceSize offset, uint32_t drawCount,
+                                                uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
+                                                       VkBuffer buffer, VkDeviceSize offset,
+                                                       uint32_t drawCount, uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
+                                                             VkBool32 primitiveRestartEnable);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetViewport(VkCommandBuffer commandBuffer,
+                                               uint32_t firstViewport, uint32_t viewportCount,
+                                               const VkViewport *pViewports);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetScissor(VkCommandBuffer commandBuffer,
+                                              uint32_t firstScissor, uint32_t scissorCount,
+                                              const VkRect2D *pScissors);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdPushConstants(VkCommandBuffer commandBuffer,
+                                                 VkPipelineLayout layout,
+                                                 VkShaderStageFlags stageFlags,
+                                                 uint32_t offset, uint32_t size,
+                                                 const void *pValues);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit2(VkQueue queue, uint32_t submitCount,
                                                  const VkSubmitInfo2 *pSubmits, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,

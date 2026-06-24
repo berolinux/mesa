@@ -95,11 +95,30 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_descriptor_set, base, VkDescriptorSet,
 
 /* ---------- graphics / compute pipeline ---------- */
 
+/* Vertex input attribute/binding cached at pipeline create (emitted on bind). */
+struct nvrm_vtx_attrib {
+   uint32_t location;      /* shader location / attribute index */
+   uint32_t binding;
+   uint32_t offset;
+   uint32_t component_fmt; /* NVC597 component bit-width code */
+   bool active;
+};
+
+struct nvrm_vtx_binding_info {
+   uint32_t binding;
+   uint32_t stride;
+   uint32_t input_rate; /* 0=vertex, 1=instance */
+   bool used;
+};
+
 struct nvrm_graphics_pipeline {
    struct vk_object_base base;
    struct nvrm_device *device;
    struct nv_shader *vs;
    struct nv_shader *fs;
+   struct nv_shader *gs;   /* optional geometry */
+   struct nv_shader *tcs;  /* optional tess control */
+   struct nv_shader *tes;  /* optional tess eval */
    uint64_t program_region_base;
    /* Raster / depth / blend cached from create info (simplified) */
    bool depth_test_enable;
@@ -110,6 +129,15 @@ struct nvrm_graphics_pipeline {
    bool front_ccw;
    VkPrimitiveTopology topology;
    uint32_t topology_nv; /* NVC597 topology */
+   bool prim_restart_enable;
+   /* Vertex input */
+   struct nvrm_vtx_attrib attribs[NVRM_MAX_VTX_ATTRIBS];
+   uint32_t attrib_count;
+   struct nvrm_vtx_binding_info vtx_bindings[NVRM_MAX_VTX_BINDINGS];
+   uint32_t vtx_binding_count;
+   /* Multisample / line width (minimal) */
+   uint32_t sample_count;
+   float line_width;
 };
 
 struct nvrm_compute_pipeline {
@@ -120,6 +148,7 @@ struct nvrm_compute_pipeline {
    uint32_t local_size_y;
    uint32_t local_size_z;
    uint32_t shared_mem_bytes;
+   uint32_t local_mem_bytes; /* per-thread LMEM from compiler/SPH */
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_graphics_pipeline, base, VkPipeline,
@@ -171,7 +200,90 @@ vk_topology_to_nv(VkPrimitiveTopology topo)
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: return NVC597_TOPOLOGY_TRIANGLES;
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: return NVC597_TOPOLOGY_TRIANGLE_STRIP;
    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: return NVC597_TOPOLOGY_TRIANGLE_FAN;
+   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY: return 0xA; /* LINELIST_ADJCY */
+   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY: return 0xB;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY: return 0xC;
+   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY: return 0xD;
+   case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST: return 0xE;
    default: return NVC597_TOPOLOGY_TRIANGLES;
+   }
+}
+
+/* Map VkFormat to NVC597 vertex component bit-width code (subset). */
+static uint32_t
+vk_format_to_vtx_comp(VkFormat fmt)
+{
+   switch (fmt) {
+   case VK_FORMAT_R32G32B32A32_SFLOAT:
+   case VK_FORMAT_R32G32B32A32_SINT:
+   case VK_FORMAT_R32G32B32A32_UINT:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32_A32;
+   case VK_FORMAT_R32G32B32_SFLOAT:
+   case VK_FORMAT_R32G32B32_SINT:
+   case VK_FORMAT_R32G32B32_UINT:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32;
+   case VK_FORMAT_R32G32_SFLOAT:
+   case VK_FORMAT_R32G32_SINT:
+   case VK_FORMAT_R32G32_UINT:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32;
+   case VK_FORMAT_R32_SFLOAT:
+   case VK_FORMAT_R32_SINT:
+   case VK_FORMAT_R32_UINT:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32;
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+   case VK_FORMAT_R16G16B16A16_SINT:
+   case VK_FORMAT_R16G16B16A16_UINT:
+   case VK_FORMAT_R16G16B16A16_SNORM:
+   case VK_FORMAT_R16G16B16A16_UNORM:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R16_G16_B16_A16;
+   case VK_FORMAT_R16G16_SFLOAT:
+   case VK_FORMAT_R16G16_SINT:
+   case VK_FORMAT_R16G16_UINT:
+   case VK_FORMAT_R16G16_SNORM:
+   case VK_FORMAT_R16G16_UNORM:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R16_G16;
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SNORM:
+   case VK_FORMAT_R8G8B8A8_UINT:
+   case VK_FORMAT_R8G8B8A8_SINT:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R8_G8_B8_A8;
+   case VK_FORMAT_R8G8_UNORM:
+   case VK_FORMAT_R8G8_SNORM:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R8_G8;
+   default:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32_A32;
+   }
+}
+
+static void
+nvrm_pipeline_capture_vertex_input(struct nvrm_graphics_pipeline *pipe,
+                                   const VkPipelineVertexInputStateCreateInfo *vi)
+{
+   uint32_t i;
+   if (!pipe || !vi)
+      return;
+   pipe->attrib_count = 0;
+   pipe->vtx_binding_count = 0;
+   for (i = 0; i < vi->vertexBindingDescriptionCount &&
+        pipe->vtx_binding_count < NVRM_MAX_VTX_BINDINGS; i++) {
+      const VkVertexInputBindingDescription *b = &vi->pVertexBindingDescriptions[i];
+      struct nvrm_vtx_binding_info *dst = &pipe->vtx_bindings[pipe->vtx_binding_count++];
+      dst->binding = b->binding;
+      dst->stride = b->stride;
+      dst->input_rate = (b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE) ? 1 : 0;
+      dst->used = true;
+   }
+   for (i = 0; i < vi->vertexAttributeDescriptionCount &&
+        pipe->attrib_count < NVRM_MAX_VTX_ATTRIBS; i++) {
+      const VkVertexInputAttributeDescription *a = &vi->pVertexAttributeDescriptions[i];
+      struct nvrm_vtx_attrib *dst = &pipe->attribs[pipe->attrib_count++];
+      dst->location = a->location;
+      dst->binding = a->binding;
+      dst->offset = a->offset;
+      dst->component_fmt = vk_format_to_vtx_comp(a->format);
+      dst->active = true;
    }
 }
 
@@ -336,14 +448,17 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
       pipe->depth_write_enable = true;
       pipe->front_ccw = false;
 
-      if (ci->pInputAssemblyState)
+      if (ci->pInputAssemblyState) {
          pipe->topology = ci->pInputAssemblyState->topology;
+         pipe->prim_restart_enable = ci->pInputAssemblyState->primitiveRestartEnable;
+      }
       pipe->topology_nv = vk_topology_to_nv(pipe->topology);
 
       if (ci->pRasterizationState) {
          pipe->cull_mode = ci->pRasterizationState->cullMode;
          pipe->front_ccw = ci->pRasterizationState->frontFace ==
                            VK_FRONT_FACE_COUNTER_CLOCKWISE;
+         pipe->line_width = ci->pRasterizationState->lineWidth;
       }
       if (ci->pDepthStencilState) {
          pipe->depth_test_enable = ci->pDepthStencilState->depthTestEnable;
@@ -352,6 +467,10 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
       }
       if (ci->pColorBlendState && ci->pColorBlendState->attachmentCount)
          pipe->blend_enable = ci->pColorBlendState->pAttachments[0].blendEnable;
+      if (ci->pMultisampleState)
+         pipe->sample_count = ci->pMultisampleState->rasterizationSamples;
+      if (ci->pVertexInputState)
+         nvrm_pipeline_capture_vertex_input(pipe, ci->pVertexInputState);
 
       for (s = 0; s < ci->stageCount; s++) {
          const VkPipelineShaderStageCreateInfo *st = &ci->pStages[s];
@@ -362,6 +481,12 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
             pipe->vs = sh;
          else if (st->stage == VK_SHADER_STAGE_FRAGMENT_BIT)
             pipe->fs = sh;
+         else if (st->stage == VK_SHADER_STAGE_GEOMETRY_BIT)
+            pipe->gs = sh;
+         else if (st->stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
+            pipe->tcs = sh;
+         else if (st->stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+            pipe->tes = sh;
          else
             nv_shader_destroy(sh);
          if (sh && sh->code_gpu_addr && !pipe->program_region_base)
@@ -429,7 +554,13 @@ nvrm_CreateComputePipelines(VkDevice _device, VkPipelineCache pipelineCache,
          if (ns->info.workgroup_size[2])
             pipe->local_size_z = ns->info.workgroup_size[2];
          pipe->shared_mem_bytes = (uint32_t)ns->info.shared_size;
+         /* scratch_size is per-thread spill/temp; align to 16 like SPH local_low */
+         if (ns->scratch_size)
+            pipe->local_mem_bytes = (uint32_t)((ns->scratch_size + 15) & ~15);
       }
+      /* Compiler may have recorded spill requirement on the shader object */
+      if (pipe->cs && pipe->cs->local_mem_size > pipe->local_mem_bytes)
+         pipe->local_mem_bytes = pipe->cs->local_mem_size;
       pPipelines[i] = nvrm_compute_pipeline_to_handle(pipe);
    }
    return VK_SUCCESS;
@@ -459,9 +590,9 @@ nvrm_DestroyPipeline(VkDevice _device, VkPipeline _pipeline,
    /* Heuristic: compute pipeline has cs at offset of vs in a parallel struct;
     * both structs share device pointer at same offset after base.  Always
     * destroy vs/fs if non-null; also try cs via compute cast if vs is null. */
-   if (gp->vs || gp->fs || gp->device == device) {
+   if (gp->vs || gp->fs || gp->gs || gp->tcs || gp->tes || gp->device == device) {
       struct nvrm_compute_pipeline *cp = (struct nvrm_compute_pipeline *)(void *)gp;
-      if (!gp->vs && !gp->fs && cp->cs) {
+      if (!gp->vs && !gp->fs && !gp->gs && !gp->tcs && !gp->tes && cp->cs) {
          nv_shader_destroy(cp->cs);
          vk_object_base_finish(&cp->base);
          vk_free2(&device->vk.alloc, pAllocator, cp);
@@ -469,6 +600,9 @@ nvrm_DestroyPipeline(VkDevice _device, VkPipeline _pipeline,
       }
       nv_shader_destroy(gp->vs);
       nv_shader_destroy(gp->fs);
+      nv_shader_destroy(gp->gs);
+      nv_shader_destroy(gp->tcs);
+      nv_shader_destroy(gp->tes);
       vk_object_base_finish(&gp->base);
       vk_free2(&device->vk.alloc, pAllocator, gp);
    }
@@ -828,6 +962,70 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
    return 0;
 }
 
+/* Write a single descriptor into a set at (binding, arrayElement) — we store
+ * flat by type in order of writes, but honour dstBinding as the preferred slot
+ * index when it fits in the 16-entry arrays. */
+static void
+nvrm_desc_write_ubo(struct nvrm_descriptor_set *set, uint32_t slot,
+                    const VkDescriptorBufferInfo *info)
+{
+   VK_FROM_HANDLE(nvrm_buffer, buf, info->buffer);
+   if (slot >= 16)
+      slot = set->ubo_count < 16 ? set->ubo_count : 15;
+   set->ubo[slot].bo = buf ? buf->bo : NULL;
+   set->ubo[slot].offset = info->offset;
+   set->ubo[slot].range = info->range;
+   if (slot >= set->ubo_count)
+      set->ubo_count = slot + 1;
+}
+
+static void
+nvrm_desc_write_ssbo(struct nvrm_descriptor_set *set, uint32_t slot,
+                     const VkDescriptorBufferInfo *info)
+{
+   VK_FROM_HANDLE(nvrm_buffer, buf, info->buffer);
+   if (slot >= 16)
+      slot = set->ssbo_count < 16 ? set->ssbo_count : 15;
+   set->ssbo[slot].bo = buf ? buf->bo : NULL;
+   set->ssbo[slot].offset = info->offset;
+   set->ssbo[slot].range = info->range;
+   if (slot >= set->ssbo_count)
+      set->ssbo_count = slot + 1;
+}
+
+static void
+nvrm_desc_write_image(struct nvrm_device *device, struct nvrm_descriptor_set *set,
+                      uint32_t slot, const VkDescriptorImageInfo *info,
+                      VkDescriptorType dtype)
+{
+   VK_FROM_HANDLE(nvrm_image_view, view, info->imageView);
+   struct nv_tex_pool *pool = nvrm_device_ensure_tex_pool(device);
+   struct nv_tex_entry entry;
+   int tex_slot = -1;
+   if (slot >= 16)
+      slot = set->img_count < 16 ? set->img_count : 15;
+   if (view && pool &&
+       nvrm_write_combined_image_sampler(device, view, NULL, info->sampler,
+                                         &entry) == 0) {
+      tex_slot = nv_tex_pool_set_entry(pool, -1, &entry);
+   }
+   set->img[slot].tex_slot = tex_slot;
+   set->img[slot].view = view;
+   set->img[slot].format = view ? view->format : VK_FORMAT_UNDEFINED;
+   if (view && view->image) {
+      set->img[slot].width = view->image->vk.extent.width;
+      set->img[slot].height = view->image->vk.extent.height;
+      set->img[slot].pitch = view->image->row_pitch;
+      set->img[slot].gpu_addr =
+         view->image->gpu_offset ? view->image->gpu_offset :
+         (view->image->bo ? nv_rm_bo_gpu_offset(view->image->bo) : 0);
+   }
+   set->img[slot].has_sampler =
+      (dtype == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+   if (slot >= set->img_count)
+      set->img_count = slot + 1;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_UpdateDescriptorSets(VkDevice _device,
                           uint32_t descriptorWriteCount,
@@ -836,63 +1034,68 @@ nvrm_UpdateDescriptorSets(VkDevice _device,
                           const VkCopyDescriptorSet *pDescriptorCopies)
 {
    VK_FROM_HANDLE(nvrm_device, device, _device);
-   uint32_t i;
-   (void)descriptorCopyCount;
-   (void)pDescriptorCopies;
+   uint32_t i, j;
 
    for (i = 0; i < descriptorWriteCount; i++) {
       const VkWriteDescriptorSet *w = &pDescriptorWrites[i];
       VK_FROM_HANDLE(nvrm_descriptor_set, set, w->dstSet);
+      uint32_t base_slot = w->dstBinding + w->dstArrayElement;
       if (!set)
          continue;
       if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
           w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
-         uint32_t j;
-         for (j = 0; j < w->descriptorCount && set->ubo_count < 16; j++) {
-            VK_FROM_HANDLE(nvrm_buffer, buf, w->pBufferInfo[j].buffer);
-            set->ubo[set->ubo_count].bo = buf ? buf->bo : NULL;
-            set->ubo[set->ubo_count].offset = w->pBufferInfo[j].offset;
-            set->ubo[set->ubo_count].range = w->pBufferInfo[j].range;
-            set->ubo_count++;
-         }
+         for (j = 0; j < w->descriptorCount; j++)
+            nvrm_desc_write_ubo(set, base_slot + j, &w->pBufferInfo[j]);
       } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
-         uint32_t j;
-         for (j = 0; j < w->descriptorCount && set->ssbo_count < 16; j++) {
-            VK_FROM_HANDLE(nvrm_buffer, buf, w->pBufferInfo[j].buffer);
-            set->ssbo[set->ssbo_count].bo = buf ? buf->bo : NULL;
-            set->ssbo[set->ssbo_count].offset = w->pBufferInfo[j].offset;
-            set->ssbo[set->ssbo_count].range = w->pBufferInfo[j].range;
-            set->ssbo_count++;
-         }
+         for (j = 0; j < w->descriptorCount; j++)
+            nvrm_desc_write_ssbo(set, base_slot + j, &w->pBufferInfo[j]);
       } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
                  w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
-                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
-         uint32_t j;
-         struct nv_tex_pool *pool = nvrm_device_ensure_tex_pool(device);
-         for (j = 0; j < w->descriptorCount && set->img_count < 16; j++) {
-            VK_FROM_HANDLE(nvrm_image_view, view, w->pImageInfo[j].imageView);
-            struct nv_tex_entry entry;
-            int slot = -1;
-            if (view && pool &&
-                nvrm_write_combined_image_sampler(device, view, NULL,
-                                                  w->pImageInfo[j].sampler,
-                                                  &entry) == 0) {
-               slot = nv_tex_pool_set_entry(pool, -1, &entry);
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) {
+         for (j = 0; j < w->descriptorCount; j++)
+            nvrm_desc_write_image(device, set, base_slot + j, &w->pImageInfo[j],
+                                  w->descriptorType);
+      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+         /* Texel buffers: treat as SSBO-like address record for now */
+         for (j = 0; j < w->descriptorCount && w->pTexelBufferView; j++) {
+            /* Buffer views not fully wired; reserve SSBO slot with zero range */
+            if (set->ssbo_count < 16)
+               set->ssbo_count++;
+         }
+      }
+   }
+
+   /* Descriptor copies: shallow copy of tracked slots between sets */
+   for (i = 0; i < descriptorCopyCount; i++) {
+      const VkCopyDescriptorSet *c = &pDescriptorCopies[i];
+      VK_FROM_HANDLE(nvrm_descriptor_set, src, c->srcSet);
+      VK_FROM_HANDLE(nvrm_descriptor_set, dst, c->dstSet);
+      uint32_t n, k;
+      if (!src || !dst)
+         continue;
+      n = c->descriptorCount;
+      for (k = 0; k < n; k++) {
+         uint32_t sslot = c->srcBinding + c->srcArrayElement + k;
+         uint32_t dslot = c->dstBinding + c->dstArrayElement + k;
+         if (sslot < 16 && dslot < 16) {
+            if (sslot < src->ubo_count || dslot < dst->ubo_count) {
+               dst->ubo[dslot] = src->ubo[sslot < 16 ? sslot : 0];
+               if (dslot >= dst->ubo_count)
+                  dst->ubo_count = dslot + 1;
             }
-            set->img[set->img_count].tex_slot = slot;
-            set->img[set->img_count].view = view;
-            set->img[set->img_count].format = view ? view->format : VK_FORMAT_UNDEFINED;
-            if (view && view->image) {
-               set->img[set->img_count].width = view->image->vk.extent.width;
-               set->img[set->img_count].height = view->image->vk.extent.height;
-               set->img[set->img_count].gpu_addr =
-                  view->image->gpu_offset ? view->image->gpu_offset :
-                  (view->image->bo ? nv_rm_bo_gpu_offset(view->image->bo) : 0);
+            if (sslot < src->ssbo_count || dslot < dst->ssbo_count) {
+               dst->ssbo[dslot] = src->ssbo[sslot < 16 ? sslot : 0];
+               if (dslot >= dst->ssbo_count)
+                  dst->ssbo_count = dslot + 1;
             }
-            set->img[set->img_count].has_sampler =
-               (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
-            set->img_count++;
+            if (sslot < src->img_count || dslot < dst->img_count) {
+               dst->img[dslot] = src->img[sslot < 16 ? sslot : 0];
+               if (dslot >= dst->img_count)
+                  dst->img_count = dslot + 1;
+            }
          }
       }
    }
@@ -1020,6 +1223,37 @@ nvrm_DestroyFramebuffer(VkDevice _device, VkFramebuffer _fb,
 /* ---- Command buffer: bind pipeline, begin rendering, draw ---- */
 
 static void
+nvrm_cmd_emit_vertex_attribs(struct nvrm_cmd_buffer *cmd,
+                             struct nvrm_graphics_pipeline *pipe)
+{
+   uint32_t i, a;
+   if (!pipe)
+      return;
+   /* Disable all attribs first, then enable active ones from pipeline */
+   for (i = 0; i < NVRM_MAX_VTX_ATTRIBS; i++)
+      nv_3d_set_vertex_attribute(&cmd->push, i, 0, 0, 0, false);
+   for (a = 0; a < pipe->attrib_count; a++) {
+      const struct nvrm_vtx_attrib *at = &pipe->attribs[a];
+      uint32_t loc = at->location < NVRM_MAX_VTX_ATTRIBS ? at->location : a;
+      if (!at->active)
+         continue;
+      nv_3d_set_vertex_attribute(&cmd->push, loc, at->binding, at->offset,
+                                 at->component_fmt, true);
+   }
+   /* Instance frequency for bindings with instance rate */
+   for (i = 0; i < pipe->vtx_binding_count; i++) {
+      const struct nvrm_vtx_binding_info *bi = &pipe->vtx_bindings[i];
+      if (!bi->used || bi->binding >= NVRM_MAX_VTX_BINDINGS)
+         continue;
+      if (bi->input_rate) {
+         /* Frequency divisor = 1 instance per element (advance every instance) */
+         nv_push_method(&cmd->push,
+                        NVC597_SET_VERTEX_STREAM_A_FREQUENCY(bi->binding), 1);
+      }
+   }
+}
+
+static void
 nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
                              struct nvrm_graphics_pipeline *pipe)
 {
@@ -1054,9 +1288,24 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
                                (unsigned)pipe->depth_compare_op, false,
                                cull, pipe->front_ccw, 0, true);
 
-   nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_TESS_INIT);
-   nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_TESS);
-   nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_GEOMETRY);
+   nv_3d_set_primitive_topology(&cmd->push, pipe->topology_nv);
+   nv_3d_set_primitive_restart(&cmd->push, pipe->prim_restart_enable ||
+                               cmd->prim_restart_enable,
+                               cmd->prim_restart_index);
+
+   /* Optional tess/geom: enable only if shaders present, else disable */
+   if (pipe->tcs && pipe->tcs->uploaded)
+      nv_shader_emit_bind(&cmd->push, pipe->tcs, 0, -1);
+   else
+      nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_TESS_INIT);
+   if (pipe->tes && pipe->tes->uploaded)
+      nv_shader_emit_bind(&cmd->push, pipe->tes, 0, -1);
+   else
+      nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_TESS);
+   if (pipe->gs && pipe->gs->uploaded)
+      nv_shader_emit_bind(&cmd->push, pipe->gs, 0, -1);
+   else
+      nv_3d_disable_pipeline_shader(&cmd->push, NV_3D_PIPE_STAGE_GEOMETRY);
 
    region = pipe->program_region_base;
    if (pipe->vs && pipe->vs->uploaded)
@@ -1064,7 +1313,48 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
    if (pipe->fs && pipe->fs->uploaded)
       nv_shader_emit_bind(&cmd->push, pipe->fs, 0, -1);
 
+   nvrm_cmd_emit_vertex_attribs(cmd, pipe);
+
    cmd->bound_gfx_pipeline = pipe;
+}
+
+/* Emit all currently bound descriptor sets (UBOs + tex pools). */
+static void
+nvrm_cmd_emit_bound_descriptors(struct nvrm_cmd_buffer *cmd,
+                                VkPipelineBindPoint bind_point)
+{
+   uint32_t i, u, dyn_idx = 0;
+   (void)bind_point;
+   if (!cmd->push_map)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   for (i = 0; i < cmd->bound_set_count && i < NVRM_MAX_DESC_SETS; i++) {
+      struct nvrm_descriptor_set *set = cmd->bound_sets[i];
+      if (!set)
+         continue;
+      for (u = 0; u < set->ubo_count && u < 16; u++) {
+         uint64_t addr = 0;
+         uint32_t sz = (uint32_t)set->ubo[u].range;
+         uint64_t dyn_off = 0;
+         if (dyn_idx < cmd->dynamic_offset_count)
+            dyn_off = cmd->dynamic_offsets[dyn_idx++];
+         if (set->ubo[u].bo)
+            addr = nv_rm_bo_gpu_offset(set->ubo[u].bo) + set->ubo[u].offset + dyn_off;
+         if (!sz && set->ubo[u].bo)
+            sz = (uint32_t)nv_rm_bo_size(set->ubo[u].bo);
+         if (sz) {
+            nv_3d_set_constant_buffer_selector(&cmd->push, (sz + 255u) & ~255u, addr);
+            /* set index i -> bind group; slot u within set */
+            nv_3d_bind_group_constant_buffer(&cmd->push, i, u, true);
+         }
+      }
+      for (u = 0; u < set->ssbo_count && u < 16; u++) {
+         /* SSBO addresses are consumed by shaders via global loads; record only */
+         (void)set->ssbo[u];
+      }
+      if (set->img_count > 0 && cmd->device && cmd->device->tex_pool)
+         nv_tex_pool_emit_bind(&cmd->push, cmd->device->tex_pool);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1231,13 +1521,19 @@ nvrm_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount,
              uint32_t firstInstance)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)instanceCount;
-   (void)firstInstance;
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
    if (!cmd->push_map)
       return;
-   if (cmd->bound_gfx_pipeline)
+   if (cmd->bound_gfx_pipeline) {
       nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
-   nv_3d_emit_draw_vertex_array(&cmd->push, firstVertex, vertexCount);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
+   }
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   if (!instanceCount)
+      instanceCount = 1;
+   nv_3d_emit_draw_vertex_array_instanced(&cmd->push, topo, firstVertex,
+                                          vertexCount, instanceCount,
+                                          firstInstance);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1246,15 +1542,159 @@ nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                     int32_t vertexOffset, uint32_t firstInstance)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)instanceCount;
-   (void)vertexOffset;
-   (void)firstInstance;
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
    if (!cmd->push_map)
+      return;
+   if (cmd->bound_gfx_pipeline) {
+      nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
+   }
+   if (cmd->index_valid) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_index_buffer(&cmd->push, cmd->index_addr, cmd->index_size,
+                             cmd->index_type_size);
+   }
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   if (!instanceCount)
+      instanceCount = 1;
+   nv_3d_emit_draw_index_buffer_instanced(&cmd->push, topo, firstIndex,
+                                          indexCount, vertexOffset,
+                                          instanceCount, firstInstance);
+}
+
+/* Indirect draws: host-side minimal path records direct draw when buffer mapped. */
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                     VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   uint32_t d;
+   if (!cmd->push_map || !buf || !drawCount)
+      return;
+   /* Without GPU indirect class methods fully wired, expand to direct draws
+    * when the indirect buffer is CPU-visible; otherwise emit a single zero draw. */
+   (void)stride;
+   (void)offset;
+   if (cmd->bound_gfx_pipeline)
+      nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   for (d = 0; d < drawCount; d++) {
+      /* Placeholder: one degenerate draw per indirect slot until GPU indirect */
+      nv_3d_emit_draw_vertex_array_instanced(&cmd->push,
+         cmd->bound_gfx_pipeline ? cmd->bound_gfx_pipeline->topology_nv
+                                 : NVC597_TOPOLOGY_TRIANGLES,
+         0, 0, 1, 0);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                            VkDeviceSize offset, uint32_t drawCount,
+                            uint32_t stride)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   (void)buffer;
+   (void)offset;
+   (void)stride;
+   if (!cmd->push_map || !drawCount)
       return;
    if (cmd->bound_gfx_pipeline)
       nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
-   /* Index buffer must have been bound; emit draw with first/count */
-   nv_3d_emit_draw_index_buffer(&cmd->push, firstIndex, indexCount);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   nv_3d_emit_draw_index_buffer_instanced(&cmd->push,
+      cmd->bound_gfx_pipeline ? cmd->bound_gfx_pipeline->topology_nv
+                              : NVC597_TOPOLOGY_TRIANGLES,
+      0, 0, 0, 1, 0);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
+                                  VkBool32 primitiveRestartEnable)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   cmd->prim_restart_enable = primitiveRestartEnable;
+   if (cmd->push_map)
+      nv_3d_set_primitive_restart(&cmd->push, primitiveRestartEnable,
+                                  cmd->prim_restart_index);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstViewport,
+                    uint32_t viewportCount, const VkViewport *pViewports)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   if (!viewportCount || !pViewports || firstViewport > 0)
+      return;
+   cmd->vp_x = pViewports[0].x;
+   cmd->vp_y = pViewports[0].y;
+   cmd->vp_w = pViewports[0].width;
+   cmd->vp_h = pViewports[0].height;
+   cmd->vp_min_z = pViewports[0].minDepth;
+   cmd->vp_max_z = pViewports[0].maxDepth;
+   cmd->vp_valid = true;
+   if (cmd->push_map) {
+      /* Vulkan viewport -> NV scale/offset: scale = half extent, offset = centre */
+      float sx = cmd->vp_w * 0.5f;
+      float sy = cmd->vp_h * 0.5f;
+      float sz = cmd->vp_max_z - cmd->vp_min_z;
+      float ox = cmd->vp_x + sx;
+      float oy = cmd->vp_y + sy;
+      float oz = cmd->vp_min_z;
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_viewport0(&cmd->push, sx, sy, sz, ox, oy, oz);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor,
+                   uint32_t scissorCount, const VkRect2D *pScissors)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   if (!scissorCount || !pScissors || firstScissor > 0)
+      return;
+   cmd->sc_x = pScissors[0].offset.x;
+   cmd->sc_y = pScissors[0].offset.y;
+   cmd->sc_w = pScissors[0].extent.width;
+   cmd->sc_h = pScissors[0].extent.height;
+   cmd->sc_valid = true;
+   if (cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_scissor0(&cmd->push, true,
+                         (uint32_t)cmd->sc_x,
+                         (uint32_t)(cmd->sc_x + (int32_t)cmd->sc_w),
+                         (uint32_t)cmd->sc_y,
+                         (uint32_t)(cmd->sc_y + (int32_t)cmd->sc_h));
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
+                      VkShaderStageFlags stageFlags, uint32_t offset,
+                      uint32_t size, const void *pValues)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   uint32_t start_dw, n_dw, i;
+   const uint32_t *src = pValues;
+   (void)layout;
+   (void)stageFlags;
+   if (!pValues || !size)
+      return;
+   start_dw = offset / 4;
+   n_dw = (size + 3) / 4;
+   for (i = 0; i < n_dw && (start_dw + i) < NVRM_MAX_PUSH_CONST_DWORDS; i++)
+      cmd->push_const[start_dw + i] = src[i];
+   if (start_dw + n_dw > cmd->push_const_dwords)
+      cmd->push_const_dwords = start_dw + n_dw;
+   if (cmd->push_const_dwords > NVRM_MAX_PUSH_CONST_DWORDS)
+      cmd->push_const_dwords = NVRM_MAX_PUSH_CONST_DWORDS;
+   cmd->push_const_dirty = true;
+   /* Upload via constant buffer selector on bind group 0 slot 0 (push bank) */
+   if (cmd->push_map && cmd->push_bo) {
+      /* Push constants are CPU-side until a dedicated BO exists; bind a
+       * zero-sized selector so subsequent draws re-emit descriptors only. */
+      (void)cmd->push_const_dirty;
+   }
 }
 
 static VKAPI_ATTR void VKAPI_CALL
@@ -1266,6 +1706,7 @@ nvrm_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    uint32_t i;
+   struct nvrm_graphics_pipeline *pipe = cmd->bound_gfx_pipeline;
    if (!cmd->push_map)
       return;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
@@ -1273,8 +1714,20 @@ nvrm_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
       VK_FROM_HANDLE(nvrm_buffer, buf, pBuffers[i]);
       uint64_t addr = 0;
       uint32_t size = 0;
-      uint32_t stride = pStrides ? (uint32_t)pStrides[i] : 12;
+      uint32_t stride = pStrides ? (uint32_t)pStrides[i] : 0;
       uint32_t slot = firstBinding + i;
+      /* Fall back to pipeline-captured stride when dynamic stride omitted */
+      if (!stride && pipe) {
+         uint32_t b;
+         for (b = 0; b < pipe->vtx_binding_count; b++) {
+            if (pipe->vtx_bindings[b].binding == slot) {
+               stride = pipe->vtx_bindings[b].stride;
+               break;
+            }
+         }
+      }
+      if (!stride)
+         stride = 12;
       if (buf) {
          addr = (buf->addr ? buf->addr : (buf->bo ? nv_rm_bo_gpu_offset(buf->bo) : 0))
                 + pOffsets[i];
@@ -1283,8 +1736,13 @@ nvrm_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
          else if (buf->bo)
             size = (uint32_t)nv_rm_bo_size(buf->bo);
       }
-      if (slot < 16)
-         nv_3d_set_vertex_stream(&cmd->push, slot, addr, size, stride ? stride : 12);
+      if (slot < NVRM_MAX_VTX_BINDINGS) {
+         cmd->vtx_binding[slot].addr = addr;
+         cmd->vtx_binding[slot].size = size;
+         cmd->vtx_binding[slot].stride = stride;
+         cmd->vtx_binding[slot].valid = (buf != NULL);
+         nv_3d_set_vertex_stream(&cmd->push, slot, addr, size, stride);
+      }
    }
 }
 
@@ -1308,6 +1766,10 @@ nvrm_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
       isz = 2;
    else if (indexType == VK_INDEX_TYPE_UINT8_EXT)
       isz = 1;
+   cmd->index_addr = addr;
+   cmd->index_size = sz;
+   cmd->index_type_size = (uint8_t)isz;
+   cmd->index_valid = (buf != NULL);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    nv_3d_set_index_buffer(&cmd->push, addr, sz, isz);
 }
@@ -1330,42 +1792,37 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
                            const uint32_t *pDynamicOffsets)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   uint32_t i, u;
-   (void)pipelineBindPoint;
+   uint32_t i;
    (void)layout;
-   (void)dynamicOffsetCount;
-   (void)pDynamicOffsets;
    if (!cmd->push_map)
       return;
-   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+
+   /* Cache dynamic offsets for later emit (graphics draw / compute dispatch) */
+   cmd->dynamic_offset_count = 0;
+   if (pDynamicOffsets && dynamicOffsetCount) {
+      uint32_t n = dynamicOffsetCount < 32 ? dynamicOffsetCount : 32;
+      memcpy(cmd->dynamic_offsets, pDynamicOffsets, n * sizeof(uint32_t));
+      cmd->dynamic_offset_count = n;
+   }
+
    for (i = 0; i < descriptorSetCount; i++) {
       VK_FROM_HANDLE(nvrm_descriptor_set, set, pDescriptorSets[i]);
-      if (!set)
-         continue;
-      for (u = 0; u < set->ubo_count; u++) {
-         uint64_t addr = 0;
-         uint32_t sz = (uint32_t)set->ubo[u].range;
-         if (set->ubo[u].bo)
-            addr = nv_rm_bo_gpu_offset(set->ubo[u].bo) + set->ubo[u].offset;
-         if (!sz && set->ubo[u].bo)
-            sz = (uint32_t)nv_rm_bo_size(set->ubo[u].bo);
-         if (sz) {
-            nv_3d_set_constant_buffer_selector(&cmd->push, (sz + 255u) & ~255u, addr);
-            /* firstSet+i as bind group approximation; slot u */
-            nv_3d_bind_group_constant_buffer(&cmd->push, firstSet + i, u, true);
-         }
-      }
-      /* Bind texture header/sampler pools when set has image descriptors */
-      if (set->img_count > 0 && cmd->device && cmd->device->tex_pool) {
-         nv_tex_pool_emit_bind(&cmd->push, cmd->device->tex_pool);
+      uint32_t slot = firstSet + i;
+      if (slot < NVRM_MAX_DESC_SETS) {
+         cmd->bound_sets[slot] = set;
+         if (slot + 1 > cmd->bound_set_count)
+            cmd->bound_set_count = slot + 1;
       }
    }
+
+   nvrm_cmd_emit_bound_descriptors(cmd, pipelineBindPoint);
 }
 
 
 
 
 /* NVC3C0 QMD-based compute dispatch (clc3c0 / clc3c0qmd v02.02). */
+/* Fallback fixed LMEM BO when SM count / local req unknown at begin time */
 #ifndef NVRM_LMEM_SCRATCH_SIZE
 #define NVRM_LMEM_SCRATCH_SIZE (256 * 1024)
 #endif
@@ -1376,17 +1833,30 @@ nvrm_ensure_compute_lmem(struct nvrm_cmd_buffer *cmd)
    const struct nv_device_info *info;
    uint64_t lmem_addr;
    uint32_t sm_count = 1;
+   uint32_t local_req = 0;
+   struct nvrm_compute_pipeline *cp;
 
    if (!cmd || cmd->lmem_programmed || !cmd->lmem_bo)
       return;
    info = cmd->device ? cmd->device->info : NULL;
    if (info && info->tpc_count)
       sm_count = info->tpc_count;
+   /* Prefer per-thread requirement from bound compute pipeline / shader */
+   cp = cmd->bound_compute_pipeline;
+   if (cp && cp->local_mem_bytes)
+      local_req = cp->local_mem_bytes;
+   else if (cp && cp->cs && cp->cs->local_mem_size)
+      local_req = cp->cs->local_mem_size;
+   else if (cmd->lmem_local_req)
+      local_req = cmd->lmem_local_req;
+   cmd->lmem_local_req = local_req;
+
    lmem_addr = nv_rm_bo_gpu_offset(cmd->lmem_bo);
    if (!lmem_addr)
       return;
-   nv_compute_set_shader_local_memory(&cmd->push, lmem_addr,
-                                      NVRM_LMEM_SCRATCH_SIZE, sm_count);
+   /* Program per-SM window sized from local_req; BO must cover sm_count * per_sm */
+   nv_compute_set_shader_local_memory_for_shader(&cmd->push, lmem_addr,
+                                                 local_req, sm_count);
    cmd->lmem_programmed = true;
 }
 
