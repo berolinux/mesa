@@ -1119,12 +1119,19 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          }
 
          if (ind_base) {
-            if (info->index_size)
-               nv_3d_emit_draw_indexed_indirect_multi(&push, topo, ind_base,
-                                                      draw_count, ind_stride);
-            else
-               nv_3d_emit_draw_indirect_multi(&push, topo, ind_base,
-                                              draw_count, ind_stride);
+            uint32_t sema_pay = 0;
+            uint64_t sema_addr = 0;
+            if (!ctx->fence && ctx->screen && ctx->screen->rm)
+               ctx->fence = nv_fence_create(ctx->screen->rm);
+            if (ctx->fence && ctx->fence->sema_gpu_addr) {
+               sema_pay = nv_fence_alloc_seq(ctx->fence);
+               sema_addr = ctx->fence->sema_gpu_addr;
+               ctx->last_fence_seq = sema_pay;
+            }
+            nv_3d_emit_draw_indirect_multi_with_sema(&push, topo, ind_base,
+                                                     draw_count, ind_stride,
+                                                     info->index_size != 0,
+                                                     sema_addr, sema_pay);
          }
          if (ind_map && ibuf && ind_map != ibuf->cpu_ptr)
             nv_rm_bo_unmap(ibuf->bo);

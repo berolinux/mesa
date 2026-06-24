@@ -9,7 +9,9 @@
  */
 
 #include "nvrm_wsi.h"
+#include "nvrm_private.h"
 #include "nv_channel.h"
+#include "nv_fence.h"
 
 #include "wsi_common.h"
 
@@ -79,12 +81,17 @@ nvrm_QueuePresent2(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
    if (!device || !device->physical || !device->physical->vk.wsi_device)
       return VK_ERROR_SURFACE_LOST_KHR;
 
-   /* Ensure prior graphics/compute work has been submitted on the GPFIFO
-    * channel before handing buffers to the display/WSI path.  Wait semaphores
-    * in pPresentInfo are processed by wsi_common_queue_present; we only need
-    * to guarantee our own push has reached the kernel. */
+   /* Flush GPFIFO then wait submit_fence sema (3D/CE/QMD completion) before
+    * handing images to display — stronger than flush-only present. */
    if (queue->channel_ready && queue->channel)
       (void)nv_channel_flush(queue->channel);
+
+   if (queue->submit_fence && queue->submit_seq) {
+      (void)nv_fence_wait(queue->submit_fence, queue->submit_seq,
+                          2000000000ull /* 2s */);
+   } else if (queue->channel_ready && queue->channel) {
+      (void)nv_channel_wait_idle(queue->channel, 2000000000ull);
+   }
 
    result = wsi_common_queue_present(device->physical->vk.wsi_device,
                                      &queue->vk, pPresentInfo);

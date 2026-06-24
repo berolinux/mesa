@@ -2404,8 +2404,18 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);
    if (base) {
-      nv_3d_emit_draw_indirect_multi(&cmd->push, topo, base, drawCount,
-                                     rec_stride);
+      uint32_t sema_pay = 0;
+      uint64_t sema_addr = 0;
+      if (cmd->device && cmd->device->queue &&
+          cmd->device->queue->submit_fence &&
+          cmd->device->queue->submit_fence->sema_gpu_addr) {
+         sema_pay = nv_fence_alloc_seq(cmd->device->queue->submit_fence);
+         sema_addr = cmd->device->queue->submit_fence->sema_gpu_addr;
+         cmd->device->queue->submit_seq = sema_pay;
+      }
+      nv_3d_emit_draw_indirect_multi_with_sema(&cmd->push, topo, base,
+                                               drawCount, rec_stride,
+                                               false, sema_addr, sema_pay);
    } else {
       /* No CPU access and no shadow: emit zero-vertex draws (safe no-op) */
       for (d = 0; d < drawCount; d++)
@@ -2459,8 +2469,18 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
       base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
                                          rec_stride * drawCount, &unmap);
    if (base) {
-      nv_3d_emit_draw_indexed_indirect_multi(&cmd->push, topo, base, drawCount,
-                                             rec_stride);
+      uint32_t sema_pay = 0;
+      uint64_t sema_addr = 0;
+      if (cmd->device && cmd->device->queue &&
+          cmd->device->queue->submit_fence &&
+          cmd->device->queue->submit_fence->sema_gpu_addr) {
+         sema_pay = nv_fence_alloc_seq(cmd->device->queue->submit_fence);
+         sema_addr = cmd->device->queue->submit_fence->sema_gpu_addr;
+         cmd->device->queue->submit_seq = sema_pay;
+      }
+      nv_3d_emit_draw_indirect_multi_with_sema(&cmd->push, topo, base,
+                                               drawCount, rec_stride,
+                                               true, sema_addr, sema_pay);
       nvrm_unmap_indirect(unmap);
       return;
    }

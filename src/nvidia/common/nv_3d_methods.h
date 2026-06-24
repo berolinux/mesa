@@ -913,6 +913,32 @@ nv_3d_emit_draw_indirect_from_shadow_dwords(struct nv_push *p,
 }
 
 /**
+ * Fill indirect_draw_params and clamp draw_count to host max; returns effective
+ * draw count (0 if invalid).  Helps nvrm/nvgpu share one clamp policy.
+ */
+static inline uint32_t
+nv_3d_indirect_params_init(struct nv_3d_indirect_draw_params *out,
+                           uint64_t indirect_gpu_addr,
+                           uint64_t shadow_gpu_addr,
+                           uint32_t draw_count, uint32_t stride_bytes,
+                           bool indexed, uint32_t topology_nv)
+{
+   uint32_t n = draw_count ? draw_count : 1u;
+   if (!out)
+      return 0;
+   memset(out, 0, sizeof(*out));
+   out->indirect_gpu_addr = indirect_gpu_addr;
+   out->shadow_gpu_addr = shadow_gpu_addr;
+   out->stride_bytes = stride_bytes ? stride_bytes : (indexed ? 20u : 16u);
+   out->indexed = indexed;
+   out->topology_nv = topology_nv;
+   if (n > NV_3D_INDIRECT_MAX_DRAWS_HOST)
+      n = NV_3D_INDIRECT_MAX_DRAWS_HOST;
+   out->draw_count = n;
+   return n;
+}
+
+/**
  * Indirect multi-draw with optional count buffer (VkDrawIndirectCount path).
  * When count_host is non-NULL, use *count_host clamped to max_draw_count.
  * When only count_gpu_addr is known (GPU-only count BO), callers should
@@ -1685,6 +1711,45 @@ nv_3d_report_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                   (uint32_t)(sema_gpu_addr & 0xffffffffu));
    nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_C, payload);
    nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_D, d);
+}
+
+/** Indirect multi-draw from host/shadow + optional 3D sema (after report_sema def). */
+static inline void
+nv_3d_emit_draw_indirect_from_shadow_dwords_with_sema(
+   struct nv_push *p, uint32_t topology_nv, bool indexed,
+   const uint32_t *shadow_dwords, uint32_t shadow_dword_count,
+   uint32_t draw_count, uint32_t stride_bytes,
+   uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_3d_emit_draw_indirect_from_shadow_dwords(p, topology_nv, indexed,
+                                               shadow_dwords,
+                                               shadow_dword_count,
+                                               draw_count, stride_bytes);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/** Host indirect multi-draw + sema (path A). */
+static inline void
+nv_3d_emit_draw_indirect_multi_with_sema(struct nv_push *p,
+                                         uint32_t topology_nv,
+                                         const uint32_t *indirect_base,
+                                         uint32_t draw_count,
+                                         uint32_t stride_bytes,
+                                         bool indexed,
+                                         uint64_t sema_gpu_addr,
+                                         uint32_t sema_payload)
+{
+   if (!p || !indirect_base || !draw_count)
+      return;
+   if (indexed)
+      nv_3d_emit_draw_indexed_indirect_multi(p, topology_nv, indirect_base,
+                                             draw_count, stride_bytes);
+   else
+      nv_3d_emit_draw_indirect_multi(p, topology_nv, indirect_base,
+                                     draw_count, stride_bytes);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
 }
 
 /** Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object). */
@@ -2548,6 +2613,18 @@ nv_3d_emit_blit_fullscreen_draw(struct nv_push *p, uint32_t topology_nv)
       topology_nv = 0x5; /* TRIANGLE_STRIP */
    nv_3d_set_draw_control(p, topology_nv, 1 /* instance_count */, false);
    nv_3d_emit_draw_vertex_array(p, 0 /* start */, 4 /* count */);
+}
+
+/** Meta blit fullscreen quad + optional 3D sema (after pixel writes). */
+static inline void
+nv_3d_emit_blit_fullscreen_draw_with_sema(struct nv_push *p,
+                                          uint32_t topology_nv,
+                                          uint64_t sema_gpu_addr,
+                                          uint32_t sema_payload)
+{
+   nv_3d_emit_blit_fullscreen_draw(p, topology_nv);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
 }
 
 /**

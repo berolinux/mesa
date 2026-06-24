@@ -141,7 +141,20 @@ nvrm_cmd_emit_meta_blit_3d(struct nvrm_cmd_buffer *cmd,
    nv_shader_emit_bind(&cmd->push, dev->meta_blit_vs, region, -1);
    nv_shader_emit_bind(&cmd->push, dev->meta_blit_fs, 0, -1);
 
-   nv_3d_emit_blit_fullscreen_draw(&cmd->push, 0 /* TRIANGLE_STRIP */);
+   {
+      uint32_t sema_pay = 0;
+      uint64_t sema_addr = 0;
+      if (cmd->device && cmd->device->queue &&
+          cmd->device->queue->submit_fence &&
+          cmd->device->queue->submit_fence->sema_gpu_addr) {
+         sema_pay = nv_fence_alloc_seq(cmd->device->queue->submit_fence);
+         sema_addr = cmd->device->queue->submit_fence->sema_gpu_addr;
+         cmd->device->queue->submit_seq = sema_pay;
+      }
+      nv_3d_emit_blit_fullscreen_draw_with_sema(&cmd->push,
+                                                0 /* TRIANGLE_STRIP */,
+                                                sema_addr, sema_pay);
+   }
    nv_3d_emit_texture_barrier(&cmd->push);
    return true;
 }
