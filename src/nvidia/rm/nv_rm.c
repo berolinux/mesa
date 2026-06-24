@@ -475,6 +475,80 @@ nv_rm_free_object(struct nv_rm_device *dev, uint32_t h_parent,
 #endif
 }
 
+int
+nv_rm_dup_object(struct nv_rm_device *dev, uint32_t h_parent_dst,
+                 uint32_t *h_object_dst, uint32_t h_client_src,
+                 uint32_t h_object_src, uint32_t flags)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev || !h_object_dst)
+      return -EINVAL;
+   return nvidia_rm_dup_object(dev->nvdev, h_parent_dst, h_object_dst,
+                               h_client_src, h_object_src, flags);
+#else
+   (void)dev; (void)h_parent_dst; (void)h_object_dst; (void)h_client_src;
+   (void)h_object_src; (void)flags;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_get_event_data(struct nv_rm_device *dev, uint32_t *h_object_out,
+                     uint32_t *notify_index_out, uint32_t *info32_out,
+                     uint16_t *info16_out, uint32_t *more_events_out)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   return nvidia_rm_get_event_data(dev->nvdev, h_object_out, notify_index_out,
+                                   info32_out, info16_out, more_events_out);
+#else
+   (void)dev; (void)h_object_out; (void)notify_index_out; (void)info32_out;
+   (void)info16_out; (void)more_events_out;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_alloc_event_os(struct nv_rm_device *dev, uint32_t h_parent,
+                     uint32_t h_src_resource, int os_event_fd,
+                     uint32_t notify_index, uint32_t *h_event_out)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev || !h_event_out)
+      return -EINVAL;
+   return nvidia_rm_alloc_event_os(dev->nvdev, h_parent, h_src_resource,
+                                   os_event_fd, notify_index, h_event_out);
+#else
+   (void)dev; (void)h_parent; (void)h_src_resource; (void)os_event_fd;
+   (void)notify_index; (void)h_event_out;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_event_set_notification(struct nv_rm_device *dev, uint32_t h_subdevice,
+                             uint32_t event, uint32_t action,
+                             bool notify_state, uint32_t info32,
+                             uint16_t info16)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   if (!h_subdevice)
+      h_subdevice = nv_rm_device_subdevice_handle(dev);
+   if (!h_subdevice)
+      return -ENODEV;
+   return nvidia_rm_event_set_notification(dev->nvdev, h_subdevice, event,
+                                           action, notify_state, info32,
+                                           info16);
+#else
+   (void)dev; (void)h_subdevice; (void)event; (void)action; (void)notify_state;
+   (void)info32; (void)info16;
+   return -ENOSYS;
+#endif
+}
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
 {

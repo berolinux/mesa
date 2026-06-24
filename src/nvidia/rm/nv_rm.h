@@ -91,6 +91,33 @@ int
 nv_rm_free_object(struct nv_rm_device *dev, uint32_t h_parent,
                   uint32_t h_object);
 
+/**
+ * tick93: Dup object into this client (NVOS55).  h_client_src may equal
+ * nv_rm_device_client_handle(dev) for self-dup.
+ */
+int nv_rm_dup_object(struct nv_rm_device *dev, uint32_t h_parent_dst,
+                     uint32_t *h_object_dst, uint32_t h_client_src,
+                     uint32_t h_object_src, uint32_t flags);
+
+/** Poll one RM event (NVOS41).  Returns 0 on success, negative errno/NV status. */
+int nv_rm_get_event_data(struct nv_rm_device *dev, uint32_t *h_object_out,
+                         uint32_t *notify_index_out, uint32_t *info32_out,
+                         uint16_t *info16_out, uint32_t *more_events_out);
+
+/**
+ * Allocate NV01_EVENT_OS_EVENT under h_parent for h_src_resource + event_fd.
+ * notify_index: NV2080_NOTIFIERS_* (optionally OR NV01_EVENT_* flags).
+ */
+int nv_rm_alloc_event_os(struct nv_rm_device *dev, uint32_t h_parent,
+                         uint32_t h_src_resource, int os_event_fd,
+                         uint32_t notify_index, uint32_t *h_event_out);
+
+/** NV2080_CTRL_CMD_EVENT_SET_NOTIFICATION on h_subdevice (or device subdevice). */
+int nv_rm_event_set_notification(struct nv_rm_device *dev, uint32_t h_subdevice,
+                                 uint32_t event, uint32_t action,
+                                 bool notify_state, uint32_t info32,
+                                 uint16_t info16);
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 

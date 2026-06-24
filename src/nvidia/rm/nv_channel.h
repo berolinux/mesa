@@ -264,6 +264,20 @@ int nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
                                        uint32_t *gp_entries_out,
                                        uint32_t *pb_entries_out);
 
+/**
+ * tick93: optional async error path — allocate NV01_EVENT_OS_EVENT on subdevice
+ * for channel error notifier (notify_index typically NV2080_NOTIFIERS_RC or 0).
+ * Stores handle in *h_event_out; caller owns and must nv_rm_free_object.
+ * os_event_fd: eventfd/pipe read end; also register via nvidia_rm_alloc_os_event
+ * on the device fd path when available.
+ */
+int nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
+                                 uint32_t notify_index, uint32_t *h_event_out);
+/** Poll RM event queue once; convenience over nv_rm_get_event_data. */
+int nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
+                             uint32_t *notify_index_out, uint32_t *info32_out,
+                             uint16_t *info16_out, uint32_t *more_out);
+
 /** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
 void
 nv_channel_notifier_reset(struct nv_channel *ch);

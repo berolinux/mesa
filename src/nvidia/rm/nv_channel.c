@@ -440,6 +440,49 @@ nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
    }
    return r;
 }
+
+/*
+ * tick93: NV01_EVENT_OS_EVENT under subdevice, source = channel (error path).
+ * Best-effort: also enable REPEAT notification on subdevice for the given index.
+ */
+int
+nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
+                             uint32_t notify_index, uint32_t *h_event_out)
+{
+   uint32_t h_sub;
+   uint32_t h_ev = 0;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel || !h_event_out || os_event_fd < 0)
+      return -EINVAL;
+   h_sub = nv_rm_device_subdevice_handle(ch->rm);
+   if (!h_sub)
+      return -ENODEV;
+
+   r = nv_rm_alloc_event_os(ch->rm, h_sub, ch->h_channel, os_event_fd,
+                            notify_index, &h_ev);
+   if (r != 0)
+      return r;
+
+   /* Enable repeated notification; non-fatal if RM rejects */
+   (void)nv_rm_event_set_notification(
+      ch->rm, h_sub, notify_index & 0xffffu,
+      NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_REPEAT, false, 0, 0);
+
+   *h_event_out = h_ev;
+   return 0;
+}
+
+int
+nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
+                         uint32_t *notify_index_out, uint32_t *info32_out,
+                         uint16_t *info16_out, uint32_t *more_out)
+{
+   if (!ch || !ch->rm)
+      return -EINVAL;
+   return nv_rm_get_event_data(ch->rm, h_object_out, notify_index_out,
+                               info32_out, info16_out, more_out);
+}
 #endif /* HAVE_LIBDRM_NVIDIA */
 
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -551,6 +594,31 @@ nv_channel_fifo_get_latency_buffer(struct nv_channel *ch,
    (void)ch;
    (void)gp_entries_out;
    (void)pb_entries_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
+                             uint32_t notify_index, uint32_t *h_event_out)
+{
+   (void)ch;
+   (void)os_event_fd;
+   (void)notify_index;
+   (void)h_event_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
+                         uint32_t *notify_index_out, uint32_t *info32_out,
+                         uint16_t *info16_out, uint32_t *more_out)
+{
+   (void)ch;
+   (void)h_object_out;
+   (void)notify_index_out;
+   (void)info32_out;
+   (void)info16_out;
+   (void)more_out;
    return -ENOSYS;
 }
 #endif
