@@ -99,7 +99,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       goto fail;
    memset((void *)ch->userd, 0, NV_CHANNEL_USERD_SIZE);
 
-   /* Error notifier */
+   /* Error notifier memory + CTXDMA (NV01_CONTEXT_ERROR_TO_MEMORY) */
    req.size = NV_CHANNEL_NOTIFIER_SIZE;
    req.alignment = 4096;
    req.vram = false;
@@ -109,6 +109,49 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    if (!ch->notifier_bo)
       goto fail;
    ch->h_error_notifier = nv_rm_bo_handle(ch->notifier_bo);
+   ch->error_notifier = nv_rm_bo_map(ch->notifier_bo);
+   if (ch->error_notifier)
+      memset((void *)ch->error_notifier, 0, NV_CHANNEL_NOTIFIER_SIZE);
+
+   /* Error CTXDMA: NV01_CONTEXT_ERROR_TO_MEMORY over notifier memory */
+   {
+      NV_CONTEXT_DMA_ALLOCATION_PARAMS cdp;
+      uint32_t h_cd = 0;
+      memset(&cdp, 0, sizeof(cdp));
+      cdp.hSubDevice = nv_rm_device_subdevice_handle(rm);
+      cdp.flags = 0;
+      cdp.hMemory = ch->h_error_notifier;
+      cdp.offset = 0;
+      cdp.limit = NV_CHANNEL_NOTIFIER_SIZE - 1;
+      if (nv_rm_alloc_object(rm, nv_rm_device_device_handle(rm), &h_cd,
+                             NV01_CONTEXT_ERROR_TO_MEMORY,
+                             &cdp, sizeof(cdp)) == 0)
+         ch->h_error_ctxdma = h_cd;
+   }
+
+   /* Optional TSG (KEPLER_CHANNEL_GROUP_A) + FERMI_CONTEXT_SHARE_A.
+    * Best-effort; fall back to lone channel if RM rejects. */
+   {
+      uint32_t h_grp = 0, h_cs = 0;
+      NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS gp;
+      NV_CTXSHARE_ALLOCATION_PARAMETERS csp;
+      memset(&gp, 0, sizeof(gp));
+      gp.hObjectError = ch->h_error_ctxdma ? ch->h_error_ctxdma
+                                           : ch->h_error_notifier;
+      gp.hVASpace = ch->h_vaspace;
+      gp.engineType = ch->engine_type;
+      if (nv_rm_alloc_object(rm, nv_rm_device_device_handle(rm), &h_grp,
+                             KEPLER_CHANNEL_GROUP_A, &gp, sizeof(gp)) == 0) {
+         ch->h_channel_group = h_grp;
+         ch->use_channel_group = true;
+         memset(&csp, 0, sizeof(csp));
+         csp.hVASpace = ch->h_vaspace;
+         csp.flags = NV_CTXSHARE_ALLOCATION_FLAGS_SUBCONTEXT_SYNC;
+         if (nv_rm_alloc_object(rm, h_grp, &h_cs,
+                                FERMI_CONTEXT_SHARE_A, &csp, sizeof(csp)) == 0)
+            ch->h_ctxshare = h_cs;
+      }
+   }
 
    /* GPFIFO ring (must have GPU VA for gpFifoOffset) */
    req.size = gpfifo_bytes;
@@ -140,32 +183,34 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       goto fail;
    memset(ch->push_cpu, 0, push_bytes);
 
-   /* Allocate channel object */
+   /* Allocate channel object (parent = TSG if present, else device) */
    memset(&ch_params, 0, sizeof(ch_params));
-   ch_params.hObjectError = ch->h_error_notifier;
-   /* gpFifoOffset must be a GPU VA in the channel's VASpace */
+   ch_params.hObjectError = ch->h_error_ctxdma ? ch->h_error_ctxdma
+                                               : ch->h_error_notifier;
    ch_params.gpFifoOffset = ch->gpfifo_gpu_addr;
    ch_params.gpFifoEntries = gpfifo_entries;
    ch_params.flags = 0;
    ch_params.hVASpace = ch->h_vaspace;
+   ch_params.hContextShare = ch->h_ctxshare;
    ch_params.hUserdMemory[0] = ch->h_userd_mem;
    ch_params.userdOffset[0] = 0;
    ch_params.engineType = ch->engine_type;
 
-   h_channel = 0; /* let helper assign */
-   /* Need a requested handle: use rm alloc object API */
+   h_channel = 0;
    {
       uint32_t h = 0;
-      /* Pick a non-zero handle via a throwaway BO's handle range is not ideal;
-       * nv_rm_alloc_object accepts 0 and kernel may assign.  Request explicit. */
-      ret = nv_rm_alloc_object(rm, nv_rm_device_device_handle(rm), &h,
+      uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group
+                                              : nv_rm_device_device_handle(rm);
+      ret = nv_rm_alloc_object(rm, h_parent, &h,
                                ch->gpfifo_class, &ch_params, sizeof(ch_params));
       if (ret != 0) {
-         /* Retry without client-provided USERD (older GPUs: USERD inside channel) */
+         /* Retry without USERD / without TSG parent */
          memset(ch_params.hUserdMemory, 0, sizeof(ch_params.hUserdMemory));
          memset(ch_params.userdOffset, 0, sizeof(ch_params.userdOffset));
+         ch_params.hContextShare = 0;
          h = 0;
-         ret = nv_rm_alloc_object(rm, nv_rm_device_device_handle(rm), &h,
+         h_parent = nv_rm_device_device_handle(rm);
+         ret = nv_rm_alloc_object(rm, h_parent, &h,
                                   ch->gpfifo_class, &ch_params, sizeof(ch_params));
       }
       if (ret != 0)
@@ -173,8 +218,19 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       ch->h_channel = h;
    }
 
-   /* Schedule channel via RmControl */
-   {
+   /* Schedule: prefer channel-group schedule when TSG is used, else per-channel */
+   if (ch->use_channel_group && ch->h_channel_group) {
+      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+      memset(&gsched, 0, sizeof(gsched));
+      gsched.bEnable = NV_TRUE;
+      gsched.bSkipSubmit = NV_FALSE;
+      ret = nv_rm_control(rm, ch->h_channel_group,
+                          NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                          &gsched, sizeof(gsched));
+      if (ret == 0)
+         ch->scheduled = true;
+   }
+   if (!ch->scheduled) {
       NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
       memset(&sched, 0, sizeof(sched));
       sched.bEnable = NV_TRUE;
@@ -212,9 +268,19 @@ nv_channel_destroy(struct nv_channel *ch)
       return;
 
 #if defined(HAVE_LIBDRM_NVIDIA)
-   if (ch->h_channel && ch->rm)
-      nv_rm_free_object(ch->rm, nv_rm_device_device_handle(ch->rm),
-                        ch->h_channel);
+   if (ch->rm) {
+      uint32_t h_dev = nv_rm_device_device_handle(ch->rm);
+      if (ch->h_channel) {
+         uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group : h_dev;
+         nv_rm_free_object(ch->rm, h_parent, ch->h_channel);
+      }
+      if (ch->h_ctxshare && ch->h_channel_group)
+         nv_rm_free_object(ch->rm, ch->h_channel_group, ch->h_ctxshare);
+      if (ch->h_channel_group)
+         nv_rm_free_object(ch->rm, h_dev, ch->h_channel_group);
+      if (ch->h_error_ctxdma)
+         nv_rm_free_object(ch->rm, h_dev, ch->h_error_ctxdma);
+   }
    if (ch->push_bo)
       nv_rm_bo_free(ch->push_bo);
    if (ch->gpfifo_bo)

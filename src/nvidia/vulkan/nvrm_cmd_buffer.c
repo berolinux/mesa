@@ -84,21 +84,30 @@ nvrm_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    const struct nv_device_info *info = cmd->device->info;
+   VK_FROM_HANDLE(nvrm_buffer, src_buf, pCopyBufferInfo->srcBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, dst_buf, pCopyBufferInfo->dstBuffer);
+   uint64_t src_base = 0, dst_base = 0;
    uint32_t i;
 
-   if (!cmd->push_map || !info)
+   if (!cmd->push_map)
       return;
 
-   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
-   nv_push_method(&cmd->push, 0x0000, info->class_copy);
+   if (src_buf && src_buf->bo)
+      src_base = nv_rm_bo_gpu_offset(src_buf->bo);
+   if (dst_buf && dst_buf->bo)
+      dst_base = nv_rm_bo_gpu_offset(dst_buf->bo);
+
+   if (info && info->class_copy)
+      nv_copy_set_object(&cmd->push, info->class_copy);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
 
    for (i = 0; i < pCopyBufferInfo->regionCount; i++) {
       const VkBufferCopy2 *r = &pCopyBufferInfo->pRegions[i];
-      /* Real DMA_COPY launch methods TBD from class header NVC5B5/NVC6B5 */
-      nv_push_method(&cmd->push, 0x0400, (uint32_t)r->srcOffset);
-      nv_push_method(&cmd->push, 0x0404, (uint32_t)(r->srcOffset >> 32));
-      nv_push_method(&cmd->push, 0x0408, (uint32_t)r->dstOffset);
-      nv_push_method(&cmd->push, 0x040c, (uint32_t)(r->dstOffset >> 32));
-      nv_push_method(&cmd->push, 0x0418, (uint32_t)r->size);
+      nv_copy_emit_buffer_copy(&cmd->push,
+                               src_base + r->srcOffset,
+                               dst_base + r->dstOffset,
+                               (uint32_t)r->size, 0, 0, 1);
    }
+   nv_push_wfi(&cmd->push);
 }

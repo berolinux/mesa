@@ -38,18 +38,23 @@ struct nv_channel {
 
    uint32_t h_channel;
    uint32_t h_userd_mem;
-   uint32_t h_error_notifier;
+   uint32_t h_error_notifier;      /* memory handle for notifier BO */
+   uint32_t h_error_ctxdma;        /* NV01_CONTEXT_ERROR_TO_MEMORY over notifier */
    uint32_t h_push_mem;
    uint32_t h_gpfifo_mem;
    uint32_t h_vaspace;             /* FERMI_VASPACE_A passed at channel alloc */
+   uint32_t h_channel_group;       /* KEPLER_CHANNEL_GROUP_A if used */
+   uint32_t h_ctxshare;            /* FERMI_CONTEXT_SHARE_A if used */
    uint32_t engine_type;
    uint32_t gpfifo_class;
    uint32_t work_submit_token;
    bool has_work_submit_token;
    bool scheduled;
+   bool use_channel_group;
 
    /* CPU mappings */
    volatile uint32_t *userd;       /* USERD control block (GPPut/GPGet/...) */
+   volatile void *error_notifier;  /* mapped notifier memory (nvidia_notification_t) */
    uint32_t *gpfifo_cpu;           /* GPFIFO ring (pairs of dwords) */
    uint32_t *push_cpu;             /* pushbuffer backing */
    uint64_t gpfifo_gpu_addr;       /* GPU VA/offset of GPFIFO ring start */

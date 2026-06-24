@@ -32,6 +32,7 @@
 #include "nv_device_info.h"
 #include "nv_push.h"
 #include "nv_3d_methods.h"
+#include "nv_copy_methods.h"
 
 #define NVRM_API_VERSION VK_MAKE_VERSION(1, 3, 0)
 
