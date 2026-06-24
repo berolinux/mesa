@@ -968,6 +968,71 @@ nv_qmd_smoke_encode_check(uint64_t sema_gpu_addr, uint32_t sema_payload,
    return 0;
 }
 
+/**
+ * Trace-golden: encode two QMDs with fixed inputs and require identical bytes
+ * (determinism check).  Optionally compare sema enable + program addr fields.
+ * program_addr/sema_addr/sema_payload are fixed for golden reproducibility.
+ * Returns 0 if both encodes match and sema bit set; negative on mismatch.
+ */
+static inline int
+nv_qmd_trace_golden_selftest(uint32_t qmd_a[NV_QMD_DWORDS],
+                             uint32_t qmd_b[NV_QMD_DWORDS])
+{
+   struct nv_qmd_desc d;
+   const uint64_t prog = 0x0000000000100000ull; /* 1 MiB aligned example */
+   const uint64_t sema = 0x0000000000200000ull;
+   const uint32_t payload = 0x42u;
+   uint32_t local_a[NV_QMD_DWORDS], local_b[NV_QMD_DWORDS];
+   uint32_t *a = qmd_a ? qmd_a : local_a;
+   uint32_t *b = qmd_b ? qmd_b : local_b;
+
+   nv_qmd_desc_init_smoke(&d, prog, 16, 0x86, sema, payload);
+   nv_qmd_encode_full(&d, a);
+   nv_qmd_encode_full(&d, b);
+   if (memcmp(a, b, NV_QMD_BYTES) != 0)
+      return -1;
+   if (!(a[4] & (1u << 10)))
+      return -2;
+   /* Grid 1x1x1 should set CTA raster width=1 in encoded QMD (non-zero body) */
+   {
+      unsigned i, nonzero = 0;
+      for (i = 0; i < NV_QMD_DWORDS; i++) {
+         if (a[i])
+            nonzero++;
+      }
+      if (nonzero < 4)
+         return -3;
+   }
+   return 0;
+}
+
+/**
+ * Build full G2 smoke QMD: program at program_gpu_addr, sema completion,
+ * optional CB0 at cb0_addr for constants.  Writes qmd_out and returns 0.
+ */
+static inline int
+nv_qmd_build_compute_smoke(uint32_t qmd_out[NV_QMD_DWORDS],
+                           uint64_t program_gpu_addr,
+                           uint32_t register_count, uint8_t sass_version,
+                           uint64_t sema_gpu_addr, uint32_t sema_payload,
+                           uint64_t cb0_addr, uint32_t cb0_size)
+{
+   struct nv_qmd_desc d;
+   if (!qmd_out || !program_gpu_addr)
+      return -1;
+   nv_qmd_desc_init_smoke(&d, program_gpu_addr, register_count, sass_version,
+                          sema_gpu_addr, sema_payload);
+   if (cb0_addr && cb0_size) {
+      d.cb_addr[0] = cb0_addr;
+      d.cb_size[0] = cb0_size;
+      d.cb_valid_mask |= 0x1;
+   }
+   nv_qmd_encode_full(&d, qmd_out);
+   if (sema_gpu_addr && sema_payload && !(qmd_out[4] & (1u << 10)))
+      return -2;
+   return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

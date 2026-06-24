@@ -101,6 +101,24 @@ struct nir_shader;
 int
 nv_shader_compile_nir(struct nv_shader *sh, const struct nir_shader *nir);
 
+/**
+ * Upload vertical-slice compute shader object (SPH type=COMPUTE + SASS).
+ * mode 0: EXIT only (QMD sema is completion signal).
+ * mode 1: approximate STG imm to store_addr then EXIT (G2 store test).
+ * Replaces any prior code_bo.  Sets kind to COMPUTE.
+ */
+int
+nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
+                               uint32_t store_imm, uint64_t store_addr,
+                               uint32_t register_count);
+
+/** Convenience: EXIT-only compute smoke (mode 0). */
+static inline int
+nv_shader_upload_compute_exit_smoke(struct nv_shader *sh, uint32_t regs)
+{
+   return nv_shader_upload_compute_smoke(sh, 0, 0, 0, regs);
+}
+
 #ifdef __cplusplus
 }
 #endif

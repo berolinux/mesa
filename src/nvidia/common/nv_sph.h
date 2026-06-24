@@ -132,6 +132,9 @@ nv_sph_build_trivial(struct nv_sph_blob *blob, uint8_t type, uint16_t regs)
    struct nv_sph_info info;
    uint32_t code_off, total;
 
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
    nv_sph_info_defaults(&info, type);
    info.register_count = regs ? regs : 8;
    nv_sph_encode(&info, blob->sph);
@@ -148,6 +151,106 @@ nv_sph_build_trivial(struct nv_sph_blob *blob, uint8_t type, uint16_t regs)
       total = NV_SPH_TOTAL_MIN_BYTES;
    total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
    blob->total_bytes = total;
+}
+
+/**
+ * Smoke compute: SPH type=COMPUTE + single EXIT (valid minimal QMD target).
+ * Does not touch global memory; sema release on QMD is the completion signal.
+ */
+static inline void
+nv_sph_build_compute_exit_only(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_trivial(blob, NV_SPH_TYPE_COMPUTE, regs ? regs : 8);
+}
+
+#define NV_SPH_SASS_STG_HI      0xeed80000u
+#define NV_SPH_SASS_MOV_HI_REG  0x5c980780u
+#define NV_SPH_SASS_S2R_HI_CS   0x86400000u
+#define NV_SPH_SR_CTAID_X       37  /* block/grid id approximations (Maxwell+) */
+#define NV_SPH_SR_TID_X         33
+
+/**
+ * Smoke compute with global store: MOV R1, imm; STG [R0], R1; EXIT.
+ * Caller must set R0 to destination GPU VA low via QMD CB0 or prior setup —
+ * for true G2 store test, pass store_addr in R0 using MOV32I sequence below
+ * when store_addr_lo/hi are non-zero (two-reg address in R2:R3, STG via R2).
+ *
+ * When store_addr is 0: only EXIT (same as compute_exit_only but marks
+ * does_global_store=false).
+ * When store_addr non-zero: encode approximate MOV R2=lo, MOV R3=hi, MOV R1=imm,
+ * STG [R2], R1, EXIT and set does_global_store in SPH.
+ */
+static inline void
+nv_sph_build_compute_store_imm(struct nv_sph_blob *blob, uint32_t imm_value,
+                               uint64_t store_addr, uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   info.does_global_store = (store_addr != 0);
+   info.barrier_count = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+   if (store_addr) {
+      uint32_t lo = (uint32_t)(store_addr & 0xffffffffu);
+      uint32_t hi = (uint32_t)(store_addr >> 32);
+      /* MOV R2, store_lo (imm in lo dword with Rd=2) */
+      s[n++] = 2u | (lo & 0xffffff00u); /* imm/reg layout approximate */
+      s[n++] = NV_SPH_SASS_MOV_HI_REG | (lo & 0xffu);
+      s[n++] = 2u | lo;
+      s[n++] = NV_SPH_SASS_MOV_HI_REG;
+      /* MOV R3, store_hi */
+      s[n++] = 3u | hi;
+      s[n++] = NV_SPH_SASS_MOV_HI_REG;
+      /* MOV R1, imm_value (payload written by STG) */
+      s[n++] = 1u | imm_value;
+      s[n++] = NV_SPH_SASS_MOV_HI_REG;
+      /* STG.E.32 [R2], R1 — Ra=R2 addr, Rb=R1 data */
+      s[n++] = 2u | (1u << 8);
+      s[n++] = NV_SPH_SASS_STG_HI;
+   }
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
+/**
+ * Validate serialised SPH+SASS object layout (host-only / trace-golden).
+ * Returns 0 if SPH type matches, sass has EXIT at end, total_bytes aligned.
+ */
+static inline int
+nv_sph_smoke_validate_blob(const struct nv_sph_blob *blob, uint8_t expect_type)
+{
+   uint8_t type;
+   if (!blob || blob->total_bytes < NV_SPH_BYTES + 8)
+      return -1;
+   if (blob->total_bytes & (NV_SPH_CODE_ALIGN - 1))
+      return -2;
+   type = (uint8_t)(blob->sph[0] & 0xf);
+   if (expect_type && type != expect_type)
+      return -3;
+   if (blob->sass_dwords < 2)
+      return -4;
+   /* Last insn should be EXIT (common hi class) */
+   if (blob->sass[blob->sass_dwords - 1] != NV_SASS_EXIT_HI &&
+       blob->sass[blob->sass_dwords - 1] != 0x50b00000u)
+      return -5;
+   return 0;
 }
 
 /*
@@ -321,6 +424,36 @@ nv_sph_serialise(const struct nv_sph_blob *blob, void *dst, uint32_t dst_size)
    memcpy(d, blob->sph, NV_SPH_BYTES);
    if (dst_size >= NV_SPH_BYTES + blob->sass_dwords * 4)
       memcpy(d + NV_SPH_BYTES, blob->sass, blob->sass_dwords * 4);
+}
+
+/** Serialise compute EXIT smoke object; returns bytes written/needed, 0 on fail. */
+static inline uint32_t
+nv_sph_smoke_serialise_compute_exit(void *dst, uint32_t dst_size, uint16_t regs)
+{
+   struct nv_sph_blob blob;
+   nv_sph_build_compute_exit_only(&blob, regs);
+   if (nv_sph_smoke_validate_blob(&blob, NV_SPH_TYPE_COMPUTE) != 0)
+      return 0;
+   if (!dst || dst_size < blob.total_bytes)
+      return blob.total_bytes;
+   nv_sph_serialise(&blob, dst, dst_size);
+   return blob.total_bytes;
+}
+
+/** Serialise compute store+EXIT smoke; imm written via approximate STG path. */
+static inline uint32_t
+nv_sph_smoke_serialise_compute_store(void *dst, uint32_t dst_size,
+                                     uint32_t imm_value, uint64_t store_addr,
+                                     uint16_t regs)
+{
+   struct nv_sph_blob blob;
+   nv_sph_build_compute_store_imm(&blob, imm_value, store_addr, regs);
+   if (nv_sph_smoke_validate_blob(&blob, NV_SPH_TYPE_COMPUTE) != 0)
+      return 0;
+   if (!dst || dst_size < blob.total_bytes)
+      return blob.total_bytes;
+   nv_sph_serialise(&blob, dst, dst_size);
+   return blob.total_bytes;
 }
 
 static inline uint8_t

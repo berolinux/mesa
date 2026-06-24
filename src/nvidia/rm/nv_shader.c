@@ -325,8 +325,46 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
          return 0;
       /* Compile failed: still upload trivial shader so bind/draw does not fault */
    }
+   /* Compute without NIR: prefer SPH+EXIT smoke object over vertex-type trivial */
+   if (sh->kind == NV_SHADER_KIND_COMPUTE)
+      return nv_shader_upload_compute_smoke(sh, 0, 0, 0,
+                                            sh->register_count ? sh->register_count
+                                                               : 8);
    return nv_shader_upload_code(sh, NULL, 0,
                                 sh->register_count ? sh->register_count : 8);
+}
+
+int
+nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
+                               uint32_t store_imm, uint64_t store_addr,
+                               uint32_t register_count)
+{
+   struct nv_sph_blob blob;
+   uint8_t sph_buf[512];
+   uint32_t regs = register_count ? register_count : 16;
+   int vr;
+
+   if (!sh || !sh->rm)
+      return -1;
+
+   sh->kind = NV_SHADER_KIND_COMPUTE;
+   nv_shader_fill_stage_defaults(sh);
+
+   if (mode == 1 && store_addr)
+      nv_sph_build_compute_store_imm(&blob, store_imm, store_addr, (uint16_t)regs);
+   else
+      nv_sph_build_compute_exit_only(&blob, (uint16_t)regs);
+
+   vr = nv_sph_smoke_validate_blob(&blob, NV_SPH_TYPE_COMPUTE);
+   if (vr != 0)
+      return vr;
+
+   if (blob.total_bytes > sizeof(sph_buf))
+      return -1;
+   nv_sph_serialise(&blob, sph_buf, sizeof(sph_buf));
+
+   sh->uploaded = false;
+   return nv_shader_upload_code(sh, sph_buf, blob.total_bytes, regs);
 }
 
 /**

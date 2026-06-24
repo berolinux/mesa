@@ -68,6 +68,23 @@ nv_sass_emit_nop(struct nv_sass_buf *b)
    return nv_sass_emit_raw(b, 0x00000000u, 0x50b00000u);
 }
 
+bool
+nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b)
+{
+   return nv_sass_emit_exit(b);
+}
+
+bool
+nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
+                               uint8_t ra_addr, uint32_t imm)
+{
+   if (!nv_sass_emit_mov_ri(b, rd_data, imm))
+      return false;
+   if (!nv_sass_emit_stg_u32(b, ra_addr, rd_data))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
 /*
  * Register field placement for Maxwell/Pascal-style 64-bit instructions
  * (approximate; refined as more encodings are validated against proprietary output):

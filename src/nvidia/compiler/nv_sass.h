@@ -251,6 +251,15 @@ bool nv_sass_emit_raw(struct nv_sass_buf *b, uint32_t lo, uint32_t hi);
 
 bool nv_sass_emit_exit(struct nv_sass_buf *b);
 bool nv_sass_emit_nop(struct nv_sass_buf *b);
+
+/**
+ * Smoke sequences for vertical-slice / trace validation (8-byte Maxwell path).
+ * exit_only: single EXIT.  store_imm: MOV R1,imm; STG [R2],R1; EXIT (caller
+ * must have address in R2 or use nv_sph_build_compute_store_imm which embeds MOVs).
+ */
+bool nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b);
+bool nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
+                                    uint8_t ra_addr, uint32_t imm);
 bool nv_sass_emit_mov_rr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra);
 bool nv_sass_emit_mov_ri(struct nv_sass_buf *b, uint8_t rd, uint32_t imm);
 bool nv_sass_emit_iadd_rrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
