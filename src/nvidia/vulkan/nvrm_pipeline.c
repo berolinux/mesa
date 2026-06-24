@@ -12,6 +12,9 @@
 #include "nv_nir.h"
 #include "nv_fence.h"
 #include "nv_tex.h"
+#include "nv_qmd.h"
+#include "nv_device_info.h"
+#include "nv_rm.h"
 
 #include "vk_graphics_state.h"
 #include "vk_pipeline.h"
@@ -112,6 +115,10 @@ struct nvrm_compute_pipeline {
    struct vk_object_base base;
    struct nvrm_device *device;
    struct nv_shader *cs;
+   uint32_t local_size_x;
+   uint32_t local_size_y;
+   uint32_t local_size_z;
+   uint32_t shared_mem_bytes;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_graphics_pipeline, base, VkPipeline,
@@ -401,11 +408,26 @@ nvrm_CreateComputePipelines(VkDevice _device, VkPipelineCache pipelineCache,
       }
       vk_object_base_init(&device->vk, &pipe->base, VK_OBJECT_TYPE_PIPELINE);
       pipe->device = device;
+      pipe->local_size_x = 1;
+      pipe->local_size_y = 1;
+      pipe->local_size_z = 1;
+      pipe->shared_mem_bytes = 0;
       pipe->cs = nvrm_compile_stage(device, &pCreateInfos[i].stage);
       if (!pipe->cs) {
          pipe->cs = nv_shader_create(device->rm, NV_SHADER_KIND_COMPUTE);
          if (pipe->cs)
             nv_shader_compile_nir_stub(pipe->cs);
+      }
+      /* Pull local size / shared mem from compiled NIR when available */
+      if (pipe->cs && pipe->cs->nir) {
+         const struct nir_shader *ns = (const struct nir_shader *)pipe->cs->nir;
+         if (ns->info.workgroup_size[0])
+            pipe->local_size_x = ns->info.workgroup_size[0];
+         if (ns->info.workgroup_size[1])
+            pipe->local_size_y = ns->info.workgroup_size[1];
+         if (ns->info.workgroup_size[2])
+            pipe->local_size_z = ns->info.workgroup_size[2];
+         pipe->shared_mem_bytes = (uint32_t)ns->info.shared_size;
       }
       pPipelines[i] = nvrm_compute_pipeline_to_handle(pipe);
    }
@@ -1041,6 +1063,17 @@ nvrm_CmdBindPipeline(VkCommandBuffer commandBuffer,
                      VkPipeline _pipeline)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
+      struct nvrm_compute_pipeline *cp =
+         nvrm_compute_pipeline_from_handle(_pipeline);
+      cmd->bound_compute_pipeline = cp;
+      if (cp) {
+         cmd->compute_local_x = cp->local_size_x ? cp->local_size_x : 1;
+         cmd->compute_local_y = cp->local_size_y ? cp->local_size_y : 1;
+         cmd->compute_local_z = cp->local_size_z ? cp->local_size_z : 1;
+      }
+      return;
+   }
    if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
       return;
    struct nvrm_graphics_pipeline *pipe =
@@ -1322,33 +1355,90 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
 
 
 
-/* Local compute dispatch helpers (pre-QMD); kept out of nv_3d_methods.h to
- * avoid include-order / redefinition issues with inline helpers. */
-#define NVRM_BIND_GROUP_COMPUTE 5
+/* NVC3C0 QMD-based compute dispatch (clc3c0 / clc3c0qmd v02.02). */
 
 static void
-nvrm_emit_compute_dispatch(struct nv_push *p, uint32_t gx, uint32_t gy,
-                           uint32_t gz, uint64_t cs_prog, uint32_t regs)
+nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
+                           uint32_t gx, uint32_t gy, uint32_t gz)
 {
-   if (!p)
+   struct nv_qmd_desc desc;
+   struct nvrm_compute_pipeline *cp;
+   struct nv_shader *cs;
+   const struct nv_device_info *info;
+   uint32_t class_compute = 0;
+   uint64_t qmd_addr = 0;
+   uint64_t prog = 0;
+   uint32_t regs = 16;
+   uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
+   uint32_t shared = 0;
+   uint8_t sass_ver = 0x50;
+
+   if (!cmd || !cmd->push_map)
       return;
-   /* Pre-QMD: reuse 3D pipeline program bind for compute shader object VA.
-    * Real path will build NVC3C0 QMD from class headers. */
-   if (cs_prog) {
-      uint32_t shader_word = NVC597_SET_PIPELINE_SHADER_ENABLE_TRUE |
-         (NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL <<
-          NVC597_SET_PIPELINE_SHADER_TYPE_SHIFT);
-      nv_push_method(p, NVC597_SET_PIPELINE_SHADER(NV_3D_PIPE_STAGE_PIXEL),
-                     shader_word);
-      nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_A(NV_3D_PIPE_STAGE_PIXEL),
-                     (uint32_t)(cs_prog >> 32) & 0xff);
-      nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_B(NV_3D_PIPE_STAGE_PIXEL),
-                     (uint32_t)(cs_prog & 0xffffffffu));
-      nv_push_method(p, NVC597_SET_PIPELINE_REGISTER_COUNT(NV_3D_PIPE_STAGE_PIXEL),
-                     regs & 0xff);
+
+   cp = cmd->bound_compute_pipeline;
+   cs = cp ? cp->cs : NULL;
+   info = cmd->device ? cmd->device->info : NULL;
+   if (info) {
+      class_compute = info->class_compute;
+      if (info->sm_version)
+         sass_ver = (uint8_t)(info->sm_version & 0xff);
    }
-   nv_3d_bind_group_constant_buffer(p, NVRM_BIND_GROUP_COMPUTE, 0, false);
-   (void)gx; (void)gy; (void)gz;
+
+   if (cs) {
+      prog = cs->code_gpu_addr;
+      if (cs->register_count)
+         regs = cs->register_count;
+      if (cs->const_gpu_addr && cs->const_size) {
+         /* filled into desc below */
+      }
+   }
+
+   if (cp) {
+      cta_x = cp->local_size_x ? cp->local_size_x : 1;
+      cta_y = cp->local_size_y ? cp->local_size_y : 1;
+      cta_z = cp->local_size_z ? cp->local_size_z : 1;
+      shared = cp->shared_mem_bytes;
+   } else if (cmd->compute_local_x) {
+      cta_x = cmd->compute_local_x;
+      cta_y = cmd->compute_local_y ? cmd->compute_local_y : 1;
+      cta_z = cmd->compute_local_z ? cmd->compute_local_z : 1;
+   }
+
+   if (!gx) gx = 1;
+   if (!gy) gy = 1;
+   if (!gz) gz = 1;
+
+   memset(&desc, 0, sizeof(desc));
+   desc.program_addr = prog;
+   desc.program_offset = 0;
+   desc.grid_x = gx;
+   desc.grid_y = gy;
+   desc.grid_z = gz;
+   desc.cta_x = cta_x;
+   desc.cta_y = cta_y;
+   desc.cta_z = cta_z;
+   desc.register_count = regs;
+   desc.shared_mem_size = shared;
+   desc.sass_version = sass_ver;
+   desc.sm_global_caching = true;
+   desc.invalidate_caches = !cmd->compute_init_done;
+
+   if (cs && cs->const_gpu_addr && cs->const_size) {
+      desc.cb_addr[0] = cs->const_gpu_addr;
+      desc.cb_size[0] = cs->const_size;
+      desc.cb_valid_mask = 0x1;
+   }
+
+   if (cmd->qmd_bo)
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->qmd_bo);
+   else if (cmd->push_bo)
+      /* Fallback: use push BO GPU offset as QMD address field only;
+       * inline LOAD_INLINE_QMD_DATA carries the actual QMD contents. */
+      qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
+
+   nv_compute_emit_dispatch(&cmd->push, &desc, qmd_addr, class_compute);
+   cmd->compute_init_done = true;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1356,20 +1446,21 @@ nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
                  uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   struct nvrm_compute_pipeline *cp = NULL;
-   uint64_t prog = 0;
-   uint32_t regs = 16;
-
    if (!cmd || !cmd->push_map)
       return;
-   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   /* If a compute pipeline was bound via CmdBindPipeline, program_region is on gfx;
-    * track compute separately when available.  Use bound_gfx as fallback no-op. */
-   if (cmd->bound_gfx_pipeline && cmd->bound_gfx_pipeline->program_region_base)
-      prog = cmd->bound_gfx_pipeline->program_region_base;
-   (void)cp;
-   nvrm_emit_compute_dispatch(&cmd->push, groupCountX, groupCountY, groupCountZ,
-                               prog, regs);
+   nvrm_emit_compute_dispatch(cmd, groupCountX, groupCountY, groupCountZ);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
+                     uint32_t baseGroupX, uint32_t baseGroupY, uint32_t baseGroupZ,
+                     uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ)
+{
+   /* QMD CTA raster has no base offset field in the simple path; base groups
+    * would need shader-side workgroup ID remapping.  For now launch the same
+    * grid size (base is ignored until full indirect/base support lands). */
+   (void)baseGroupX; (void)baseGroupY; (void)baseGroupZ;
+   nvrm_CmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
 /* Queue submit: kick channel with cmd buffer push contents */

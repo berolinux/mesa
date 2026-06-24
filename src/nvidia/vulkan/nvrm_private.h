@@ -101,20 +101,29 @@ struct nvrm_sampler {
    bool unnormalized_coords;
 };
 
+/* Forward decls for pipeline types used in cmd buffer state */
+struct nvrm_graphics_pipeline;
+struct nvrm_compute_pipeline;
+
 struct nvrm_cmd_buffer {
    struct vk_command_buffer vk;
    struct nvrm_device *device;
    struct nv_rm_bo *push_bo;
+   struct nv_rm_bo *qmd_bo;   /* scratch for inline QMD GPU address field */
    uint32_t *push_map;
    uint32_t push_dw_cap;
    uint32_t push_dw_used;
    struct nv_push push;
-   /* Recording state for graphics */
+   /* Recording state for graphics / compute */
    struct nvrm_graphics_pipeline *bound_gfx_pipeline;
+   struct nvrm_compute_pipeline *bound_compute_pipeline;
    bool channel_init_done;
+   bool compute_init_done;
    bool in_render_pass;
    uint32_t render_width;
    uint32_t render_height;
+   /* Default local workgroup size when pipeline does not specify */
+   uint32_t compute_local_x, compute_local_y, compute_local_z;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvrm_instance, vk.base, VkInstance, VK_OBJECT_TYPE_INSTANCE)
@@ -290,6 +299,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateImage(VkDevice device,
                                                 VkImage *pImage);
 VKAPI_ATTR void VKAPI_CALL nvrm_DestroyImage(VkDevice device, VkImage image,
                                              const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
+                                                uint32_t baseGroupX,
+                                                uint32_t baseGroupY,
+                                                uint32_t baseGroupZ,
+                                                uint32_t groupCountX,
+                                                uint32_t groupCountY,
+                                                uint32_t groupCountZ);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
                                             uint32_t groupCountX,
                                             uint32_t groupCountY,
