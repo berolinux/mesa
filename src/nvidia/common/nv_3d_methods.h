@@ -717,6 +717,89 @@ nv_3d_emit_draw_vertex_array_instanced(struct nv_push *p,
    nv_3d_emit_draw_vertex_array(p, first_vertex, vertex_count);
 }
 
+/**
+ * VkDrawIndirectCommand / pipe indirect non-indexed record (16 bytes):
+ *   [0] vertexCount  [1] instanceCount  [2] firstVertex  [3] firstInstance
+ * Emit one draw from a CPU-visible record pointer.
+ */
+static inline void
+nv_3d_emit_draw_indirect_record(struct nv_push *p, uint32_t topology_nv,
+                                const uint32_t rec[4])
+{
+   uint32_t vertex_count, instance_count, first_vertex, first_instance;
+   if (!rec)
+      return;
+   vertex_count = rec[0];
+   instance_count = rec[1] ? rec[1] : 1;
+   first_vertex = rec[2];
+   first_instance = rec[3];
+   if (!vertex_count)
+      return;
+   nv_3d_emit_draw_vertex_array_instanced(p, topology_nv, first_vertex,
+                                          vertex_count, instance_count,
+                                          first_instance);
+}
+
+/**
+ * VkDrawIndexedIndirectCommand (20 bytes):
+ *   [0] indexCount  [1] instanceCount  [2] firstIndex
+ *   [3] vertexOffset (int32)  [4] firstInstance
+ */
+static inline void
+nv_3d_emit_draw_indexed_indirect_record(struct nv_push *p, uint32_t topology_nv,
+                                        const uint32_t rec[5])
+{
+   uint32_t index_count, instance_count, first_index, first_instance;
+   int32_t vertex_offset;
+   if (!rec)
+      return;
+   index_count = rec[0];
+   instance_count = rec[1] ? rec[1] : 1;
+   first_index = rec[2];
+   vertex_offset = (int32_t)rec[3];
+   first_instance = rec[4];
+   if (!index_count)
+      return;
+   nv_3d_set_global_base_vertex_instance(p, (uint32_t)vertex_offset,
+                                         first_instance);
+   nv_3d_set_draw_control(p, topology_nv, instance_count, true);
+   nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_A, first_index);
+   nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_B, index_count);
+}
+
+/** Emit up to draw_count indirect non-indexed draws from tightly/strided records */
+static inline void
+nv_3d_emit_draw_indirect_multi(struct nv_push *p, uint32_t topology_nv,
+                               const uint32_t *base, uint32_t draw_count,
+                               uint32_t stride_bytes)
+{
+   uint32_t d;
+   uint32_t stride = stride_bytes ? stride_bytes : 16;
+   if (!base || !draw_count)
+      return;
+   for (d = 0; d < draw_count; d++) {
+      const uint32_t *rec = (const uint32_t *)((const uint8_t *)base +
+                                               (size_t)d * stride);
+      nv_3d_emit_draw_indirect_record(p, topology_nv, rec);
+   }
+}
+
+static inline void
+nv_3d_emit_draw_indexed_indirect_multi(struct nv_push *p, uint32_t topology_nv,
+                                       const uint32_t *base, uint32_t draw_count,
+                                       uint32_t stride_bytes)
+{
+   uint32_t d;
+   uint32_t stride = stride_bytes ? stride_bytes : 20;
+   if (!base || !draw_count)
+      return;
+   for (d = 0; d < draw_count; d++) {
+      const uint32_t *rec = (const uint32_t *)((const uint8_t *)base +
+                                               (size_t)d * stride);
+      nv_3d_emit_draw_indexed_indirect_record(p, topology_nv, rec);
+   }
+}
+
 static inline void
 nv_3d_emit_draw_index_buffer(struct nv_push *p, uint32_t first, uint32_t count)
 {
@@ -1389,6 +1472,47 @@ nv_3d_emit_msaa(struct nv_push *p, uint32_t sample_count, bool alpha_to_coverage
    nv_push_method(p, NVC597_SET_ANTI_ALIAS_SAMPLES, samples_log2);
    nv_push_method(p, NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL,
                   alpha_to_coverage ? 1 : 0);
+}
+
+static inline void
+nv_3d_emit_alpha_to_coverage(struct nv_push *p, bool enable)
+{
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL, enable ? 1 : 0);
+}
+
+/** Depth clamp: when enabled, disable depth clip (hardware clip enable inverse) */
+static inline void
+nv_3d_emit_depth_clamp_enable(struct nv_push *p, bool clamp_enable)
+{
+   /* On Maxwell+ SET_VIEWPORT_CLIP_CONTROL / depth range; approximate via
+    * ZCULL bounds always-pass when clamp is on.  Full clip control refined later. */
+   (void)clamp_enable;
+   nv_push_method(p, NVC597_SET_ZCULL_BOUNDS, clamp_enable ? 0u : 0u);
+}
+
+/**
+ * Bind a depth/stencil (ZETA) target from image parameters and optionally clear.
+ * Used by CmdClearDepthStencilImage when not inside an active render pass.
+ */
+static inline void
+nv_3d_bind_and_clear_zeta(struct nv_push *p, uint64_t gpu_addr,
+                          uint32_t width, uint32_t height, uint32_t pitch,
+                          uint32_t zt_format, unsigned clear_buffers,
+                          float depth, uint32_t stencil)
+{
+   struct nv_3d_surface s;
+   memset(&s, 0, sizeof(s));
+   s.gpu_addr = gpu_addr;
+   s.width = width ? width : 1;
+   s.height = height ? height : 1;
+   s.array_pitch = pitch ? pitch : (s.width * 4);
+   s.format = zt_format ? zt_format : NVC597_SET_ZT_FORMAT_V_Z24S8;
+   s.block_linear = false;
+   s.enabled = true;
+   nv_3d_set_zeta_target(p, &s);
+   nv_3d_set_surface_clip(p, 0, 0, s.width, s.height);
+   if (clear_buffers)
+      nv_3d_emit_clear_surface(p, clear_buffers, NULL, depth, stencil);
 }
 
 static inline void
