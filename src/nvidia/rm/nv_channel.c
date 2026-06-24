@@ -417,8 +417,6 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
    (void)ch;
    return -ENOSYS;
 #else
-   int ret;
-
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
 
@@ -460,9 +458,54 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
          ch->work_submit_token = tok.workSubmitToken;
          ch->has_work_submit_token = true;
       }
+      /* Pre-Volta / older GPFIFO classes: token ctrl may fail; GPPut-only ok */
    }
 
-   (void)ret;
+   return 0;
+#endif
+}
+
+int
+nv_channel_submit_preflight(struct nv_channel *ch, int *detail_out)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+   if (detail_out)
+      *detail_out = -ENOSYS;
+   return -ENOSYS;
+#else
+   int r;
+
+   if (detail_out)
+      *detail_out = 0;
+   if (!ch || !ch->rm || !ch->h_channel) {
+      if (detail_out)
+         *detail_out = -EINVAL;
+      return -EINVAL;
+   }
+   if (!ch->gpfifo_cpu || !ch->userd || !ch->push_cpu || !ch->push_gpu_addr) {
+      if (detail_out)
+         *detail_out = -EINVAL;
+      return -EINVAL;
+   }
+
+   r = nv_channel_ensure_submit_ready(ch);
+   if (r) {
+      if (detail_out)
+         *detail_out = r;
+      return r;
+   }
+
+   if (!ch->scheduled) {
+      if (detail_out)
+         *detail_out = -EAGAIN; /* schedule failed; methods won't run */
+      return -EAGAIN;
+   }
+
+   /* Token+doorbell optional (pre-Volta GPPut-only); report via detail 1 if missing */
+   if (detail_out && !(ch->has_work_submit_token && ch->usermode_map))
+      *detail_out = 1; /* non-fatal: GPPut-only kick path */
+
    return 0;
 #endif
 }
@@ -706,11 +749,17 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
    uint32_t *map;
    uint32_t need = 64;
    uint32_t cc;
+   int pre;
 
    if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
       return -EINVAL;
    if (!sema_payload)
       sema_payload = 0x42u;
+
+   /* Fail fast if channel cannot run methods (schedule/USERD/push missing) */
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
 
    cc = nv_channel_resolve_class_copy(ch, class_copy);
 
@@ -745,11 +794,16 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
    uint32_t *map;
    uint32_t need = 32;
    uint32_t cc;
+   int pre;
 
    if (!ch || !sema_gpu_addr)
       return -EINVAL;
    if (!sema_payload)
       sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
 
    cc = nv_channel_resolve_class_copy(ch, class_copy);
 

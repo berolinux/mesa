@@ -100,8 +100,17 @@ nv_channel_push_begin(struct nv_channel *ch, uint32_t need_dwords);
 /**
  * Ensure channel is scheduled + work_submit_token/usermode doorbell ready.
  * Called lazily from kickoff if create-time setup was incomplete.
+ * Returns 0 even if schedule/token still missing (GPPut-only path may work);
+ * use nv_channel_submit_preflight() for strict G1 bring-up checks.
  */
 int nv_channel_ensure_submit_ready(struct nv_channel *ch);
+
+/**
+ * G1/G2 bring-up preflight: ensure_submit_ready + verify channel has USERD/GPFIFO/push
+ * and is scheduled.  On failure sets *detail_out (optional) to a short errno-ish code:
+ *  -EINVAL missing objects, -EAGAIN not scheduled, 0 ok (token/doorbell optional).
+ */
+int nv_channel_submit_preflight(struct nv_channel *ch, int *detail_out);
 
 /** Commit pushbuffer segment and submit via GPFIFO + GPPut update */
 int

@@ -34,9 +34,11 @@
  *     Log refined gpfifo/3d/compute/copy classes at nv_rm_device_open time.
  *
  * Kickoff path (G1 hung sema with g1_sema_only also failing):
- *   - Channel schedule (NVA06F/A06C GPFIFO_SCHEDULE) must succeed
- *   - Volta+: usermode doorbell + work_submit_token; else GPPut-only kick
+ *   - Channel schedule (NVA06F/A06C GPFIFO_SCHEDULE) must succeed (preflight -EAGAIN)
+ *   - Volta+: usermode doorbell + work_submit_token; else GPPut-only kick (pre_d=1)
  *   - USERD GPPut published before doorbell (libdrm nvidia_gpfifo_submit_one)
+ *   - GP entry wait uses SYNC_WAIT bit 31 (not LEVEL_SUBROUTINE bit 9)
+ *   - nv_channel_submit_preflight() before G1 reports schedule/USERD/doorbell state
  *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
@@ -84,8 +86,12 @@ struct nv_smoke_hw_result {
    int g1_submit_rc;   /* return from nv_channel_g1_ce_copy_sema_submit */
    int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
    int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
+   int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */
+   int g1_preflight_detail; /* 0 ok, 1=GPPut-only (no doorbell token), else errno */
    uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
    uint32_t g1_class_copy;    /* class used (0 if unknown) */
+   bool g1_had_doorbell;      /* work_submit_token + usermode map at G1 start */
+   bool g1_was_scheduled;     /* channel scheduled at G1 start */
    /* G2 phase detail */
    int g2_submit_rc;
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */

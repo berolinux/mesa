@@ -66,11 +66,14 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
       return;
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
+           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_db=%d"
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_sema=0x%x g1_class=0x%x"
            " g2_submit=%d g2_store=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
            p,
            (unsigned)res->slices_run, (unsigned)res->slices_ok,
            res->g1_rc, res->g2_rc, res->g3_rc,
+           res->g1_preflight_rc, res->g1_preflight_detail,
+           res->g1_was_scheduled ? 1 : 0, res->g1_had_doorbell ? 1 : 0,
            res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
            (unsigned)res->g1_sema_observed,
            (unsigned)res->g1_class_copy,
@@ -80,10 +83,16 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            (unsigned long long)res->g2_prog_gpu);
    if (res->g1_rc < 0 && (res->slices_run & NV_SMOKE_HW_G1)) {
       fprintf(stderr,
-              "%s: G1 bring-up hints: class_copy=0x%x submit_rc=%d sema_only_rc=%d "
-              "(EINVAL=bad class/args, ETIMEDOUT=sema/GPFIFO wait, "
-              "payload_rc=-EIO=sema ok but CE copy wrong; sema_only isolates CE vs sema)\n",
-              p, (unsigned)res->g1_class_copy, res->g1_submit_rc,
+              "%s: G1 bring-up hints: class_copy=0x%x preflight=%d (detail=%d) "
+              "sched=%d doorbell=%d submit_rc=%d sema_only_rc=%d\n"
+              "  preflight -EAGAIN = GPFIFO_SCHEDULE failed (fix schedule first)\n"
+              "  preflight -EINVAL = missing USERD/GPFIFO/push (channel alloc)\n"
+              "  ETIMEDOUT + sema_only also fail = schedule/doorbell/GPPut not kicking\n"
+              "  sema_only ok but copy fail = CE methods/class/pitch (class_copy)\n"
+              "  payload_rc=-EIO = sema ok but 256B dst!=src (wrong offsets/VAS)\n",
+              p, (unsigned)res->g1_class_copy, res->g1_preflight_rc,
+              res->g1_preflight_detail, res->g1_was_scheduled ? 1 : 0,
+              res->g1_had_doorbell ? 1 : 0, res->g1_submit_rc,
               res->g1_sema_only_rc);
    }
    if (res->g2_rc < 0 && (res->slices_run & NV_SMOKE_HW_G2)) {
@@ -238,7 +247,16 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;
       res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
-      if (!sc->src_gpu || !sc->dst_gpu) {
+      res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
+      res.g1_was_scheduled = ch->scheduled;
+      res.g1_had_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
+
+      if (res.g1_preflight_rc != 0 && res.g1_preflight_rc != -EAGAIN) {
+         /* Hard failure: missing channel objects — skip submit noise */
+         res.g1_rc = res.g1_preflight_rc;
+         res.g1_submit_rc = res.g1_preflight_rc;
+         r = res.g1_rc;
+      } else if (!sc->src_gpu || !sc->dst_gpu) {
          res.g1_rc = -EINVAL;
          res.g1_submit_rc = -EINVAL;
          r = res.g1_rc;
@@ -249,6 +267,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             memset(sc->dst_cpu, 0, 256);
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
+         /* Still attempt submit on -EAGAIN (unscheduled) so logs show ETIMEDOUT vs EAGAIN */
          res.g1_submit_rc = nv_channel_g1_ce_copy_sema_submit(ch, 0,
                                                               sc->src_gpu,
                                                               sc->dst_gpu,
@@ -270,11 +289,12 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g1_payload_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G1;
             }
-         } else if (res.g1_submit_rc != 0) {
+         } else if (res.g1_submit_rc != 0 && res.g1_submit_rc != -EAGAIN) {
             /*
              * Secondary probe: sema-only CE fence.  If this succeeds, sema/GPFIFO
              * path works and failure is in copy methods/class; if it fails too,
              * fix channel/submit/sema before debugging CE pitch.
+             * Skip when preflight already says unscheduled (submit would only EAGAIN).
              */
             if (sc->sema_cpu)
                sc->sema_cpu[0] = 0;
@@ -286,6 +306,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                                                                     check_notifier);
             if (sc->sema_cpu)
                res.g1_sema_observed = sc->sema_cpu[0];
+         } else if (res.g1_submit_rc == -EAGAIN) {
+            res.g1_sema_only_rc = -EAGAIN;
          }
          if (res.g1_rc && !r)
             r = res.g1_rc;
