@@ -490,6 +490,81 @@ nvgpu_video_apply_av1_picture_desc(struct nvgpu_video_codec *dec,
    return true;
 }
 
+/**
+ * Apply pipe_vp9_picture_desc frame params + ref[8] DPB into session vp9_ps.
+ */
+static bool
+nvgpu_video_apply_vp9_picture_desc(struct nvgpu_video_codec *dec,
+                                   struct pipe_picture_desc *picture)
+{
+   const struct pipe_vp9_picture_desc *vp9;
+   unsigned i;
+
+   if (!dec || !picture)
+      return false;
+   if (u_reduce_video_profile(dec->base.profile) != PIPE_VIDEO_FORMAT_VP9)
+      return false;
+
+   vp9 = (const struct pipe_vp9_picture_desc *)picture;
+
+   nv_nvdec_vp9_apply_frame(&dec->session.vp9_ps,
+      vp9->picture_parameter.frame_width,
+      vp9->picture_parameter.frame_height,
+      vp9->picture_parameter.prev_frame_width,
+      vp9->picture_parameter.prev_frame_height,
+      vp9->picture_parameter.profile,
+      vp9->picture_parameter.bit_depth
+         ? vp9->picture_parameter.bit_depth : 8,
+      vp9->picture_parameter.pic_fields.subsampling_x,
+      vp9->picture_parameter.pic_fields.subsampling_y,
+      vp9->picture_parameter.pic_fields.frame_type,
+      vp9->picture_parameter.pic_fields.show_frame,
+      vp9->picture_parameter.pic_fields.error_resilient_mode,
+      vp9->picture_parameter.pic_fields.intra_only,
+      vp9->picture_parameter.pic_fields.allow_high_precision_mv,
+      vp9->picture_parameter.pic_fields.mcomp_filter_type,
+      vp9->picture_parameter.pic_fields.refresh_frame_context,
+      vp9->picture_parameter.pic_fields.frame_context_idx,
+      vp9->picture_parameter.pic_fields.reset_frame_context,
+      vp9->picture_parameter.pic_fields.segmentation_enabled,
+      vp9->picture_parameter.pic_fields.segmentation_update_map,
+      vp9->picture_parameter.pic_fields.segmentation_temporal_update,
+      vp9->picture_parameter.pic_fields.segmentation_update_data,
+      vp9->picture_parameter.pic_fields.last_ref_frame,
+      vp9->picture_parameter.pic_fields.golden_ref_frame,
+      vp9->picture_parameter.pic_fields.alt_ref_frame,
+      vp9->picture_parameter.pic_fields.last_ref_frame_sign_bias,
+      vp9->picture_parameter.pic_fields.golden_ref_frame_sign_bias,
+      vp9->picture_parameter.pic_fields.alt_ref_frame_sign_bias,
+      vp9->picture_parameter.pic_fields.lossless_flag,
+      vp9->picture_parameter.pic_fields.use_prev_frame_mvs,
+      vp9->picture_parameter.filter_level,
+      vp9->picture_parameter.sharpness_level,
+      vp9->picture_parameter.log2_tile_rows,
+      vp9->picture_parameter.log2_tile_columns,
+      vp9->picture_parameter.base_qindex,
+      vp9->picture_parameter.y_dc_delta_q,
+      vp9->picture_parameter.uv_dc_delta_q,
+      vp9->picture_parameter.uv_ac_delta_q,
+      vp9->picture_parameter.first_partition_size,
+      vp9->picture_parameter.frame_header_length_in_bytes);
+
+   for (i = 0; i < 8; i++) {
+      uint64_t luma = 0, chroma = 0;
+      uint32_t lp = 0, cp = 0;
+      if (vp9->ref[i]) {
+         nvgpu_video_buffer_planes(vp9->ref[i], &luma, &chroma, &lp, &cp);
+         if (lp)
+            dec->session.vp9_ps.dpb_luma_pitch = lp;
+         if (cp)
+            dec->session.vp9_ps.dpb_chroma_pitch = cp;
+      }
+      nv_nvdec_session_set_vp9_dpb(&dec->session, i, luma, chroma);
+   }
+   dec->session.vp9_ps_valid = true;
+   return true;
+}
+
 static void
 nvgpu_video_apply_picture_desc(struct nvgpu_video_codec *dec,
                                struct pipe_picture_desc *picture)
@@ -500,7 +575,9 @@ nvgpu_video_apply_picture_desc(struct nvgpu_video_codec *dec,
       return;
    if (nvgpu_video_apply_h265_picture_desc(dec, picture))
       return;
-   (void)nvgpu_video_apply_av1_picture_desc(dec, picture);
+   if (nvgpu_video_apply_av1_picture_desc(dec, picture))
+      return;
+   (void)nvgpu_video_apply_vp9_picture_desc(dec, picture);
 }
 
 static void
