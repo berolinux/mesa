@@ -157,7 +157,146 @@ struct nv_nvdec_frame_setup {
    uint64_t status_gpu_addr;     /* NVDEC status/report BO */
    uint32_t display_buf_size;
    uint32_t execute_flags;
+   /* Optional output surfaces (display/decoded YUV planes, 256B-aligned offsets) */
+   uint64_t output_luma_gpu_addr;
+   uint64_t output_chroma_gpu_addr;
+   uint32_t output_luma_pitch;
+   uint32_t output_chroma_pitch;
+   uint32_t mb_width;            /* macroblock / CTB width hint for pic_setup */
+   uint32_t mb_height;
+   uint32_t bit_depth_luma_minus8;
+   uint32_t bit_depth_chroma_minus8;
 };
+
+/*
+ * Codec picture-setup BO layouts (host-written, GPU-read via pic_setup offset).
+ * Field offsets refined from binary-driver structures / class expectations;
+ * sizes are conservative upper bounds used for BO allocation.
+ *
+ * Layout convention: little-endian dwords; many fields are 16-bit pairs packed
+ * into 32-bit words matching the proprietary driver's pic_setup DMA format.
+ */
+#define NV_NVDEC_PIC_SETUP_H264_BYTES    1024
+#define NV_NVDEC_PIC_SETUP_HEVC_BYTES    2048
+#define NV_NVDEC_PIC_SETUP_AV1_BYTES     4096
+#define NV_NVDEC_PIC_SETUP_VP9_BYTES     1024
+#define NV_NVDEC_PIC_SETUP_MAX_BYTES     NV_NVDEC_PIC_SETUP_AV1_BYTES
+
+/* H.264 pic_setup dword indices (subset; matches common proprietary layout) */
+#define NV_H264_PS_MB_WH                 0   /* (mb_height<<16)|mb_width */
+#define NV_H264_PS_FRAME_NUM             1
+#define NV_H264_PS_SPS_FLAGS             2   /* profile/level/chroma format bits */
+#define NV_H264_PS_PPS_FLAGS             3   /* entropy/cabac/weighted pred */
+#define NV_H264_PS_NUM_REFL0             4
+#define NV_H264_PS_NUM_REFL1             5
+#define NV_H264_PS_CURR_PIC_IDX          6
+#define NV_H264_PS_FIELD_ORDER_CNT_0     7
+#define NV_H264_PS_FIELD_ORDER_CNT_1     8
+#define NV_H264_PS_OUTPUT_LUMA_OFF       16  /* >>8 offset words in some gens */
+#define NV_H264_PS_OUTPUT_CHROMA_OFF     17
+#define NV_H264_PS_HISTOGRAM_OFF         18
+#define NV_H264_PS_COLOC_OFF             19
+#define NV_H264_PS_BITSTREAM_LEN         20
+
+/* HEVC pic_setup */
+#define NV_HEVC_PS_PIC_WH                0   /* (height<<16)|width in pixels or CTBs */
+#define NV_HEVC_PS_LOG2_CTB              1
+#define NV_HEVC_PS_SPS_FLAGS             2
+#define NV_HEVC_PS_PPS_FLAGS             3
+#define NV_HEVC_PS_NUM_REFL0             4
+#define NV_HEVC_PS_NUM_REFL1             5
+#define NV_HEVC_PS_CURR_IDX              6
+#define NV_HEVC_PS_OUTPUT_LUMA_OFF       24
+#define NV_HEVC_PS_OUTPUT_CHROMA_OFF     25
+#define NV_HEVC_PS_TILE_INFO_OFF         26
+#define NV_HEVC_PS_SCALING_LIST_OFF      27
+
+/* AV1 pic_setup (larger; tile/seg maps follow fixed header) */
+#define NV_AV1_PS_FRAME_WH               0
+#define NV_AV1_PS_PROF_TIER_LEVEL        1
+#define NV_AV1_PS_FRAME_TYPE_FLAGS       2
+#define NV_AV1_PS_ORDER_HINT             3
+#define NV_AV1_PS_PRIMARY_REF            4
+#define NV_AV1_PS_OUTPUT_LUMA_OFF        32
+#define NV_AV1_PS_OUTPUT_CHROMA_OFF      33
+#define NV_AV1_PS_CDF_OFF                34
+#define NV_AV1_PS_SEG_MAP_OFF            35
+#define NV_AV1_PS_TILE_INFO_OFF          36
+
+/** Return recommended pic_setup BO size for app_id */
+static inline uint32_t
+nv_nvdec_pic_setup_size(uint32_t app_id)
+{
+   switch (app_id) {
+   case NV_NVDEC_APP_ID_HEVC: return NV_NVDEC_PIC_SETUP_HEVC_BYTES;
+   case NV_NVDEC_APP_ID_AV1:  return NV_NVDEC_PIC_SETUP_AV1_BYTES;
+   case NV_NVDEC_APP_ID_VP9:  return NV_NVDEC_PIC_SETUP_VP9_BYTES;
+   default:                   return NV_NVDEC_PIC_SETUP_H264_BYTES;
+   }
+}
+
+/**
+ * Populate a host-mapped pic_setup buffer with essential geometry/output
+ * offsets from frame_setup.  Does not fill full reference lists (caller or
+ * higher-level VA-API path must extend); provides a valid minimal header so
+ * NVDEC execute has non-zero required fields.
+ */
+static inline void
+nv_nvdec_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
+                                const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t app;
+   uint32_t mb_w, mb_h;
+   if (!pic_dwords || !pic_dwords_cap || !fs)
+      return;
+   memset(pic_dwords, 0, (size_t)pic_dwords_cap * 4u);
+   app = fs->app_id ? fs->app_id : NV_NVDEC_APP_ID_H264;
+   mb_w = fs->mb_width ? fs->mb_width : 1;
+   mb_h = fs->mb_height ? fs->mb_height : 1;
+
+   switch (app) {
+   case NV_NVDEC_APP_ID_HEVC:
+      if (pic_dwords_cap > NV_HEVC_PS_PIC_WH)
+         pic_dwords[NV_HEVC_PS_PIC_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      if (pic_dwords_cap > NV_HEVC_PS_CURR_IDX)
+         pic_dwords[NV_HEVC_PS_CURR_IDX] = fs->picture_index;
+      if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_HEVC_PS_OUTPUT_LUMA_OFF)
+         pic_dwords[NV_HEVC_PS_OUTPUT_LUMA_OFF] =
+            (uint32_t)(fs->output_luma_gpu_addr >> 8);
+      if (fs->output_chroma_gpu_addr && pic_dwords_cap > NV_HEVC_PS_OUTPUT_CHROMA_OFF)
+         pic_dwords[NV_HEVC_PS_OUTPUT_CHROMA_OFF] =
+            (uint32_t)(fs->output_chroma_gpu_addr >> 8);
+      break;
+   case NV_NVDEC_APP_ID_AV1:
+      if (pic_dwords_cap > NV_AV1_PS_FRAME_WH)
+         pic_dwords[NV_AV1_PS_FRAME_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_AV1_PS_OUTPUT_LUMA_OFF)
+         pic_dwords[NV_AV1_PS_OUTPUT_LUMA_OFF] =
+            (uint32_t)(fs->output_luma_gpu_addr >> 8);
+      if (fs->output_chroma_gpu_addr && pic_dwords_cap > NV_AV1_PS_OUTPUT_CHROMA_OFF)
+         pic_dwords[NV_AV1_PS_OUTPUT_CHROMA_OFF] =
+            (uint32_t)(fs->output_chroma_gpu_addr >> 8);
+      break;
+   case NV_NVDEC_APP_ID_H264:
+   default:
+      if (pic_dwords_cap > NV_H264_PS_MB_WH)
+         pic_dwords[NV_H264_PS_MB_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      if (pic_dwords_cap > NV_H264_PS_CURR_PIC_IDX)
+         pic_dwords[NV_H264_PS_CURR_PIC_IDX] = fs->picture_index;
+      if (pic_dwords_cap > NV_H264_PS_BITSTREAM_LEN)
+         pic_dwords[NV_H264_PS_BITSTREAM_LEN] = fs->bitstream_size;
+      if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_H264_PS_OUTPUT_LUMA_OFF)
+         pic_dwords[NV_H264_PS_OUTPUT_LUMA_OFF] =
+            (uint32_t)(fs->output_luma_gpu_addr >> 8);
+      if (fs->output_chroma_gpu_addr && pic_dwords_cap > NV_H264_PS_OUTPUT_CHROMA_OFF)
+         pic_dwords[NV_H264_PS_OUTPUT_CHROMA_OFF] =
+            (uint32_t)(fs->output_chroma_gpu_addr >> 8);
+      if (fs->coloc_gpu_addr && pic_dwords_cap > NV_H264_PS_COLOC_OFF)
+         pic_dwords[NV_H264_PS_COLOC_OFF] =
+            (uint32_t)(fs->coloc_gpu_addr >> 8);
+      break;
+   }
+}
 
 /* Map Vulkan/VA-API style codec tags to NVDEC application ID */
 static inline uint32_t
