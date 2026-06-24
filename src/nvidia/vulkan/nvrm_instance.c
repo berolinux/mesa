@@ -80,15 +80,13 @@ nvrm_GetInstanceProcAddr(VkInstance _instance, const char *pName)
    return vk_instance_get_proc_addr_unchecked(&instance->vk, pName);
 }
 
+/* ICD: vk_icdNegotiateLoaderICDInterfaceVersion comes from idep_vulkan_runtime
+ * (vk_instance.c).  Only override GetInstanceProcAddr for the shared ICD so
+ * the loader resolves entrypoints through our dispatch tables. */
+#if defined(NVRM_ICD_BUILD)
 PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
    return nvrm_GetInstanceProcAddr(instance, pName);
 }
-
-PUBLIC VKAPI_ATTR VkResult VKAPI_CALL
-vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion)
-{
-   *pSupportedVersion = MIN2(*pSupportedVersion, 6u);
-   return VK_SUCCESS;
-}
+#endif /* NVRM_ICD_BUILD */
