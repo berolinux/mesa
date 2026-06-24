@@ -24,6 +24,7 @@ struct nv_channel;
 struct nv_shader;
 struct nv_fence;
 struct nv_tex_pool;
+struct nv_smoke_hw_scratch;
 struct nvgpu_context;
 
 #define NVGPU_PUSH_DWORDS  (64 * 1024)
@@ -136,6 +137,9 @@ struct nvgpu_context {
    struct nv_rm_bo *indirect_shadow_bo;
    void *indirect_shadow_map;
    uint32_t indirect_shadow_bo_size;
+
+   /* Optional HW smoke scratch (G1/G2/G3); allocated on first smoke_hw_run */
+   struct nv_smoke_hw_scratch *smoke_hw;
 };
 
 /* Occlusion / timestamp query backed by RM sema BO (report semaphore target).
@@ -160,5 +164,14 @@ nvgpu_context(struct pipe_context *pctx)
 
 struct pipe_context *nvgpu_context_create(struct pipe_screen *pscreen,
                                           void *priv, unsigned flags);
+
+/**
+ * Run G1/G2/G3 vertical slices on ctx->channel (creates channel if needed).
+ * slices: NV_SMOKE_HW_G1|G2|G3 or NV_SMOKE_HW_ALL.  timeout_ns 0 = default 2s.
+ * Returns 0 if all requested slices succeeded; negative on first failure.
+ * Requires live proprietary kernel + libdrm_nvidia; else -ENOSYS.
+ */
+int nvgpu_context_smoke_hw_run(struct pipe_context *pctx, uint32_t slices,
+                               uint64_t timeout_ns);
 
 #endif

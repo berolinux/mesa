@@ -29,6 +29,8 @@
 
 #include "nv_rm.h"
 #include "nv_channel.h"
+
+struct nv_smoke_hw_scratch; /* nv_smoke_hw.h */
 #include "nv_device_info.h"
 #include "nv_push.h"
 #include "nv_3d_methods.h"
@@ -66,6 +68,9 @@ struct nvrm_device {
    /* MME indirect path C: stubs uploaded once per device (END-only until
     * real draw-indirect macro microcode lands from binary RE). */
    bool mme_indirect_uploaded;
+   /* HW smoke scratch (G1/G2/G3); lazy alloc on nvrm_device_smoke_hw_run */
+   struct nv_smoke_hw_scratch *smoke_hw;
+   struct nv_shader *smoke_cs; /* optional compute smoke for G2 */
 };
 
 struct nvrm_queue {
@@ -619,6 +624,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit(VkQueue queue, uint32_t submitCo
                                                 const VkSubmitInfo *pSubmits, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueWaitIdle(VkQueue queue);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_DeviceWaitIdle(VkDevice device);
+
+/**
+ * Run G1/G2/G3 HW smoke on device queue channel (bring-up / debug).
+ * slices: NV_SMOKE_HW_* bitmask.  Returns 0 if all requested slices ok.
+ * Without channel/RM returns -ENOSYS / -EINVAL.
+ */
+int nvrm_device_smoke_hw_run(struct nvrm_device *device, uint32_t slices,
+                             uint64_t timeout_ns);
+
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateSampler(VkDevice device,
                                                   const VkSamplerCreateInfo *pCreateInfo,
                                                   const VkAllocationCallbacks *pAllocator,

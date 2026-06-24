@@ -14,6 +14,7 @@
 
 #include "nv_rm.h"
 #include "nv_channel.h"
+#include "nv_smoke_hw.h"
 #include "nv_push.h"
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
@@ -1361,6 +1362,11 @@ nvgpu_destroy_context(struct pipe_context *pctx)
       nv_shader_destroy(ctx->smoke_cs);
       ctx->smoke_cs = NULL;
    }
+   if (ctx->smoke_hw) {
+      nv_smoke_hw_scratch_destroy(ctx->smoke_hw);
+      FREE(ctx->smoke_hw);
+      ctx->smoke_hw = NULL;
+   }
    if (ctx->indirect_shadow_bo) {
       if (ctx->indirect_shadow_map)
          nv_rm_bo_unmap(ctx->indirect_shadow_bo);
@@ -2417,6 +2423,43 @@ nvgpu_invalidate_resource(struct pipe_context *pctx, struct pipe_resource *pres)
       return;
    nv_3d_emit_texture_barrier(&push);
    nvgpu_push_finish(ctx, &push, false);
+}
+
+int
+nvgpu_context_smoke_hw_run(struct pipe_context *pctx, uint32_t slices,
+                           uint64_t timeout_ns)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_smoke_hw_result res;
+   int r;
+
+   if (!ctx || !ctx->screen || !ctx->screen->rm)
+      return -EINVAL;
+
+   nvgpu_ensure_channel(ctx);
+   if (!ctx->channel)
+      return -ENOSYS;
+
+   if (!ctx->smoke_hw) {
+      ctx->smoke_hw = CALLOC_STRUCT(nv_smoke_hw_scratch);
+      if (!ctx->smoke_hw)
+         return -ENOMEM;
+      r = nv_smoke_hw_scratch_create(ctx->screen->rm, ctx->smoke_hw);
+      if (r) {
+         FREE(ctx->smoke_hw);
+         ctx->smoke_hw = NULL;
+         return r;
+      }
+   }
+
+   if (!ctx->smoke_cs && ctx->screen->rm) {
+      ctx->smoke_cs = nv_shader_create(ctx->screen->rm, NV_SHADER_KIND_COMPUTE);
+      if (ctx->smoke_cs)
+         (void)nv_shader_upload_compute_smoke(ctx->smoke_cs, 0, 0, 0, 16);
+   }
+
+   return nv_smoke_hw_run_on_channel(ctx->channel, ctx->smoke_hw, slices,
+                                     ctx->smoke_cs, timeout_ns, true, &res);
 }
 
 struct pipe_context *

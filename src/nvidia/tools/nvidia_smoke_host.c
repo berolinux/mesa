@@ -15,6 +15,8 @@
 #include <string.h>
 
 #include "nv_smoke_selftest.h"
+/* Traces dir is sibling of tools/ via -I../common; goldens live under traces/ */
+#include "../traces/nv_smoke_trace_goldens.h"
 
 static int
 dump_dwords(const char *path, const uint32_t *dw, uint32_t n, int quiet)
@@ -93,6 +95,16 @@ main(int argc, char **argv)
          fprintf(stderr, "nv_smoke_selftest_host: PASS\n");
       else
          fprintf(stderr, "nv_smoke_selftest_host: FAIL code %d\n", r);
+   }
+   if (r != 0)
+      return 1;
+
+   r = nv_smoke_selftest_against_embedded_goldens();
+   if (!quiet) {
+      if (r == 0)
+         fprintf(stderr, "nv_smoke embedded goldens: PASS\n");
+      else
+         fprintf(stderr, "nv_smoke embedded goldens: FAIL code %d\n", r);
    }
    if (r != 0)
       return 1;

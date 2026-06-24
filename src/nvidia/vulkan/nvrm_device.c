@@ -8,10 +8,12 @@
 #include "nv_tex.h"
 #include "nv_shader.h"
 #include "nv_fence.h"
+#include "nv_smoke_hw.h"
 
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -681,6 +683,15 @@ nvrm_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    }
    device->meta_blit_ready = false;
    device->mme_indirect_uploaded = false;
+   if (device->smoke_cs) {
+      nv_shader_destroy(device->smoke_cs);
+      device->smoke_cs = NULL;
+   }
+   if (device->smoke_hw) {
+      nv_smoke_hw_scratch_destroy(device->smoke_hw);
+      vk_free(&device->vk.alloc, device->smoke_hw);
+      device->smoke_hw = NULL;
+   }
    if (device->queue) {
       if (device->tex_pool) {
          nv_tex_pool_destroy(device->tex_pool);
@@ -691,6 +702,44 @@ nvrm_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    }
    vk_device_finish(&device->vk);
    vk_free2(&device->vk.alloc, pAllocator, device);
+}
+
+int
+nvrm_device_smoke_hw_run(struct nvrm_device *device, uint32_t slices,
+                         uint64_t timeout_ns)
+{
+   struct nv_smoke_hw_result res;
+   struct nv_channel *ch;
+   int r;
+
+   if (!device || !device->rm)
+      return -EINVAL;
+   if (!device->queue || !device->queue->channel_ready || !device->queue->channel)
+      return -ENOSYS;
+
+   ch = device->queue->channel;
+
+   if (!device->smoke_hw) {
+      device->smoke_hw = vk_zalloc(&device->vk.alloc, sizeof(*device->smoke_hw),
+                                   8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (!device->smoke_hw)
+         return -ENOMEM;
+      r = nv_smoke_hw_scratch_create(device->rm, device->smoke_hw);
+      if (r) {
+         vk_free(&device->vk.alloc, device->smoke_hw);
+         device->smoke_hw = NULL;
+         return r;
+      }
+   }
+
+   if (!device->smoke_cs) {
+      device->smoke_cs = nv_shader_create(device->rm, NV_SHADER_KIND_COMPUTE);
+      if (device->smoke_cs)
+         (void)nv_shader_upload_compute_smoke(device->smoke_cs, 0, 0, 0, 16);
+   }
+
+   return nv_smoke_hw_run_on_channel(ch, device->smoke_hw, slices,
+                                     device->smoke_cs, timeout_ns, true, &res);
 }
 
 VKAPI_ATTR void VKAPI_CALL

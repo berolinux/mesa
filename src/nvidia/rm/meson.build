@@ -10,7 +10,8 @@ endif
 
 libnvidia_rm = static_library(
   'nvidia_rm',
-  files('nv_rm.c', 'nv_channel.c', 'nv_shader.c', 'nv_fence.c', 'nv_tex.c'),
+  files('nv_rm.c', 'nv_channel.c', 'nv_shader.c', 'nv_fence.c', 'nv_tex.c',
+        'nv_smoke_hw.c'),
   include_directories : [
     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     include_directories('../common'),
