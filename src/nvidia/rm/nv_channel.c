@@ -901,22 +901,29 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
       NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
       uint32_t token_parents[2];
-      /* Pass7 glcore a532b2: try default slot 0, WORK_SUBMIT_TOKEN type, and
-       * pass7-style (0x10>>4)=1 plus a few error-context strides. */
+      /* Pass7/8 notif index ladder (glcore a532b2, vksc 4d650d, xdrv a0188):
+       *   index = (base*16 + slot*0x4c0 + 0x10) >> 4  with base=0 yields 1, then
+       *   slot strides; also try WORK_SUBMIT_TOKEN type and xdrv-style +3. */
       static const uint32_t notif_idxs[] = {
          0u,
          NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN,
-         1u,
+         1u,                          /* pass8 (0+0x10)>>4 */
          2u,
-         0x10u >> 4, /* pass7 lea(+0x10)>>4 with base 0 */
+         3u,                          /* xdrv lea(ebx+3) candidate */
+         0x10u >> 4,                  /* =1, redundant ok */
+         (0x4c0u + 0x10u) >> 4,       /* pass8 slot1 stride */
+         (0x980u + 0x10u) >> 4,       /* slot2 */
+         (0xe40u + 0x10u) >> 4,       /* slot3 */
       };
       unsigned ti, ntp = 0, ni;
+      const unsigned n_notif = sizeof(notif_idxs) / sizeof(notif_idxs[0]);
 
       token_parents[ntp++] = ch->h_channel;
       if (ch->h_channel_group)
          token_parents[ntp++] = ch->h_channel_group;
 
-      /* Optional: enable per-channel error notify in TSG (a06f0108; OGKM param is bool only) */
+      /* Optional: SET_ERROR_NOTIFIER (a06f0108). Pass8 imm scan: cuda-only (7×);
+       * graphics/vdpau/vksc have 0 hits — only try when TSG present (harmless). */
       if (ch->h_channel_group) {
          NVA06F_CTRL_SET_ERROR_NOTIFIER_PARAMS enp;
 
@@ -928,7 +935,7 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       }
 
       for (ti = 0; ti < ntp && !ch->has_work_submit_token; ti++) {
-         for (ni = 0; ni < 5u; ni++) {
+         for (ni = 0; ni < n_notif; ni++) {
             memset(&nip, 0, sizeof(nip));
             nip.index = notif_idxs[ni];
             (void)nv_rm_control(ch->rm, token_parents[ti],
@@ -1427,6 +1434,13 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
    return last;
 }
 
+/*
+ * Pass8: CE copy + host sema completion.  Try in order:
+ *   1) single GPFIFO segment: CE methods then host sema (one kick) — preferred
+ *   2) two kicks: CE copy then separate host sema submit (tick82/pass7)
+ *   3) single segment with pass8 launch-line variants (0x8000000c / 0x8000002c)
+ * Host sema modes 2/3/4/5/0/1 via sticky ladder inside sema submit.
+ */
 int
 nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
                                             uint32_t class_copy,
@@ -1443,12 +1457,23 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
 {
    struct nv_push push;
    uint32_t *map;
-   uint32_t need = 48;
+   uint32_t need = 64;
    uint32_t classes[16];
    unsigned n = 16, i, nt = 0;
    uint32_t tried[16];
    int pre, last = -EINVAL;
    uint32_t prefer = 0;
+   /* Pass8 glcore b71e52 launch-line family (non-sema copy control dwords) */
+   static const uint32_t launch_lines[] = {
+      0u, /* 0 = use normal nv_copy_emit_buffer_copy */
+      0x8000000cu,
+      0x8000002cu,
+      0x8000004cu,
+   };
+   unsigned li, n_ll = sizeof(launch_lines) / sizeof(launch_lines[0]);
+   enum nv_host_sema_mode sema_modes_try[NV_HOST_SEMA_MODE_COUNT];
+   unsigned n_sm = 0, si;
+   unsigned mi;
 
    if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
       return -EINVAL;
@@ -1471,6 +1496,34 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
       prefer = nv_channel_resolve_class_copy(ch, 0);
    nv_device_info_fill_class_ladder(2, prefer, classes, &n);
 
+   /* Build sema mode order (sticky pref first, then pass8 ladder) */
+   if (ch->host_sema_mode_pref >= 0 &&
+       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
+   {
+      static const enum nv_host_sema_mode def_order[] = {
+         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
+         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
+         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
+         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+      };
+      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
+         enum nv_host_sema_mode m = def_order[mi];
+         unsigned j;
+         bool dup = false;
+         for (j = 0; j < n_sm; j++) {
+            if (sema_modes_try[j] == m) {
+               dup = true;
+               break;
+            }
+         }
+         if (!dup)
+            sema_modes_try[n_sm++] = m;
+      }
+   }
+
    for (i = 0; i < n; i++) {
       uint32_t cl = classes[i];
       unsigned t;
@@ -1486,6 +1539,50 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
       if (nt < 16)
          tried[nt++] = cl;
 
+      /* --- Phase 1: single push (CE + host sema), all sema modes × launch lines --- */
+      for (li = 0; li < n_ll; li++) {
+         for (si = 0; si < n_sm; si++) {
+            enum nv_host_sema_mode sm = sema_modes_try[si];
+
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
+
+            nv_push_init(&push, map, need);
+            nv_copy_set_object(&push, cl);
+            if (launch_lines[li] == 0)
+               nv_copy_emit_buffer_copy(&push, src_gpu_addr, dst_gpu_addr,
+                                        size_bytes, 0, 0, 1);
+            else
+               nv_copy_emit_buffer_copy_launch_line(&push, src_gpu_addr,
+                                                    dst_gpu_addr, size_bytes,
+                                                    launch_lines[li]);
+            /* Host sema on subch 0 after CE methods (WFI ensures CE completes) */
+            nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+            nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr,
+                                                    sema_payload, true, sm);
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (host_sema_mode_out)
+               *host_sema_mode_out = (int)sm;
+            if (r == 0) {
+               ch->host_sema_mode_pref = (int)sm;
+               if (!ch->class_copy_bound)
+                  ch->class_copy_bound = cl;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+         }
+      }
+
+      /* --- Phase 2: two kicks (CE then host sema ladder) — pass7/tick82 --- */
       if (sema_reset && sema_cpu)
          sema_cpu[0] = 0;
 
@@ -1494,7 +1591,6 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
          return -ENOMEM;
 
       nv_push_init(&push, map, need);
-      /* CE data copy only — completion via host sema (pass7), not CE sema */
       nv_copy_set_object(&push, cl);
       nv_copy_emit_buffer_copy(&push, src_gpu_addr, dst_gpu_addr, size_bytes,
                                0, 0, 1);

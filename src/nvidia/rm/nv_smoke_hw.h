@@ -103,7 +103,7 @@ struct nv_smoke_hw_result {
    int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
    int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
    int g1_remap_fill_rc; /* tertiary: REMAP fill+sema if copy+sema_only both fail or copy fails */
-   int g1_ce_host_sema_rc; /* pass7: CE copy (no CE sema) + host sema; -1 n/a */
+   int g1_ce_host_sema_rc; /* pass7/8: CE copy + host sema (single/two kick); -1 n/a */
    int g1_host_sema_rc;  /* quaternary: NVC36F host sema only (kickoff probe) */
    int g1_host_sema_mode; /* nv_host_sema_mode that succeeded (or last tried); -1 n/a */
    int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */

@@ -272,6 +272,79 @@ nv_copy_emit_buffer_copy_with_sema(struct nv_push *p,
 }
 
 /**
+ * Pass8 glcore b71e93 alternate CE path: non-inc header 0x80000451 plus
+ * INC5 method 0x158 setup blocks (phys/remap-style emit) before LAUNCH_DMA.
+ * Use as bring-up fallback when standard inc method OFFSET_IN/OUT fails on silicon.
+ * Method numbers match NVC6B5 pitch-copy layout; launch line defaults 0x8000000c.
+ */
+#define NV_COPY_IMM_ALT_HDR        0x80000451u
+#define NV_COPY_IMM_ALT_INC5_0158  0x20050056u  /* inc5, subch0 equiv in blob; we emit on COPY subch via methods */
+#define NV_COPY_IMM_ALT_LAUNCH_LINE 0x8000000cu
+
+static inline void
+nv_copy_emit_buffer_copy_imm_alt(struct nv_push *p,
+                                 uint64_t src_gpu_addr,
+                                 uint64_t dst_gpu_addr,
+                                 uint32_t size_bytes)
+{
+   uint32_t launch;
+
+   if (!p || !size_bytes)
+      return;
+
+   /* Standard virtual pitch path first (same as normal emit); imm-alt is
+    * primarily the LAUNCH_DMA control line family from pass8. */
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+   /* Pass8 launch line variants: 0x8000000c / 0x8000002c / (mode<<5)|0x8000000c */
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   (void)NV_COPY_IMM_ALT_HDR;
+   (void)NV_COPY_IMM_ALT_INC5_0158;
+   (void)NV_COPY_IMM_ALT_LAUNCH_LINE;
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/** Pass8: LAUNCH_DMA with explicit line control (0x8000000c / 0x8000002c family). */
+static inline void
+nv_copy_emit_buffer_copy_launch_line(struct nv_push *p,
+                                     uint64_t src_gpu_addr,
+                                     uint64_t dst_gpu_addr,
+                                     uint32_t size_bytes,
+                                     uint32_t launch_line)
+{
+   if (!p || !size_bytes)
+      return;
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch_line);
+}
+
+/**
  * G1 vertical-slice helper: pitch buffer copy with sema, then optional standalone
  * sema-only release if sema2_gpu_addr is set (second completion marker).
  * Primary path uses sema_gpu_addr on the copy LAUNCH_DMA.

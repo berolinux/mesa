@@ -157,7 +157,7 @@ main(int argc, char **argv)
            "    4) g1_host_sema!=0: kickoff/channel (not CE); fix step 3 before CE methods\n"
            "       hs_mode: 2/3=blob0x1001, 4/5=vdpau0x2, 0/1=open_hdrs (pass8; sticky after ok)\n"
            "    5) host_sema ok, g1_rc fail: CE class ladder / SET_OBJECT subch4 / VA;\n"
-           "       tick82 also tries CE copy+host sema (g1_ce_hs) when CE sema fails\n"
+           "       tick84: g1_ce_hs tries single-push CE+host_sema, launch lines, sema 2/3/4/5\n"
            "    6) g1_userd_get unchanged: GPPut/doorbell not running on silicon\n"
            "    7) g1_fault_rc!=0: expected on normal hosts (SR-IOV-only ctrl; pass6/7)\n"
            "    (RE: HW_MODEL_PASS7_DEEP_DISASM_610.43.02.md + PASS6/5/4)\n",
