@@ -298,6 +298,29 @@ nv_copy_push_image_2d_bl(struct nv_push *p, uint32_t class_copy,
    nv_push_wfi(p);
 }
 
+
+/**
+ * Copy indirect draw command records from a GPU-only indirect BO into a
+ * host-mappable shadow BO so the CPU can read vertex/instance counts at
+ * record time (indirect draw path B).  size_bytes should be
+ * drawCount * stride (16 or 20 for non-indexed/indexed).
+ */
+static inline void
+nv_copy_indirect_to_shadow(struct nv_push *p, uint32_t class_copy,
+                           uint64_t indirect_gpu_addr,
+                           uint64_t shadow_gpu_addr,
+                           uint32_t size_bytes)
+{
+   if (!p || !indirect_gpu_addr || !shadow_gpu_addr || !size_bytes)
+      return;
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_small_linear(p, indirect_gpu_addr, shadow_gpu_addr, size_bytes);
+   nv_push_wfi(p);
+}
+
 #ifdef __cplusplus
 }
 #endif

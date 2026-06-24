@@ -104,6 +104,14 @@ extern "C" {
 #define NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32_BF32_AF32 0xC0
 #define NVC597_SET_COLOR_TARGET_FORMAT_V_R16_G16_B16_A16     0xC6
 #define NVC597_SET_COLOR_TARGET_FORMAT_V_RF16_GF16_BF16_AF16 0xCA
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_R8          0xF8
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_R16         0xC2
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_R16_G16     0xC3
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32   0xC4
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_A2B10G10R10 0xDF
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_RF11_GF11_BF10 0xE6
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_R8_G8       0xF5
+#define NVC597_SET_COLOR_TARGET_FORMAT_V_R8_G8_B8_A8 0xF7
 #define NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_BLOCKLINEAR 0x00000000
 #define NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_PITCH       (1u << 12)
 
@@ -156,6 +164,8 @@ extern "C" {
 #define NVC597_CLEAR_SURFACE_G_ENABLE_TRUE      (1u << 3)
 #define NVC597_CLEAR_SURFACE_B_ENABLE_TRUE      (1u << 4)
 #define NVC597_CLEAR_SURFACE_A_ENABLE_TRUE      (1u << 5)
+#define NVC597_CLEAR_SURFACE_MRT_SELECT_SHIFT       6
+#define NVC597_CLEAR_SURFACE_MRT_SELECT_MASK        (7u << 6)
 
 #define NVC597_TOPOLOGY_POINTS                  0x0
 #define NVC597_TOPOLOGY_LINES                   0x1
@@ -1034,6 +1044,104 @@ nv_3d_emit_blend_zsa_raster(struct nv_push *p,
 
    /* CT write mask: low 4 bits RGBA */
    nv_push_method(p, NVC597_SET_CT_WRITE(0), colormask & 0xf);
+}
+
+
+/**
+ * Clear one MRT slot (target_index 0..7) with the given colour.  NVC597
+ * CLEAR_SURFACE selects the MRT via bits 6..8; colour values are set once
+ * then applied per-target.  buffers mask uses bit 4<<i for COLORi (PIPE style)
+ * or pass target_index explicitly via target_index parameter.
+ */
+static inline void
+nv_3d_emit_clear_surface_mrt(struct nv_push *p, unsigned target_index,
+                             const uint32_t color_ui[4],
+                             bool clear_r, bool clear_g, bool clear_b, bool clear_a)
+{
+   uint32_t clear_flags = 0;
+   uint32_t c[4];
+   unsigned ti = target_index & 7u;
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_push_method(p, NVC597_SET_COLOR_CLEAR_VALUE(0), c[0]);
+   nv_push_method(p, NVC597_SET_COLOR_CLEAR_VALUE(1), c[1]);
+   nv_push_method(p, NVC597_SET_COLOR_CLEAR_VALUE(2), c[2]);
+   nv_push_method(p, NVC597_SET_COLOR_CLEAR_VALUE(3), c[3]);
+   if (clear_r)
+      clear_flags |= NVC597_CLEAR_SURFACE_R_ENABLE_TRUE;
+   if (clear_g)
+      clear_flags |= NVC597_CLEAR_SURFACE_G_ENABLE_TRUE;
+   if (clear_b)
+      clear_flags |= NVC597_CLEAR_SURFACE_B_ENABLE_TRUE;
+   if (clear_a)
+      clear_flags |= NVC597_CLEAR_SURFACE_A_ENABLE_TRUE;
+   if (!clear_flags)
+      clear_flags = NVC597_CLEAR_SURFACE_R_ENABLE_TRUE |
+                    NVC597_CLEAR_SURFACE_G_ENABLE_TRUE |
+                    NVC597_CLEAR_SURFACE_B_ENABLE_TRUE |
+                    NVC597_CLEAR_SURFACE_A_ENABLE_TRUE;
+   clear_flags |= (ti << NVC597_CLEAR_SURFACE_MRT_SELECT_SHIFT);
+   nv_push_method(p, NVC597_CLEAR_SURFACE, clear_flags);
+}
+
+/**
+ * Clear all active colour targets (count 1..8) plus optional Z/S.
+ * buffers: bit 4<<i for colour target i, bit 8 for depth, bit 9 for stencil
+ * (PIPE_CLEAR_COLOR0 = 0x10, COLOR1 = 0x20, ... DEPTH = 0x100, STENCIL = 0x200).
+ */
+static inline void
+nv_3d_emit_clear_surface_multi(struct nv_push *p, unsigned buffers,
+                               const uint32_t color_ui[4],
+                               float depth, uint32_t stencil,
+                               unsigned max_color_targets)
+{
+   unsigned i, n = max_color_targets ? max_color_targets : 8;
+   union { float f; uint32_t u; } d;
+   uint32_t zs_flags = 0;
+   unsigned color_bits = buffers & 0x1f0u;
+
+   if (n > 8)
+      n = 8;
+
+   /* PIPE_CLEAR_COLORi = bit (4 + i) = 0x10 << i */
+   for (i = 0; i < n; i++) {
+      if (color_bits & (0x10u << i))
+         nv_3d_emit_clear_surface_mrt(p, i, color_ui, true, true, true, true);
+   }
+
+   if (buffers & 0x100) {
+      d.f = depth;
+      nv_push_method(p, NVC597_SET_Z_CLEAR_VALUE, d.u);
+      zs_flags |= NVC597_CLEAR_SURFACE_Z_ENABLE_TRUE;
+   }
+   if (buffers & 0x200) {
+      nv_push_method(p, NVC597_SET_STENCIL_CLEAR_VALUE, stencil & 0xff);
+      zs_flags |= NVC597_CLEAR_SURFACE_STENCIL_ENABLE_TRUE;
+   }
+   if (zs_flags)
+      nv_push_method(p, NVC597_CLEAR_SURFACE, zs_flags);
+}
+
+static inline void
+nv_3d_push_clear_multi(struct nv_push *p, uint32_t class_3d, unsigned buffers,
+                       const uint32_t color_ui[4], float depth, uint32_t stencil,
+                       unsigned max_color_targets)
+{
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   /* If only single-target COLOR0 or no multi bits, use classic path */
+   if ((buffers & 0x1f0) == 0x10 || (buffers & 0x1f0) == 0) {
+      nv_3d_emit_clear_surface(p, buffers, color_ui, depth, stencil);
+   } else {
+      nv_3d_emit_clear_surface_multi(p, buffers, color_ui, depth, stencil,
+                                     max_color_targets);
+   }
+   nv_push_wfi(p);
 }
 
 static inline void
