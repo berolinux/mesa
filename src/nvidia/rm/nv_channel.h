@@ -223,15 +223,32 @@ nv_channel_notifier_status(struct nv_channel *ch, uint16_t *status_out,
                            uint32_t *info32_out);
 
 /**
- * Best-effort channel recovery after error notifier / hung submit (tick90).
- * STOP_CHANNEL (optional) → RESTART_RUNLIST → re-BIND+SCHEDULE.
- * Does not free engine objects; resets scheduled=false then try_schedule.
+ * Best-effort channel recovery after error notifier / hung submit (tick90/91).
+ * If h_channel_group: A06C PREEMPT (wait) first, then optional A06F STOP,
+ * RESTART_RUNLIST, re-BIND+SCHEDULE.  Does not free engine objects.
  * Returns 0 if rescheduled, else last errno (recovery is best-effort).
  */
 int nv_channel_recover(struct nv_channel *ch, bool stop_first);
 
 /** Fetch A06F context ID into *ctx_id_out (diagnostics; non-fatal if fails). */
 int nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out);
+
+/**
+ * tick91: TSG (A06C) helpers when ch->h_channel_group is set; else -ENOTSUP.
+ * timeslice_us: SET/GET on channel group; interleave: A06C levels (0/1/2).
+ * preempt: group-level (preferred over A06F STOP for multi-channel TSGs).
+ * get_tsg_id: A06C GET_INFO hardware TSG id for diagnostics.
+ */
+int nv_channel_tsg_set_timeslice(struct nv_channel *ch, uint64_t timeslice_us);
+int nv_channel_tsg_get_timeslice(struct nv_channel *ch, uint64_t *timeslice_us_out);
+int nv_channel_tsg_preempt(struct nv_channel *ch, bool wait,
+                           bool manual_timeout, uint32_t timeout_us);
+int nv_channel_tsg_get_id(struct nv_channel *ch, uint32_t *tsg_id_out);
+int nv_channel_tsg_set_interleave(struct nv_channel *ch, uint32_t level);
+int nv_channel_tsg_get_interleave(struct nv_channel *ch, uint32_t *level_out);
+/** A06F SET_ERROR_NOTIFIER; notify_tsg applies policy to all channels in TSG. */
+int nv_channel_set_error_notifier_policy(struct nv_channel *ch,
+                                         bool notify_each_in_tsg);
 
 /** Host reset of error notifier before a submit (clears stale IN_PROGRESS). */
 void

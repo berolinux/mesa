@@ -162,8 +162,9 @@ nv_channel_try_schedule(struct nv_channel *ch)
 }
 
 /*
- * tick90: recover hung/errored channel via A06F STOP/RESTART + re-schedule.
- * Mirrors optional recovery path in proprietary drivers (rare cold-path ctrls).
+ * tick90/91: recover hung/errored channel.
+ * Prefer A06C TSG PREEMPT when channel group exists (cuda/multi-channel path),
+ * then optional A06F STOP, RESTART_RUNLIST, re-BIND+SCHEDULE.
  */
 int
 nv_channel_recover(struct nv_channel *ch, bool stop_first)
@@ -176,6 +177,17 @@ nv_channel_recover(struct nv_channel *ch, bool stop_first)
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
    rm = ch->rm;
+
+   /* tick91: group preempt first (drains TSG without full channel unbind) */
+   if (ch->h_channel_group) {
+      NVA06C_CTRL_PREEMPT_PARAMS pr;
+      memset(&pr, 0, sizeof(pr));
+      pr.bWait = NV_TRUE;
+      pr.bManualTimeout = NV_FALSE;
+      pr.timeoutUs = 0;
+      (void)nv_rm_control(rm, ch->h_channel_group, NVA06C_CTRL_CMD_PREEMPT,
+                          &pr, sizeof(pr));
+   }
 
    if (stop_first) {
       memset(&stop, 0, sizeof(stop));
@@ -212,6 +224,116 @@ nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out)
       *ctx_id_out = p.contextId;
    return r;
 }
+
+int
+nv_channel_tsg_set_timeslice(struct nv_channel *ch, uint64_t timeslice_us)
+{
+   NVA06C_CTRL_SET_TIMESLICE_PARAMS ts;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&ts, 0, sizeof(ts));
+   ts.timesliceUs = timeslice_us;
+   return nv_rm_control(ch->rm, ch->h_channel_group,
+                        NVA06C_CTRL_CMD_SET_TIMESLICE, &ts, sizeof(ts));
+}
+
+int
+nv_channel_tsg_get_timeslice(struct nv_channel *ch, uint64_t *timeslice_us_out)
+{
+   NVA06C_CTRL_GET_TIMESLICE_PARAMS ts;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&ts, 0, sizeof(ts));
+   r = nv_rm_control(ch->rm, ch->h_channel_group, NVA06C_CTRL_CMD_GET_TIMESLICE,
+                     &ts, sizeof(ts));
+   if (r == 0 && timeslice_us_out)
+      *timeslice_us_out = ts.timesliceUs;
+   return r;
+}
+
+int
+nv_channel_tsg_preempt(struct nv_channel *ch, bool wait, bool manual_timeout,
+                       uint32_t timeout_us)
+{
+   NVA06C_CTRL_PREEMPT_PARAMS pr;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&pr, 0, sizeof(pr));
+   pr.bWait = wait ? NV_TRUE : NV_FALSE;
+   pr.bManualTimeout = manual_timeout ? NV_TRUE : NV_FALSE;
+   pr.timeoutUs = timeout_us;
+   if (manual_timeout &&
+       pr.timeoutUs > NVA06C_CTRL_CMD_PREEMPT_MAX_MANUAL_TIMEOUT_US)
+      pr.timeoutUs = NVA06C_CTRL_CMD_PREEMPT_MAX_MANUAL_TIMEOUT_US;
+   return nv_rm_control(ch->rm, ch->h_channel_group, NVA06C_CTRL_CMD_PREEMPT,
+                        &pr, sizeof(pr));
+}
+
+int
+nv_channel_tsg_get_id(struct nv_channel *ch, uint32_t *tsg_id_out)
+{
+   NVA06C_CTRL_GET_INFO_PARAMS info;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&info, 0, sizeof(info));
+   r = nv_rm_control(ch->rm, ch->h_channel_group, NVA06C_CTRL_CMD_GET_INFO,
+                     &info, sizeof(info));
+   if (r == 0 && tsg_id_out)
+      *tsg_id_out = info.tsgID;
+   return r;
+}
+
+int
+nv_channel_tsg_set_interleave(struct nv_channel *ch, uint32_t level)
+{
+   NVA06C_CTRL_SET_INTERLEAVE_LEVEL_PARAMS il;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&il, 0, sizeof(il));
+   il.tsgInterleaveLevel = level;
+   return nv_rm_control(ch->rm, ch->h_channel_group,
+                        NVA06C_CTRL_CMD_SET_INTERLEAVE_LEVEL,
+                        &il, sizeof(il));
+}
+
+int
+nv_channel_tsg_get_interleave(struct nv_channel *ch, uint32_t *level_out)
+{
+   NVA06C_CTRL_GET_INTERLEAVE_LEVEL_PARAMS il;
+   int r;
+
+   if (!ch || !ch->rm || !ch->h_channel_group)
+      return ch ? -ENOTSUP : -EINVAL;
+   memset(&il, 0, sizeof(il));
+   r = nv_rm_control(ch->rm, ch->h_channel_group,
+                     NVA06C_CTRL_CMD_GET_INTERLEAVE_LEVEL,
+                     &il, sizeof(il));
+   if (r == 0 && level_out)
+      *level_out = il.tsgInterleaveLevel;
+   return r;
+}
+
+int
+nv_channel_set_error_notifier_policy(struct nv_channel *ch,
+                                     bool notify_each_in_tsg)
+{
+   NVA06F_CTRL_SET_ERROR_NOTIFIER_PARAMS enp;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   memset(&enp, 0, sizeof(enp));
+   enp.bNotifyEachChannelInTSG = notify_each_in_tsg ? NV_TRUE : NV_FALSE;
+   return nv_rm_control(ch->rm, ch->h_channel,
+                        NVA06F_CTRL_CMD_SET_ERROR_NOTIFIER,
+                        &enp, sizeof(enp));
+}
 #endif /* HAVE_LIBDRM_NVIDIA */
 
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -228,6 +350,66 @@ nv_channel_get_context_id(struct nv_channel *ch, uint32_t *ctx_id_out)
 {
    (void)ch;
    (void)ctx_id_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_set_timeslice(struct nv_channel *ch, uint64_t timeslice_us)
+{
+   (void)ch;
+   (void)timeslice_us;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_get_timeslice(struct nv_channel *ch, uint64_t *timeslice_us_out)
+{
+   (void)ch;
+   (void)timeslice_us_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_preempt(struct nv_channel *ch, bool wait, bool manual_timeout,
+                       uint32_t timeout_us)
+{
+   (void)ch;
+   (void)wait;
+   (void)manual_timeout;
+   (void)timeout_us;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_get_id(struct nv_channel *ch, uint32_t *tsg_id_out)
+{
+   (void)ch;
+   (void)tsg_id_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_set_interleave(struct nv_channel *ch, uint32_t level)
+{
+   (void)ch;
+   (void)level;
+   return -ENOSYS;
+}
+
+int
+nv_channel_tsg_get_interleave(struct nv_channel *ch, uint32_t *level_out)
+{
+   (void)ch;
+   (void)level_out;
+   return -ENOSYS;
+}
+
+int
+nv_channel_set_error_notifier_policy(struct nv_channel *ch,
+                                     bool notify_each_in_tsg)
+{
+   (void)ch;
+   (void)notify_each_in_tsg;
    return -ENOSYS;
 }
 #endif
