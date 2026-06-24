@@ -68,7 +68,8 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
            " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d"
-           " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_notif=0x%x/0x%x"
+           " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x"
+           " g1_notif=0x%x/0x%x"
            " g1_svram=%d g1_bvram=%d g1_sgpu=0x%llx g1_dgpu=0x%llx"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
            " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_store=%d"
@@ -84,6 +85,8 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            res->g1_remap_fill_rc, res->g1_host_sema_rc,
            (unsigned)res->g1_sema_observed, (unsigned)res->g1_fill_observed,
            (unsigned)res->g1_class_copy,
+           (unsigned)res->g1_gpfifo_class,
+           (unsigned)res->g1_work_submit_token,
            (unsigned)res->g1_notifier_status, (unsigned)res->g1_notifier_info32,
            res->g1_sema_vram ? 1 : 0, res->g1_bufs_vram ? 1 : 0,
            (unsigned long long)res->g1_sema_gpu,
@@ -318,6 +321,9 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.slices_run |= NV_SMOKE_HW_G1;
       (void)nv_channel_ensure_engine_objects(ch);
       res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
+      res.g1_gpfifo_class = ch->gpfifo_class;
+      res.g1_work_submit_token =
+         ch->has_work_submit_token ? ch->work_submit_token : 0;
       res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
       res.g1_was_scheduled = ch->scheduled;
       res.g1_schedule_rc = ch->schedule_rc;

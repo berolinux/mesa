@@ -113,6 +113,8 @@ struct nv_smoke_hw_result {
    uint32_t g1_notifier_info32;
    uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
    uint32_t g1_class_copy;    /* class used (0 if unknown) */
+   uint32_t g1_gpfifo_class;  /* channel GPFIFO class that RmAlloc succeeded with */
+   uint32_t g1_work_submit_token; /* token for usermode+0x90 (0 if missing) */
    uint32_t g1_fill_observed; /* dst_cpu[0] after remap-fill probe (if run) */
    uint32_t g1_userd_gp_get;  /* USERD GPGet after G1 attempts */
    uint32_t g1_userd_gp_put;  /* USERD GPPut after G1 attempts */

@@ -133,9 +133,11 @@ main(int argc, char **argv)
       close(drm_fd);
 
    if (r == 0) {
-      fprintf(stderr, "nvidia_smoke_hw_cli: PASS slices=0x%x ok=0x%x gpu_tried=%d\n",
+      fprintf(stderr, "nvidia_smoke_hw_cli: PASS slices=0x%x ok=0x%x gpu_tried=%d "
+              "g1_class=0x%x g1_gpfifo=0x%x g1_host_sema=%d\n",
               (unsigned)res.slices_run, (unsigned)res.slices_ok,
-              res.standalone_gpu_tried);
+              res.standalone_gpu_tried, (unsigned)res.g1_class_copy,
+              (unsigned)res.g1_gpfifo_class, res.g1_host_sema_rc);
       return 0;
    }
    fprintf(stderr,
@@ -143,13 +145,17 @@ main(int argc, char **argv)
            "buf_va_rc=%d eng_rc=%d sready_rc=%d\n"
            "  slices_run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d\n"
            "  g1_pre=%d g1_sched=%d g1_eng_alloc=%d g1_host_sema=%d g1_sema_obs=0x%x\n"
+           "  g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x g1_h_copy=0x%x\n"
+           "  g1_submit=%d sema_only=%d remap=%d\n"
            "  g1_userd_get/put=%u/%u host_gpfifo_put=%u doorbell=%d scheduled=%d\n"
-           "  TRIAGE:\n"
-           "    open_rc=-19/-ENODEV: install/load nvidia.ko; need /dev/nvidiactl + /dev/nvidiaN\n"
-           "    ch_rc=-5/-EIO: channel/TSG/USERD/GPFIFO alloc or schedule failed\n"
-           "    g1_pre/g1_sched: schedule/doorbell/USERD not ready (host_sema probe)\n"
-           "    g1_eng_alloc/g1_host_sema ok but g1_rc fail: CE class/methods/VA issue\n"
-           "    g1_userd_get unchanged after submit: kickoff/GPPut/doorbell not running\n",
+           "  TRIAGE (run with NV_SMOKE_HW_VERBOSE=1; fix in order):\n"
+           "    1) open_rc=-19: nvidia.ko + /dev/nvidiactl + /dev/nvidiaN (not only renderD128)\n"
+           "    2) ch_rc=-5: GPFIFO class ladder (C86F..C36F) / TSG / USERD / VASpace / error ctx\n"
+           "    3) sready/g1_pre/g1_sched/doorbell: schedule + USERD GPPut + token@usermode+0x90\n"
+           "    4) g1_host_sema!=0: kickoff/channel (not CE); fix step 3 before CE methods\n"
+           "    5) host_sema ok, g1_rc fail: CE class ladder (C8B5..) / SET_OBJECT subch4 / VA\n"
+           "    6) g1_userd_get unchanged: GPPut/doorbell not running on silicon\n"
+           "    (RE: 610.43.02 glcore/cuda — see HW_MODEL_DEEP_DISASM_610.43.02.md)\n",
            r, res.standalone_open_rc, res.standalone_channel_rc,
            res.standalone_gpu_tried,
            res.standalone_buf_va_rc, res.standalone_engine_rc,
@@ -158,6 +164,9 @@ main(int argc, char **argv)
            res.g1_rc, res.g2_rc, res.g3_rc,
            res.g1_preflight_rc, res.g1_schedule_rc, res.g1_engine_alloc_rc,
            res.g1_host_sema_rc, (unsigned)res.g1_sema_observed,
+           (unsigned)res.g1_class_copy, (unsigned)res.g1_gpfifo_class,
+           (unsigned)res.g1_work_submit_token, (unsigned)res.g1_h_obj_copy,
+           res.g1_submit_rc, res.g1_sema_only_rc, res.g1_remap_fill_rc,
            (unsigned)res.g1_userd_gp_get, (unsigned)res.g1_userd_gp_put,
            (unsigned)res.g1_host_gpfifo_put,
            res.g1_had_doorbell ? 1 : 0, res.g1_was_scheduled ? 1 : 0);

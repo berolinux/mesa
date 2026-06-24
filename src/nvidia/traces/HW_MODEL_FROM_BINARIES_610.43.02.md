@@ -340,3 +340,10 @@ Static RE: excellent for architecture/ladders/methods/subch. Insufficient alone 
 - `mesa/src/nvidia/traces/HW_MODEL_FROM_BINARIES_610.43.02.md`
 - `/tmp/nvidia-reveng-pp-v2/re_disasm/*.strings_hw.txt`
 
+
+
+---
+
+## 11. Deep disasm pass
+
+See [`HW_MODEL_DEEP_DISASM_610.43.02.md`](HW_MODEL_DEEP_DISASM_610.43.02.md) for x86 submit/sfence analysis, method header literals (LAUNCH_DMA `0x200180c0`), and refined confidence matrix.

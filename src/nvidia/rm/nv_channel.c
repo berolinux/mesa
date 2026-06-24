@@ -256,7 +256,8 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    {
       /*
        * Channel alloc retries (RM is picky about TSG/USERD/VASpace/error ctx).
-       * Progressively strip optional fields; keep gpFifoOffset/entries.
+       * Outer loop: GPFIFO class ladder (C86F→C76F→…; 610.43.02 binary RE).
+       * Inner loop: progressively strip optional fields; keep gpFifoOffset/entries.
        */
       struct {
          bool use_tsg_parent;
@@ -272,43 +273,55 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          { false, false, false, true,  false },
          { false, false, false, false, false },
       };
-      unsigned ai;
+      uint32_t gpfifo_classes[12];
+      unsigned n_gpf = sizeof(gpfifo_classes) / sizeof(gpfifo_classes[0]);
+      unsigned gi, ai;
       uint32_t h_dev = nv_rm_device_device_handle(rm);
       int last_ret = -1;
 
-      for (ai = 0; ai < sizeof(attempts) / sizeof(attempts[0]); ai++) {
-         uint32_t h = 0;
-         uint32_t h_parent = h_dev;
+      nv_device_info_fill_class_ladder(5, ch->gpfifo_class, gpfifo_classes,
+                                       &n_gpf);
 
-         memset(&ch_params, 0, sizeof(ch_params));
-         if (attempts[ai].use_error_ctxdma && ch->h_error_ctxdma)
-            ch_params.hObjectError = ch->h_error_ctxdma;
-         else
-            ch_params.hObjectError = ch->h_error_notifier;
-         ch_params.gpFifoOffset = ch->gpfifo_gpu_addr;
-         ch_params.gpFifoEntries = gpfifo_entries;
-         ch_params.flags = 0;
-         ch_params.engineType = ch->engine_type;
-         if (attempts[ai].use_vaspace)
-            ch_params.hVASpace = ch->h_vaspace;
-         if (attempts[ai].use_ctxshare && ch->h_ctxshare)
-            ch_params.hContextShare = ch->h_ctxshare;
-         if (attempts[ai].use_userd && ch->h_userd_mem) {
-            ch_params.hUserdMemory[0] = ch->h_userd_mem;
-            ch_params.userdOffset[0] = 0;
-         }
-         if (attempts[ai].use_tsg_parent && ch->h_channel_group)
-            h_parent = ch->h_channel_group;
+      for (gi = 0; gi < n_gpf && !ch->h_channel; gi++) {
+         uint32_t gpf_class = gpfifo_classes[gi];
+         if (!gpf_class)
+            continue;
 
-         ret = nv_rm_alloc_object(rm, h_parent, &h,
-                                  ch->gpfifo_class, &ch_params,
-                                  sizeof(ch_params));
-         last_ret = ret;
-         if (ret == 0) {
-            ch->h_channel = h;
-            if (!attempts[ai].use_tsg_parent)
-               ch->use_channel_group = false;
-            break;
+         for (ai = 0; ai < sizeof(attempts) / sizeof(attempts[0]); ai++) {
+            uint32_t h = 0;
+            uint32_t h_parent = h_dev;
+
+            memset(&ch_params, 0, sizeof(ch_params));
+            if (attempts[ai].use_error_ctxdma && ch->h_error_ctxdma)
+               ch_params.hObjectError = ch->h_error_ctxdma;
+            else
+               ch_params.hObjectError = ch->h_error_notifier;
+            ch_params.gpFifoOffset = ch->gpfifo_gpu_addr;
+            ch_params.gpFifoEntries = gpfifo_entries;
+            ch_params.flags = 0;
+            ch_params.engineType = ch->engine_type;
+            if (attempts[ai].use_vaspace)
+               ch_params.hVASpace = ch->h_vaspace;
+            if (attempts[ai].use_ctxshare && ch->h_ctxshare)
+               ch_params.hContextShare = ch->h_ctxshare;
+            if (attempts[ai].use_userd && ch->h_userd_mem) {
+               ch_params.hUserdMemory[0] = ch->h_userd_mem;
+               ch_params.userdOffset[0] = 0;
+            }
+            if (attempts[ai].use_tsg_parent && ch->h_channel_group)
+               h_parent = ch->h_channel_group;
+
+            ret = nv_rm_alloc_object(rm, h_parent, &h,
+                                     gpf_class, &ch_params,
+                                     sizeof(ch_params));
+            last_ret = ret;
+            if (ret == 0) {
+               ch->h_channel = h;
+               ch->gpfifo_class = gpf_class;
+               if (!attempts[ai].use_tsg_parent)
+                  ch->use_channel_group = false;
+               break;
+            }
          }
       }
       if (!ch->h_channel) {
@@ -364,15 +377,23 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          ch->schedule_rc = ret;
    }
 
-   /* Work submit token (Volta+) via channel GPFIFO ctrl */
+   /* Work submit token (Volta+) via channel GPFIFO ctrl; try channel then TSG */
    {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
-      memset(&tok, 0, sizeof(tok));
-      if (nv_rm_control(rm, ch->h_channel,
-                        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
-                        &tok, sizeof(tok)) == 0) {
-         ch->work_submit_token = tok.workSubmitToken;
-         ch->has_work_submit_token = true;
+      uint32_t token_parents[2];
+      unsigned ti, ntp = 0;
+
+      token_parents[ntp++] = ch->h_channel;
+      if (ch->h_channel_group)
+         token_parents[ntp++] = ch->h_channel_group;
+      for (ti = 0; ti < ntp && !ch->has_work_submit_token; ti++) {
+         memset(&tok, 0, sizeof(tok));
+         if (nv_rm_control(rm, token_parents[ti],
+                           NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                           &tok, sizeof(tok)) == 0) {
+            ch->work_submit_token = tok.workSubmitToken;
+            ch->has_work_submit_token = true;
+         }
       }
    }
 
@@ -778,12 +799,21 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
    }
    if (!ch->has_work_submit_token && ch->rm) {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
-      memset(&tok, 0, sizeof(tok));
-      if (nv_rm_control(ch->rm, ch->h_channel,
-                        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
-                        &tok, sizeof(tok)) == 0) {
-         ch->work_submit_token = tok.workSubmitToken;
-         ch->has_work_submit_token = true;
+      uint32_t token_parents[2];
+      unsigned ti, ntp = 0;
+
+      token_parents[ntp++] = ch->h_channel;
+      if (ch->h_channel_group)
+         token_parents[ntp++] = ch->h_channel_group;
+      for (ti = 0; ti < ntp; ti++) {
+         memset(&tok, 0, sizeof(tok));
+         if (nv_rm_control(ch->rm, token_parents[ti],
+                           NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                           &tok, sizeof(tok)) == 0) {
+            ch->work_submit_token = tok.workSubmitToken;
+            ch->has_work_submit_token = true;
+            break;
+         }
       }
       /* Pre-Volta / older GPFIFO classes: token ctrl may fail; GPPut-only ok */
    }

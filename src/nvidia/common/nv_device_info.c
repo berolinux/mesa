@@ -358,9 +358,11 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
       0x0000cd97u, 0x0000cb97u, 0x0000c997u, 0x0000c897u, 0x0000c797u,
       0x0000c697u, 0x0000c597u, 0x0000c397u, 0x0000b197u, 0x0000b097u,
    };
+   /* 610 RE: C86F/C56F/C46F/C36F/C06F/B06F dominate; include C76F/C66F as alts */
    static const uint32_t ladder_gpfifo[] = {
-      0x0000c86fu, 0x0000c76fu, 0x0000c56fu, 0x0000c46fu, 0x0000c36fu,
-      0x0000c06fu, 0x0000b06fu, 0x0000a26fu, 0x0000a16fu, 0x0000a06fu,
+      0x0000c86fu, 0x0000c76fu, 0x0000c66fu, 0x0000c56fu, 0x0000c46fu,
+      0x0000c36fu, 0x0000c06fu, 0x0000b06fu, 0x0000a26fu, 0x0000a16fu,
+      0x0000a06fu,
    };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;
