@@ -77,10 +77,23 @@ nv_smoke_hw_dump_channel_trace(struct nv_channel *ch, const char *tag)
            (unsigned)gp_get, (unsigned)gp_put, (unsigned)host_put);
    if (ch->gpfifo_cpu && ch->gpfifo_entries) {
       uint32_t slot = ch->gpfifo_put ? (ch->gpfifo_put - 1) % ch->gpfifo_entries : 0;
-      fprintf(stderr, "%s: GPFIFO last slot[%u]= %08x %08x "
-              "(w0=pbVA>>2, w1=hi+len@bits30:10)\n",
-              t, (unsigned)slot,
-              ch->gpfifo_cpu[slot * 2], ch->gpfifo_cpu[slot * 2 + 1]);
+      uint32_t w0 = ch->gpfifo_cpu[slot * 2];
+      uint32_t w1 = ch->gpfifo_cpu[slot * 2 + 1];
+      uint64_t pb_va = ((uint64_t)(w1 & 0xff) << 32) | (uint64_t)(w0 & ~3u);
+      uint32_t len_dw = (w1 >> 10) & 0x1fffffu;
+      fprintf(stderr,
+              "%s: GPFIFO last slot[%u]= %08x %08x "
+              "decode pb_va=0x%llx len_dw=%u priv=%u level=%u sync=%u "
+              "doorbell=%s (class 0x%x %s 0xC36E)\n",
+              t, (unsigned)slot, w0, w1,
+              (unsigned long long)pb_va, (unsigned)len_dw,
+              (w1 >> 8) & 1, (w1 >> 9) & 1, (w1 >> 31) & 1,
+              (ch->has_work_submit_token && ch->usermode_map &&
+               (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu))
+                 ? "yes" : "no/GPPut-only",
+              (unsigned)ch->gpfifo_class,
+              (ch->gpfifo_class > 0xc36eu) ? ">" :
+              (ch->gpfifo_class ? "<=" : "?"));
    }
    if (ch->push_cpu && ch->push_dw_used) {
       n = ch->push_dw_used < 24u ? ch->push_dw_used : 24u;

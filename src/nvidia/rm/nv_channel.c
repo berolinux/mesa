@@ -915,31 +915,31 @@ nv_channel_kickoff(struct nv_channel *ch)
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
 
    /*
-    * Ring doorbell when we have usermode map + token and GPFIFO class is
-    * Turing+ (class > 0xC36E).  610.43.02 glcore@ac5557 skips doorbell for
-    * older classes (GPPut-only kick).  Pre-Volta / no token still publishes
-    * USERD GPPut only.
+    * libdrm submit_one_ex: entry → USERD.GPPut@0x8c → (if class>C36E) sfence +
+    * doorbell@usermode+0x90 with work_submit_token.  Matches 610.43.02 glcore@ac5540.
+    * Pass usermode/token whenever available; class gate is applied inside submit_one_ex.
     */
    ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL &&
-                   (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu);
+                   nvidia_gpfifo_class_needs_doorbell(ch->gpfifo_class);
 
-   /* libdrm helper: write GPFIFO entry, advance put, USERD GPPut, doorbell */
-   r = nvidia_gpfifo_submit_one(ch->gpfifo_cpu, ch->gpfifo_entries,
-                                &ch->gpfifo_put, ch->userd,
-                                pb_addr, seg_dwords,
-                                ring_doorbell ? ch->usermode_map : NULL,
-                                ch->work_submit_token,
-                                ring_doorbell,
-                                1000000000ull /* 1s ring-full stall */);
+   r = nvidia_gpfifo_submit_one_ex(ch->gpfifo_cpu, ch->gpfifo_entries,
+                                   &ch->gpfifo_put, ch->userd,
+                                   pb_addr, seg_dwords,
+                                   ch->usermode_map,
+                                   ch->work_submit_token,
+                                   ch->has_work_submit_token,
+                                   ch->gpfifo_class,
+                                   1000000000ull /* 1s ring-full stall */);
    if (r)
       return r;
 
    /*
-    * If submit_one did not ring (no token at call time) but we have token+map
-    * now, ring once.  Avoid double-ring when submit_one already rang (RE: one
-    * write to usermode+0x90 after GPPut is the normal kick).
+    * If class gate or missing token prevented doorbell inside submit_one_ex but
+    * we now have token+map and class needs doorbell, ring once (no double-ring
+    * when submit_one_ex already rang).
     */
-   if (!ring_doorbell && ch->usermode_map && ch->has_work_submit_token)
+   if (!ring_doorbell && ch->usermode_map && ch->has_work_submit_token &&
+       nvidia_gpfifo_class_needs_doorbell(ch->gpfifo_class))
       nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
 
    ch->push_dw_base = ch->push_dw_used;
