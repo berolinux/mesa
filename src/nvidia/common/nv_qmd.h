@@ -191,6 +191,13 @@ struct nv_qmd_desc {
    uint64_t cb_addr[NV_QMD_MAX_CBS];
    uint32_t cb_size[NV_QMD_MAX_CBS];  /* bytes; encoded as size>>4 in QMD */
    uint8_t  cb_valid_mask;            /* bit i => CB i valid */
+   /* Completion / chaining (applied after encode if set) */
+   uint64_t sema_release0_addr;       /* 0 = disabled */
+   uint32_t sema_release0_value;
+   uint64_t sema_release1_addr;
+   uint32_t sema_release1_value;
+   uint64_t dependent_qmd_addr;       /* 0 = no dependent QMD schedule */
+   bool     dependent_qmd_copy;       /* field-copy vs pointer-only */
 };
 
 /*
@@ -586,6 +593,33 @@ nv_qmd_set_dependent_qmd(uint32_t qmd[NV_QMD_DWORDS], uint64_t next_qmd_gpu_addr
                                NV_QMD_DEPENDENT_TYPE_GRID, false);
 }
 
+/** Apply sema/dependent fields from desc after nv_qmd_encode(). */
+static inline void
+nv_qmd_apply_desc_sideband(const struct nv_qmd_desc *d,
+                           uint32_t qmd[NV_QMD_DWORDS])
+{
+   if (!d || !qmd)
+      return;
+   if (d->sema_release0_addr)
+      nv_qmd_set_semaphore_release0(qmd, d->sema_release0_addr,
+                                    d->sema_release0_value);
+   if (d->sema_release1_addr)
+      nv_qmd_set_semaphore_release1(qmd, d->sema_release1_addr,
+                                    d->sema_release1_value, true /* one_word */);
+   if (d->dependent_qmd_addr)
+      nv_qmd_set_dependent_qmd_ex(qmd, d->dependent_qmd_addr,
+                                  NV_QMD_DEPENDENT_TYPE_GRID,
+                                  d->dependent_qmd_copy);
+}
+
+/** Encode QMD then apply sema/dependent sideband from the same desc. */
+static inline void
+nv_qmd_encode_full(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
+{
+   nv_qmd_encode(d, qmd);
+   nv_qmd_apply_desc_sideband(d, qmd);
+}
+
 /**
  * Invalidate caches on QMD schedule (texture/shader) — set bits in QMD so
  * SEND_PCAS with invalidate is not strictly required for every launch.
@@ -617,10 +651,12 @@ nv_qmd_prepare_indirect_placeholder(uint32_t qmd[NV_QMD_DWORDS],
    d.grid_x = 1;
    d.grid_y = 1;
    d.grid_z = 1;
-   nv_qmd_encode(&d, qmd);
+   if (sema_gpu_addr) {
+      d.sema_release0_addr = sema_gpu_addr;
+      d.sema_release0_value = sema_value;
+   }
+   nv_qmd_encode_full(&d, qmd);
    nv_qmd_set_cache_invalidate_all(qmd);
-   if (sema_gpu_addr)
-      nv_qmd_set_semaphore_release0(qmd, sema_gpu_addr, sema_value);
 }
 
 /**
