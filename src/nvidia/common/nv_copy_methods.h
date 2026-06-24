@@ -51,9 +51,27 @@ extern "C" {
 #define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_BLOCKLINEAR    0
 #define NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH          (1u << 8)
 #define NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE           (1u << 9)
+#define NVC6B5_LAUNCH_DMA_REMAP_ENABLE_TRUE                (1u << 10)
 #define NVC6B5_LAUNCH_DMA_REMIX_DISABLE                    0
 #define NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL                 0
 #define NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL                 0
+#define NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE          0x0
+
+/* REMAP constant-fill path (clc6b5.h SET_REMAP_*) */
+#define NVC6B5_SET_REMAP_CONST_A            0x0700
+#define NVC6B5_SET_REMAP_CONST_B            0x0704
+#define NVC6B5_SET_REMAP_COMPONENTS         0x0708
+/* DST_X/Y/Z/W = CONST_A (0x4) in each 3-bit field; component size = FOUR (0x3<<16);
+ * num src/dst components = ONE (0) — one 32-bit component written from CONST_A */
+#define NVC6B5_REMAP_COMPONENTS_FILL_U32    \
+   ((0x4u << 0) | (0x4u << 4) | (0x4u << 8) | (0x4u << 12) | \
+    (0x3u << 16) | (0x0u << 20) | (0x0u << 24))
+#define NVC6B5_REMAP_COMPONENTS_FILL_U16    \
+   ((0x4u << 0) | (0x4u << 4) | (0x6u << 8) | (0x6u << 12) | \
+    (0x1u << 16) | (0x0u << 20) | (0x0u << 24))
+#define NVC6B5_REMAP_COMPONENTS_FILL_U8     \
+   ((0x4u << 0) | (0x6u << 4) | (0x6u << 8) | (0x6u << 12) | \
+    (0x0u << 16) | (0x0u << 20) | (0x0u << 24))
 
 /* Block size: log2 gobs in each dimension; 0 = one gob (8x8x1 for height fermi) */
 #define NVC6B5_BLOCK_SIZE_ONE_GOB_EACH  0x00001000  /* GOB_HEIGHT_FERMI_8 in bits 15:12 */
@@ -64,6 +82,120 @@ nv_copy_set_object(struct nv_push *p, uint32_t class_copy)
 {
    nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
    nv_push_set_object(p, class_copy);
+}
+
+/**
+ * Fill a linear GPU range with a repeated 32-bit pattern using CE REMAP
+ * (CONST_A -> all destination components, no source read).
+ * size_bytes must be a multiple of 4; chunks internally if > 2^28-ish.
+ *
+ * Source offset is unused when REMAP supplies all components from CONST_A;
+ * we still program a valid virtual address (dst) for both sides.
+ */
+static inline void
+nv_copy_emit_remap_fill_u32(struct nv_push *p,
+                            uint64_t dst_gpu_addr,
+                            uint32_t size_bytes,
+                            uint32_t fill_data)
+{
+   uint32_t launch;
+   uint32_t remain = size_bytes & ~3u;
+   uint64_t addr = dst_gpu_addr;
+
+   if (!p || !remain || !dst_gpu_addr)
+      return;
+
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_A, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_B, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_COMPONENTS, NVC6B5_REMAP_COMPONENTS_FILL_U32);
+
+   while (remain) {
+      /* CE line_length is in bytes; practical per-launch chunk 16 MiB */
+      uint32_t chunk = remain > (16u * 1024u * 1024u) ? (16u * 1024u * 1024u) : remain;
+      chunk &= ~3u;
+      if (!chunk)
+         break;
+
+      nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                     (uint32_t)(addr >> 32) & 0x1ffff);
+      nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                     (uint32_t)(addr & 0xffffffffu));
+      nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                     (uint32_t)(addr >> 32) & 0x1ffff);
+      nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                     (uint32_t)(addr & 0xffffffffu));
+      nv_push_method(p, NVC6B5_PITCH_IN, chunk);
+      nv_push_method(p, NVC6B5_PITCH_OUT, chunk);
+      nv_push_method(p, NVC6B5_LINE_LENGTH_IN, chunk);
+      nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+      launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+               NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+               NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+               NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
+               NVC6B5_LAUNCH_DMA_REMAP_ENABLE_TRUE;
+      nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+
+      addr += chunk;
+      remain -= chunk;
+   }
+}
+
+/** Set copy object + REMAP u32 fill + WFI */
+static inline void
+nv_copy_push_remap_fill_u32(struct nv_push *p, uint32_t class_copy,
+                            uint64_t dst_gpu_addr, uint32_t size_bytes,
+                            uint32_t fill_data)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_remap_fill_u32(p, dst_gpu_addr, size_bytes, fill_data);
+   nv_push_wfi(p);
+}
+
+/**
+ * 2D pitch fill: each scanline is line_length bytes of fill_data pattern,
+ * line_count rows, pitch_out row stride.  Useful for image clear via CE.
+ */
+static inline void
+nv_copy_emit_remap_fill_2d(struct nv_push *p,
+                           uint64_t dst_gpu_addr,
+                           uint32_t line_length, uint32_t pitch_out,
+                           uint32_t line_count, uint32_t fill_data)
+{
+   uint32_t launch;
+
+   if (!p || !dst_gpu_addr || !line_length || !line_count)
+      return;
+   if (!pitch_out)
+      pitch_out = line_length;
+
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_A, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_CONST_B, fill_data);
+   nv_push_method(p, NVC6B5_SET_REMAP_COMPONENTS, NVC6B5_REMAP_COMPONENTS_FILL_U32);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, pitch_out);
+   nv_push_method(p, NVC6B5_PITCH_OUT, pitch_out);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, line_length);
+   nv_push_method(p, NVC6B5_LINE_COUNT, line_count);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_REMAP_ENABLE_TRUE |
+            (line_count > 1 ? NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE : 0);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
 }
 
 /**
