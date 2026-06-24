@@ -244,24 +244,67 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
 
    h_channel = 0;
    {
-      uint32_t h = 0;
-      uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group
-                                              : nv_rm_device_device_handle(rm);
-      ret = nv_rm_alloc_object(rm, h_parent, &h,
-                               ch->gpfifo_class, &ch_params, sizeof(ch_params));
-      if (ret != 0) {
-         /* Retry without USERD / without TSG parent */
-         memset(ch_params.hUserdMemory, 0, sizeof(ch_params.hUserdMemory));
-         memset(ch_params.userdOffset, 0, sizeof(ch_params.userdOffset));
-         ch_params.hContextShare = 0;
-         h = 0;
-         h_parent = nv_rm_device_device_handle(rm);
+      /*
+       * Channel alloc retries (RM is picky about TSG/USERD/VASpace/error ctx).
+       * Progressively strip optional fields; keep gpFifoOffset/entries.
+       */
+      struct {
+         bool use_tsg_parent;
+         bool use_userd;
+         bool use_ctxshare;
+         bool use_vaspace;
+         bool use_error_ctxdma; /* false => notifier mem handle only */
+      } attempts[] = {
+         { true,  true,  true,  true,  true  },
+         { true,  true,  false, true,  true  },
+         { false, true,  false, true,  true  },
+         { false, false, false, true,  true  },
+         { false, false, false, true,  false },
+         { false, false, false, false, false },
+      };
+      unsigned ai;
+      uint32_t h_dev = nv_rm_device_device_handle(rm);
+      int last_ret = -1;
+
+      for (ai = 0; ai < sizeof(attempts) / sizeof(attempts[0]); ai++) {
+         uint32_t h = 0;
+         uint32_t h_parent = h_dev;
+
+         memset(&ch_params, 0, sizeof(ch_params));
+         if (attempts[ai].use_error_ctxdma && ch->h_error_ctxdma)
+            ch_params.hObjectError = ch->h_error_ctxdma;
+         else
+            ch_params.hObjectError = ch->h_error_notifier;
+         ch_params.gpFifoOffset = ch->gpfifo_gpu_addr;
+         ch_params.gpFifoEntries = gpfifo_entries;
+         ch_params.flags = 0;
+         ch_params.engineType = ch->engine_type;
+         if (attempts[ai].use_vaspace)
+            ch_params.hVASpace = ch->h_vaspace;
+         if (attempts[ai].use_ctxshare && ch->h_ctxshare)
+            ch_params.hContextShare = ch->h_ctxshare;
+         if (attempts[ai].use_userd && ch->h_userd_mem) {
+            ch_params.hUserdMemory[0] = ch->h_userd_mem;
+            ch_params.userdOffset[0] = 0;
+         }
+         if (attempts[ai].use_tsg_parent && ch->h_channel_group)
+            h_parent = ch->h_channel_group;
+
          ret = nv_rm_alloc_object(rm, h_parent, &h,
-                                  ch->gpfifo_class, &ch_params, sizeof(ch_params));
+                                  ch->gpfifo_class, &ch_params,
+                                  sizeof(ch_params));
+         last_ret = ret;
+         if (ret == 0) {
+            ch->h_channel = h;
+            if (!attempts[ai].use_tsg_parent)
+               ch->use_channel_group = false;
+            break;
+         }
       }
-      if (ret != 0)
+      if (!ch->h_channel) {
+         (void)last_ret;
          goto fail;
-      ch->h_channel = h;
+      }
    }
 
    /* Schedule: prefer channel-group schedule when TSG is used, else per-channel */

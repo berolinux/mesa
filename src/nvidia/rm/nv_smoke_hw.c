@@ -5,6 +5,7 @@
 
 #include "nv_smoke_hw.h"
 #include "nv_channel.h"
+#include "nv_device_info.h"
 #include "nv_rm.h"
 #include "nv_shader.h"
 
@@ -229,6 +230,10 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       return -EINVAL;
    if (!slices)
       slices = NV_SMOKE_HW_ALL;
+
+   /* Bring-up: log resolved classes once when verbose */
+   if (nv_smoke_hw_env_verbose() && ch->info)
+      nv_device_info_log_classes(ch->info, "nv_smoke_hw");
 
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;

@@ -6,6 +6,8 @@
 #include "nv_device_info.h"
 #include "nv_video_methods.h"
 
+#include <stdio.h>
+
 /* Channel / engine class IDs from open-gpu-kernel-modules class headers */
 #define KEPLER_A_COMPUTE_A          0x0000a0c0
 #define MAXWELL_COMPUTE_A           0x0000b0c0
@@ -265,4 +267,57 @@ nv_device_info_refine_class_from_list(struct nv_device_info *info,
       break;
    }
    info->classes_from_rm = true;
+}
+
+void
+nv_device_info_refine_gpfifo_from_list(struct nv_device_info *info,
+                                       const uint32_t *class_list,
+                                       uint32_t count)
+{
+   uint32_t i, best = 0;
+   /* Kepler..Hopper GPFIFO: 0xA06F .. 0xC76F (and later in same low-byte 0x6f) */
+   const uint32_t lo = 0x0000a06fu;
+   const uint32_t hi = 0x0000cf6fu;
+
+   if (!info || !class_list || !count)
+      return;
+
+   for (i = 0; i < count; i++) {
+      uint32_t c = class_list[i];
+      if (c < lo || c > hi)
+         continue;
+      /* GPFIFO classes end with 0x6f in class ID (open-gpu class headers) */
+      if ((c & 0xffu) != 0x6fu)
+         continue;
+      if (c > best)
+         best = c;
+   }
+   if (best) {
+      info->class_gpfifo = best;
+      info->classes_from_rm = true;
+   }
+}
+
+void
+nv_device_info_log_classes(const struct nv_device_info *info, const char *prefix)
+{
+   const char *p = prefix ? prefix : "nv_device_info";
+   if (!info)
+      return;
+   fprintf(stderr,
+           "%s: arch=0x%x sm=%u classes_from_rm=%d "
+           "gpfifo=0x%x 3d=0x%x compute=0x%x copy=0x%x nvdec=0x%x nvenc=0x%x "
+           "gfx=%d compute_ok=%d\n",
+           p,
+           (unsigned)info->architecture,
+           (unsigned)info->sm_version,
+           (int)info->classes_from_rm,
+           (unsigned)info->class_gpfifo,
+           (unsigned)info->class_3d,
+           (unsigned)info->class_compute,
+           (unsigned)info->class_copy,
+           (unsigned)info->class_nvdec,
+           (unsigned)info->class_nvenc,
+           (int)info->has_graphics,
+           (int)info->has_compute);
 }

@@ -102,6 +102,18 @@ void nv_device_info_refine_class_from_list(struct nv_device_info *info,
                                           const uint32_t *class_list,
                                           uint32_t count);
 
+/**
+ * Refine GPFIFO / channel class (0x*06f band) from a classlist (often GR or
+ * first engine's list).  Highest matching ID wins; keeps family default if none.
+ */
+void nv_device_info_refine_gpfifo_from_list(struct nv_device_info *info,
+                                            const uint32_t *class_list,
+                                            uint32_t count);
+
+/** One-line stderr summary of engine classes (bring-up / NV_SMOKE_HW_VERBOSE). */
+void nv_device_info_log_classes(const struct nv_device_info *info,
+                                const char *prefix);
+
 #ifdef __cplusplus
 }
 #endif

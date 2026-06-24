@@ -10,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(HAVE_LIBDRM_NVIDIA)
+#include <stdio.h>
+#endif
+
 #include "nv_rm.h"
 
 #if defined(HAVE_LIBDRM_NVIDIA)
@@ -143,36 +147,57 @@ nv_rm_device_open(int drm_fd, int gpu_index)
 
    nv_device_info_select_classes(&dev->info);
 
-   /* Best-effort refine 3D/compute/copy/video classes via RM classlist */
+   /* Best-effort refine classes via RM GET_ENGINE_CLASSLIST (+ engine walk) */
    {
       uint32_t clist[128];
-      uint32_t n;
-      n = 128;
-      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
-                                             NV2080_ENGINE_TYPE_GRAPHICS,
-                                             clist, &n) == 0 && n)
-         nv_device_info_refine_class_from_list(&dev->info, 0, clist, n);
-      n = 128;
-      /* Compute often shares GR engine classlist; also try COPY0 for CE */
-      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
-                                             NV2080_ENGINE_TYPE_GRAPHICS,
-                                             clist, &n) == 0 && n)
-         nv_device_info_refine_class_from_list(&dev->info, 1, clist, n);
-      n = 128;
-      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
-                                             NV2080_ENGINE_TYPE_COPY0,
-                                             clist, &n) == 0 && n)
-         nv_device_info_refine_class_from_list(&dev->info, 2, clist, n);
-      n = 128;
-      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
-                                             NV2080_ENGINE_TYPE_NVDEC0,
-                                             clist, &n) == 0 && n)
-         nv_device_info_refine_class_from_list(&dev->info, 3, clist, n);
-      n = 128;
-      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
-                                             NV2080_ENGINE_TYPE_NVENC0,
-                                             clist, &n) == 0 && n)
-         nv_device_info_refine_class_from_list(&dev->info, 4, clist, n);
+      uint32_t engines[84];
+      uint32_t n, ne, ei;
+      static const uint32_t refine_engines[] = {
+         NV2080_ENGINE_TYPE_GRAPHICS,
+         NV2080_ENGINE_TYPE_COPY0,
+         NV2080_ENGINE_TYPE_COPY1,
+         NV2080_ENGINE_TYPE_COPY2,
+         NV2080_ENGINE_TYPE_NVDEC0,
+         NV2080_ENGINE_TYPE_NVENC0,
+         NV2080_ENGINE_TYPE_NVENC1,
+      };
+      unsigned ri;
+
+      /* For each engine's classlist, refine by class ID bands (not only et==).
+       * Covers alternate COPY/NVDEC indices returned by GET_ENGINES_V2. */
+#define NV_RM_REFINE_CLIST(clist_, n_) do { \
+         nv_device_info_refine_gpfifo_from_list(&dev->info, (clist_), (n_)); \
+         nv_device_info_refine_class_from_list(&dev->info, 0, (clist_), (n_)); \
+         nv_device_info_refine_class_from_list(&dev->info, 1, (clist_), (n_)); \
+         nv_device_info_refine_class_from_list(&dev->info, 2, (clist_), (n_)); \
+         nv_device_info_refine_class_from_list(&dev->info, 3, (clist_), (n_)); \
+         nv_device_info_refine_class_from_list(&dev->info, 4, (clist_), (n_)); \
+      } while (0)
+
+      ne = (uint32_t)(sizeof(engines) / sizeof(engines[0]));
+      if (nvidia_rm_gpu_get_engines(dev->nvdev, engines, &ne) == 0 && ne) {
+         for (ei = 0; ei < ne; ei++) {
+            n = 128;
+            if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev, engines[ei],
+                                                   clist, &n) != 0 || !n)
+               continue;
+            NV_RM_REFINE_CLIST(clist, n);
+         }
+      }
+
+      /* Always hit canonical engines even if GET_ENGINES failed/partial */
+      for (ri = 0; ri < sizeof(refine_engines) / sizeof(refine_engines[0]);
+           ri++) {
+         n = 128;
+         if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev, refine_engines[ri],
+                                                clist, &n) != 0 || !n)
+            continue;
+         NV_RM_REFINE_CLIST(clist, n);
+      }
+#undef NV_RM_REFINE_CLIST
+
+      if (getenv("NV_SMOKE_HW_VERBOSE") || getenv("NV_RM_LOG_CLASSES"))
+         nv_device_info_log_classes(&dev->info, "nv_rm_device");
    }
 
    dev->valid = true;
