@@ -504,6 +504,16 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
                                               const VkBlitImageInfo2 *pBlitImageInfo);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdResolveImage2(VkCommandBuffer commandBuffer,
                                                  const VkResolveImageInfo2 *pResolveImageInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image,
+                                                          VkImageLayout imageLayout,
+                                                          const VkClearDepthStencilValue *pDepthStencil,
+                                                          uint32_t rangeCount,
+                                                          const VkImageSubresourceRange *pRanges);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
+                                                        VkQueryPool queryPool,
+                                                        uint32_t firstQuery, uint32_t queryCount,
+                                                        VkBuffer dstBuffer, VkDeviceSize dstOffset,
+                                                        VkDeviceSize stride, VkQueryResultFlags flags);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                                              const VkDependencyInfo *pDependencyInfo);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,

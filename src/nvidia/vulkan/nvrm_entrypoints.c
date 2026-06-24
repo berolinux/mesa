@@ -117,6 +117,8 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdUpdateBuffer, nvrm_CmdUpdateBuffer);
    NVRM_SET(CmdBlitImage2, nvrm_CmdBlitImage2);
    NVRM_SET(CmdResolveImage2, nvrm_CmdResolveImage2);
+   NVRM_SET(CmdClearDepthStencilImage, nvrm_CmdClearDepthStencilImage);
+   NVRM_SET(CmdCopyQueryPoolResults, nvrm_CmdCopyQueryPoolResults);
    NVRM_SET(CmdSetEvent2, nvrm_CmdSetEvent2);
    NVRM_SET(CmdResetEvent2, nvrm_CmdResetEvent2);
    NVRM_SET(CmdWaitEvents2, nvrm_CmdWaitEvents2);

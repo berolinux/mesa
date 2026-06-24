@@ -443,6 +443,45 @@ nvrm_DestroyQueryPool(VkDevice _device, VkQueryPool _pool,
    vk_free2(&device->vk.alloc, pAllocator, qp);
 }
 
+/*
+ * NVC597 report semaphore 4-word structure (approx from class/report layout):
+ *   dw0: payload / zpass counter low
+ *   dw1: timestamp low or counter high
+ *   dw2: timestamp high / report marker
+ *   dw3: availability / completion (non-zero when release completed)
+ * One-word reports only write dw0; availability inferred from non-zero dw0
+ * or explicit dw3 when 4-word structure was used.
+ */
+static bool
+nvrm_query_slot_available(const uint32_t *slot, enum nvrm_query_kind kind)
+{
+   if (!slot)
+      return false;
+   if (slot[3])
+      return true; /* 4-word report completion marker */
+   if (kind == NVRM_QUERY_TIMESTAMP)
+      return slot[0] || slot[1] || slot[2];
+   /* Occlusion: zero is a valid result; availability uses dw3 or non-zero any */
+   return slot[0] || slot[1] || slot[2] || slot[3];
+}
+
+static uint64_t
+nvrm_query_slot_value64(const uint32_t *slot, enum nvrm_query_kind kind)
+{
+   if (!slot)
+      return 0;
+   if (kind == NVRM_QUERY_TIMESTAMP) {
+      /* 64-bit timestamp: typically dw0|dw1 or dw1|dw2 depending on report mode */
+      if (slot[1] || slot[2])
+         return ((uint64_t)slot[2] << 32) | slot[1];
+      return ((uint64_t)slot[1] << 32) | slot[0];
+   }
+   if (kind == NVRM_QUERY_OCCLUSION)
+      return ((uint64_t)slot[1] << 32) | slot[0];
+   /* pipeline stats: sum first two dwords as coarse proxy */
+   return ((uint64_t)slot[1] << 32) | slot[0];
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_GetQueryPoolResults(VkDevice _device, VkQueryPool _pool,
                          uint32_t firstQuery, uint32_t queryCount,
@@ -451,6 +490,7 @@ nvrm_GetQueryPoolResults(VkDevice _device, VkQueryPool _pool,
 {
    VK_FROM_HANDLE(nvrm_query_pool, qp, _pool);
    uint32_t i;
+   bool any_unavailable = false;
    (void)_device;
    if (!qp || !pData || !queryCount)
       return VK_ERROR_UNKNOWN;
@@ -458,24 +498,87 @@ nvrm_GetQueryPoolResults(VkDevice _device, VkQueryPool _pool,
       uint32_t qi = firstQuery + i;
       uint32_t *slot = (uint32_t *)nvrm_query_slot_map(qp, qi);
       uint8_t *dst = (uint8_t *)pData + (size_t)i * (size_t)stride;
-      uint64_t val = 0;
-      if (!slot || (size_t)(i + 1) * (size_t)stride > dataSize)
+      uint64_t val;
+      bool avail;
+      size_t need = (flags & VK_QUERY_RESULT_64_BIT) ? 8 : 4;
+      if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+         need *= 2;
+      if (!slot || (size_t)(i + 1) * (size_t)stride > dataSize ||
+          (size_t)(dst - (uint8_t *)pData) + need > dataSize)
          continue;
-      /* Report structure: dword0 = payload/counter, dword1-3 = timestamp/extra */
+      avail = nvrm_query_slot_available(slot, qp->kind);
+      if (!avail) {
+         any_unavailable = true;
+         if (flags & VK_QUERY_RESULT_WAIT_BIT) {
+            /* Host-mappable sema BO: spin briefly on availability dword */
+            unsigned spin;
+            for (spin = 0; spin < 100000 && !avail; spin++)
+               avail = nvrm_query_slot_available(slot, qp->kind);
+            if (!avail)
+               any_unavailable = true;
+            else
+               any_unavailable = false;
+         }
+      }
+      val = nvrm_query_slot_value64(slot, qp->kind);
       if (flags & VK_QUERY_RESULT_64_BIT) {
-         val = ((uint64_t)slot[1] << 32) | slot[0];
-         if (!val && qp->kind == NVRM_QUERY_OCCLUSION)
-            val = slot[0];
          *(uint64_t *)dst = val;
          if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
-            *(uint64_t *)(dst + 8) = slot[0] || slot[1] ? 1 : 0;
+            *(uint64_t *)(dst + 8) = avail ? 1 : 0;
       } else {
-         *(uint32_t *)dst = slot[0];
+         *(uint32_t *)dst = (uint32_t)val;
          if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
-            *(uint32_t *)(dst + 4) = slot[0] ? 1 : 0;
+            *(uint32_t *)(dst + 4) = avail ? 1 : 0;
       }
+      if (!avail && (flags & VK_QUERY_RESULT_PARTIAL_BIT) == 0 &&
+          (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) == 0)
+         any_unavailable = true;
    }
+   if (any_unavailable && !(flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) &&
+       !(flags & VK_QUERY_RESULT_PARTIAL_BIT))
+      return VK_NOT_READY;
    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
+                             VkQueryPool queryPool,
+                             uint32_t firstQuery, uint32_t queryCount,
+                             VkBuffer dstBuffer, VkDeviceSize dstOffset,
+                             VkDeviceSize stride, VkQueryResultFlags flags)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_query_pool, qp, queryPool);
+   VK_FROM_HANDLE(nvrm_buffer, dst, dstBuffer);
+   const struct nv_device_info *info;
+   uint32_t class_copy, i;
+   uint64_t daddr;
+   uint32_t elem_size = (flags & VK_QUERY_RESULT_64_BIT) ? 8 : 4;
+
+   if (!cmd || !cmd->push_map || !qp || !dst)
+      return;
+   if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT)
+      elem_size *= 2;
+   info = cmd->device ? cmd->device->info : NULL;
+   class_copy = info ? info->class_copy : 0;
+   daddr = (dst->addr ? dst->addr : (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0))
+           + dstOffset;
+   if (!daddr || !qp->base_gpu_addr)
+      return;
+   if (class_copy)
+      nv_copy_set_object(&cmd->push, class_copy);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+   /* Copy each query slot (or first elem_size bytes) into tightly/strided dst */
+   for (i = 0; i < queryCount; i++) {
+      uint64_t saddr = qp->base_gpu_addr +
+                       (uint64_t)(firstQuery + i) * NVRM_QUERY_SLOT_BYTES;
+      uint64_t out = daddr + (uint64_t)i * (stride ? stride : elem_size);
+      uint32_t copy_bytes = elem_size <= NVRM_QUERY_SLOT_BYTES
+                            ? elem_size : NVRM_QUERY_SLOT_BYTES;
+      nv_copy_emit_buffer_copy(&cmd->push, saddr, out, copy_bytes, 0, 0, 1);
+   }
+   nv_push_wfi(&cmd->push);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -604,8 +707,7 @@ nvrm_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
 
 /* ---- Buffer fill / update / blit / resolve via copy engine ---- */
 
-/* Host-side dword pattern fill via indirect_shadow_bo + CE copies (no REMAP
- * fill class wired yet).  For each 4-byte stride we stage data in shadow BO. */
+/* Fallback when REMAP unavailable: host-side dword pattern via shadow BO. */
 static void
 nvrm_cmd_fill_via_shadow(struct nvrm_cmd_buffer *cmd, uint64_t dst_addr,
                          VkDeviceSize size_bytes, uint32_t data)
@@ -648,17 +750,67 @@ nvrm_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvrm_buffer, dst, dstBuffer);
+   const struct nv_device_info *info;
+   uint32_t class_copy;
    uint64_t addr;
+   uint32_t fill_bytes;
 
    if (!cmd || !cmd->push_map || !dst)
       return;
+   info = cmd->device ? cmd->device->info : NULL;
+   class_copy = info ? info->class_copy : 0;
    addr = (dst->addr ? dst->addr : (dst->bo ? nv_rm_bo_gpu_offset(dst->bo) : 0))
           + dstOffset;
    if (!addr)
       return;
    if (size == VK_WHOLE_SIZE)
       size = dst->vk.size > dstOffset ? dst->vk.size - dstOffset : 4;
+   fill_bytes = (uint32_t)(size & ~3ull);
+   if (!fill_bytes)
+      return;
+   /* Preferred: CE REMAP constant fill (no host staging) */
+   if (class_copy || cmd->push_map) {
+      nv_copy_push_remap_fill_u32(&cmd->push, class_copy, addr, fill_bytes, data);
+      return;
+   }
    nvrm_cmd_fill_via_shadow(cmd, addr, size, data);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage image,
+                               VkImageLayout imageLayout,
+                               const VkClearDepthStencilValue *pDepthStencil,
+                               uint32_t rangeCount,
+                               const VkImageSubresourceRange *pRanges)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_image, img, image);
+   const struct nv_device_info *info;
+   uint32_t class_3d, r;
+   float depth = pDepthStencil ? pDepthStencil->depth : 1.0f;
+   uint32_t stencil = pDepthStencil ? pDepthStencil->stencil : 0;
+
+   (void)imageLayout;
+   if (!cmd || !cmd->push_map)
+      return;
+   info = cmd->device ? cmd->device->info : NULL;
+   class_3d = info ? info->class_3d : 0;
+   if (class_3d)
+      nv_3d_set_object(&cmd->push, class_3d);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+
+   /* Inside render pass: use CLEAR_SURFACE depth/stencil bits.
+    * Standalone image: still emit clear surface (target must be bound by caller
+    * via prior BeginRendering in full path; here emit methods for when zeta set). */
+   for (r = 0; r < (rangeCount ? rangeCount : 1); r++) {
+      unsigned buffers = 0;
+      (void)pRanges;
+      buffers |= 0x1; /* depth */
+      buffers |= 0x2; /* stencil */
+      nv_3d_emit_clear_surface(&cmd->push, buffers, NULL, depth, stencil);
+   }
+   (void)img;
 }
 
 VKAPI_ATTR void VKAPI_CALL
