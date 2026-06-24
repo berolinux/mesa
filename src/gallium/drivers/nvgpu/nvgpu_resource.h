@@ -18,7 +18,14 @@ struct nvgpu_resource {
    uint64_t gpu_offset;
    uint32_t rm_handle;
    enum pipe_format internal_format;
-   bool linear;
+   uint32_t row_pitch;      /* bytes; 32B-aligned logical pitch */
+   uint32_t level0_size;    /* level-0 plane size estimate */
+   uint32_t bpp;            /* bytes per pixel / block */
+   uint8_t  gobs_width;     /* NV_TEX_GOBS_* for blocklinear */
+   uint8_t  gobs_height;
+   uint8_t  gobs_depth;
+   bool linear;             /* pitch/linear layout (buffers, PIPE_BIND_LINEAR) */
+   bool blocklinear;        /* OPTIMAL-style tiled (TEXHEAD_BL / NVC6B5 BL) */
 };
 
 static inline struct nvgpu_resource *
