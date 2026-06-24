@@ -124,6 +124,24 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       }
    }
 
+   /* SSBO descriptor table: 16 slots x 16B, bound as CB group 7 slot 15 */
+   if (!cmd->ssbo_table_bo && cmd->device && cmd->device->rm) {
+      memset(&req, 0, sizeof(req));
+      req.size = 256; /* 16 * 16 */
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      cmd->ssbo_table_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+      if (cmd->ssbo_table_bo) {
+         cmd->ssbo_table_bo_size = 256;
+         cmd->ssbo_table_map = nv_rm_bo_map(cmd->ssbo_table_bo);
+         if (cmd->ssbo_table_map)
+            memset(cmd->ssbo_table_map, 0, 256);
+      }
+   }
+
    cmd->push_dw_used = 0;
    cmd->compute_init_done = false;
    cmd->lmem_programmed = false;

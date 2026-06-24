@@ -6,11 +6,13 @@
 #include "nvrm_private.h"
 #include "nvrm_wsi.h"
 #include "nv_tex.h"
+#include "nv_fence.h"
 
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
 
 #include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
 #include <xf86drm.h>
 
@@ -689,6 +691,15 @@ nvrm_GetDeviceQueue2(VkDevice _device, const VkDeviceQueueInfo2 *pQueueInfo,
    *pQueue = nvrm_queue_to_handle(device->queue);
 }
 
+static void
+nvrm_queue_ensure_submit_fence_dev(struct nvrm_queue *queue)
+{
+   if (!queue || !queue->device || !queue->device->rm)
+      return;
+   if (!queue->submit_fence)
+      queue->submit_fence = nv_fence_create(queue->device->rm);
+}
+
 static VkResult
 nvrm_queue_submit(struct vk_queue *vk_queue,
                   struct vk_queue_submit *submit)
@@ -696,39 +707,59 @@ nvrm_queue_submit(struct vk_queue *vk_queue,
    struct nvrm_queue *queue =
       container_of(vk_queue, struct nvrm_queue, vk);
    struct nv_channel *ch = queue->channel;
-   uint32_t i, j;
+   uint32_t i;
 
    if (!ch || !ch->push_cpu)
       return VK_ERROR_DEVICE_LOST;
 
+   nvrm_queue_ensure_submit_fence_dev(queue);
+
    /* Replay each command buffer's recorded push dwords into the channel
-    * pushbuffer and kick GPFIFO.  Command buffers store a linear method stream
-    * in push_map; we append and kick once per submit (or when space is tight). */
+    * pushbuffer and kick GPFIFO.  Append sema release so later waits can
+    * observe submit completion without full channel idle polling. */
    for (i = 0; i < submit->command_buffer_count; i++) {
       struct nvrm_cmd_buffer *cmd =
          container_of(submit->command_buffers[i], struct nvrm_cmd_buffer, vk);
       uint32_t *dst;
       uint32_t need;
+      uint32_t seg_base;
+      struct nv_push tail;
 
       if (!cmd || !cmd->push_map || cmd->push_dw_used == 0)
          continue;
 
-      need = cmd->push_dw_used;
-      dst = nv_channel_push_begin(ch, need + 8);
+      need = cmd->push_dw_used + 24;
+      dst = nv_channel_push_begin(ch, need);
       if (!dst)
          return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-      for (j = 0; j < need; j++)
-         dst[j] = cmd->push_map[j];
-      ch->push_dw_used = ch->push_dw_base + need;
+      seg_base = ch->push_dw_base;
+      memcpy(dst, cmd->push_map, cmd->push_dw_used * 4);
+      ch->push_dw_used = seg_base + cmd->push_dw_used;
+
+      if (queue->submit_fence && queue->submit_fence->sema_gpu_addr) {
+         nv_push_init_at(&tail, ch->push_cpu,
+                         ch->push_cpu + ch->push_dw_used,
+                         ch->push_dw_size);
+         nv_push_set_subch(&tail, NV_PUSH_SUBCH_3D);
+         queue->submit_seq =
+            nv_fence_signal_next_3d(queue->submit_fence, &tail);
+         ch->push_dw_used = seg_base + (uint32_t)(tail.cur - tail.start);
+      }
 
       if (nv_channel_kickoff(ch) != 0)
          return VK_ERROR_DEVICE_LOST;
    }
 
-   /* Wait for GPU to drain GPFIFO when not deferred (simple host sync). */
-   if (!(submit->wait_count == 0 && submit->signal_count == 0))
-      (void)nv_channel_wait_idle(ch, 500000000ull); /* 500ms */
+   /* If external waits/signals requested and we have no sema, fall back to
+    * coarse channel idle. Prefer sema wait when submit_fence is available. */
+   if (submit->wait_count || submit->signal_count) {
+      if (queue->submit_fence && queue->submit_seq)
+         (void)nv_fence_wait(queue->submit_fence, queue->submit_seq,
+                             500000000ull);
+      else
+         (void)nv_channel_wait_idle(ch, 500000000ull);
+   }
 
    return VK_SUCCESS;
 }
@@ -744,6 +775,8 @@ nvrm_queue_init(struct nvrm_device *device, struct nvrm_queue *queue)
    queue->h_channel = 0;
    queue->h_gpfifo_mem = 0;
    queue->channel_ready = false;
+   queue->submit_fence = NULL;
+   queue->submit_seq = 0;
 
    result = vk_queue_init(&queue->vk, &device->vk, NULL, 0 /* queue_family_index */);
    if (result != VK_SUCCESS)
@@ -760,6 +793,7 @@ nvrm_queue_init(struct nvrm_device *device, struct nvrm_queue *queue)
          queue->h_gpfifo_mem = ch->h_gpfifo_mem;
          queue->channel_ready = true;
          queue->vk.driver_submit = nvrm_queue_submit;
+         queue->submit_fence = nv_fence_create(device->rm);
       }
    }
 
@@ -771,6 +805,11 @@ nvrm_queue_init(struct nvrm_device *device, struct nvrm_queue *queue)
 void
 nvrm_queue_finish(struct nvrm_queue *queue)
 {
+   if (queue->submit_fence) {
+      nv_fence_destroy(queue->submit_fence);
+      queue->submit_fence = NULL;
+      queue->submit_seq = 0;
+   }
    if (queue->channel) {
       nv_channel_destroy(queue->channel);
       queue->channel = NULL;

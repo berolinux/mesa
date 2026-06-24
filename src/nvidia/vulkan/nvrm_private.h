@@ -33,6 +33,7 @@
 #include "nv_push.h"
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
+#include "nv_fence.h"
 
 #define NVRM_API_VERSION VK_MAKE_VERSION(1, 3, 0)
 
@@ -66,6 +67,9 @@ struct nvrm_queue {
    uint32_t h_channel;
    uint32_t h_gpfifo_mem;
    bool channel_ready;
+   /* Submit completion sema (nv_fence): signalled after each kickoff */
+   struct nv_fence *submit_fence;
+   uint32_t submit_seq;      /* last signalled seq on submit_fence */
 };
 
 struct nvrm_device_memory {
@@ -161,6 +165,10 @@ struct nvrm_cmd_buffer {
    struct nv_rm_bo *indirect_shadow_bo; /* host-mappable CE target for indirect draws */
    void *indirect_shadow_map;
    uint32_t indirect_shadow_bo_size;
+   /* SSBO descriptor table: 16 entries x 16 bytes (addr lo/hi, size, flags) */
+   struct nv_rm_bo *ssbo_table_bo;
+   void *ssbo_table_map;
+   uint32_t ssbo_table_bo_size;
    uint32_t lmem_bo_size;     /* allocated size of lmem_bo */
    uint32_t lmem_local_req;   /* max per-thread local (from bound compute shader) */
    bool lmem_programmed;      /* SET_SHADER_LOCAL_MEMORY* already emitted */
@@ -601,6 +609,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit2(VkQueue queue, uint32_t submitC
                                                  const VkSubmitInfo2 *pSubmits, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,
                                                 const VkSubmitInfo *pSubmits, VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_QueueWaitIdle(VkQueue queue);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_DeviceWaitIdle(VkDevice device);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateSampler(VkDevice device,
                                                   const VkSamplerCreateInfo *pCreateInfo,
                                                   const VkAllocationCallbacks *pAllocator,

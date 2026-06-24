@@ -152,6 +152,9 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdEndConditionalRenderingEXT, nvrm_CmdEndConditionalRenderingEXT);
    NVRM_SET(CmdPipelineBarrier2, nvrm_CmdPipelineBarrier2);
    NVRM_SET(QueueSubmit2, nvrm_QueueSubmit2);
+   NVRM_SET(QueueSubmit, nvrm_QueueSubmit);
+   NVRM_SET(QueueWaitIdle, nvrm_QueueWaitIdle);
+   NVRM_SET(DeviceWaitIdle, nvrm_DeviceWaitIdle);
    NVRM_SET(QueuePresentKHR, nvrm_QueuePresent2);
 #undef NVRM_SET
 }

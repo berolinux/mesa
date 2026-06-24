@@ -1878,12 +1878,55 @@ nvrm_cmd_emit_bound_descriptors(struct nvrm_cmd_buffer *cmd,
          }
       }
       for (u = 0; u < set->ssbo_count && u < 16; u++) {
-         /* SSBO addresses are consumed by shaders via global loads; record only */
-         (void)set->ssbo[u];
+         /*
+          * SSBO / storage buffers: shaders issue LDG/STG with addresses from
+          * a small constant table we upload into ssbo_table_bo (driver SSBO
+          * table).  Each entry: lo/hi address (2 dwords) + size + flags.
+          * Also bind each buffer as CB group 7 slot (8+u) so shaders can
+          * fall back to LDC/LDG via the buffer base when compiler emits that.
+          */
+         uint64_t saddr = 0;
+         uint32_t ssz = (uint32_t)set->ssbo[u].range;
+         uint64_t dyn_off = 0;
+         if (dyn_idx < cmd->dynamic_offset_count)
+            dyn_off = cmd->dynamic_offsets[dyn_idx++];
+         if (set->ssbo[u].bo)
+            saddr = nv_rm_bo_gpu_offset(set->ssbo[u].bo) +
+                    set->ssbo[u].offset + dyn_off;
+         if (!ssz && set->ssbo[u].bo)
+            ssz = (uint32_t)nv_rm_bo_size(set->ssbo[u].bo);
+         if (cmd->ssbo_table_map && u < 16) {
+            uint32_t *slot = (uint32_t *)cmd->ssbo_table_map + u * 4;
+            slot[0] = (uint32_t)(saddr & 0xffffffffu);
+            slot[1] = (uint32_t)(saddr >> 32);
+            slot[2] = ssz;
+            slot[3] = set->ssbo[u].is_dynamic ? 1u : 0u;
+         }
+         if (saddr) {
+            nv_3d_set_constant_buffer_selector(&cmd->push,
+                                               (ssz + 255u) & ~255u, saddr);
+            nv_3d_bind_group_constant_buffer(&cmd->push, 7, 8 + u, true);
+         }
       }
       if (set->img_count > 0 && cmd->device && cmd->device->tex_pool)
          nv_tex_pool_emit_bind(&cmd->push, cmd->device->tex_pool);
    }
+   /* Bind full SSBO table as CB group 7 slot 15 for shader LDC indirection */
+   if (cmd->ssbo_table_bo) {
+      uint64_t tbl = nv_rm_bo_gpu_offset(cmd->ssbo_table_bo);
+      if (tbl) {
+         nv_3d_set_constant_buffer_selector(&cmd->push,
+                                            cmd->ssbo_table_bo_size
+                                               ? cmd->ssbo_table_bo_size
+                                               : 256u,
+                                            tbl);
+         nv_3d_bind_group_constant_buffer(&cmd->push, 7, 15, true);
+      }
+   }
+   /* After descriptor changes, invalidate texture/shader caches */
+   if (cmd->device && cmd->device->tex_pool)
+      nv_3d_invalidate_texture_caches(&cmd->push, true, true, true);
+   nv_3d_invalidate_shader_caches(&cmd->push, true, true, true);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2891,36 +2934,80 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
 }
 
 /* Queue submit: kick channel with cmd buffer push contents */
+static void
+nvrm_queue_ensure_submit_fence(struct nvrm_queue *queue)
+{
+   if (!queue || !queue->device || !queue->device->rm)
+      return;
+   if (!queue->submit_fence)
+      queue->submit_fence = nv_fence_create(queue->device->rm);
+}
+
+static VkResult
+nvrm_queue_submit_one_cmd(struct nvrm_queue *queue,
+                          struct nvrm_cmd_buffer *cmd)
+{
+   struct nv_channel *ch;
+   uint32_t need_extra = 24; /* sema wait/signal room */
+   uint32_t total_dw;
+   uint32_t *dst;
+   struct nv_push tail;
+   uint32_t seg_base;
+
+   if (!queue || !cmd || !cmd->push_map || !cmd->push_dw_used)
+      return VK_SUCCESS;
+   ch = queue->channel;
+   if (!ch || !ch->push_cpu)
+      return VK_ERROR_DEVICE_LOST;
+
+   nvrm_queue_ensure_submit_fence(queue);
+
+   total_dw = cmd->push_dw_used + need_extra;
+   dst = nv_channel_push_begin(ch, total_dw);
+   if (!dst)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   seg_base = ch->push_dw_base;
+   memcpy(dst, cmd->push_map, cmd->push_dw_used * 4);
+   ch->push_dw_used = seg_base + cmd->push_dw_used;
+
+   /* Append 3D sema release so CPU / later submits can wait on completion */
+   if (queue->submit_fence && queue->submit_fence->sema_gpu_addr) {
+      nv_push_init_at(&tail, ch->push_cpu,
+                      ch->push_cpu + ch->push_dw_used,
+                      ch->push_dw_size);
+      nv_push_set_subch(&tail, NV_PUSH_SUBCH_3D);
+      queue->submit_seq =
+         nv_fence_signal_next_3d(queue->submit_fence, &tail);
+      ch->push_dw_used = seg_base + (uint32_t)(tail.cur - tail.start);
+   }
+
+   if (nv_channel_kickoff(ch) != 0)
+      return VK_ERROR_DEVICE_LOST;
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_QueueSubmit2(VkQueue _queue, uint32_t submitCount,
                   const VkSubmitInfo2 *pSubmits, VkFence fence)
 {
    VK_FROM_HANDLE(nvrm_queue, queue, _queue);
    uint32_t s, c;
+   VkResult r = VK_SUCCESS;
    (void)fence;
 
    if (!queue->channel_ready || !queue->channel)
       return VK_SUCCESS; /* record-only without channel */
 
-   for (s = 0; s < submitCount; s++) {
+   for (s = 0; s < submitCount && r == VK_SUCCESS; s++) {
       const VkSubmitInfo2 *sub = &pSubmits[s];
-      for (c = 0; c < sub->commandBufferInfoCount; c++) {
+      for (c = 0; c < sub->commandBufferInfoCount && r == VK_SUCCESS; c++) {
          VK_FROM_HANDLE(nvrm_cmd_buffer, cmd,
                         sub->pCommandBufferInfos[c].commandBuffer);
-         if (!cmd || !cmd->push_map || !cmd->push_dw_used)
-            continue;
-         /* Copy cmd push into channel pushbuffer and kick — simplified:
-          * re-init channel push from cmd buffer content if sizes allow */
-         uint32_t *dst = nv_channel_push_begin(queue->channel, cmd->push_dw_used);
-         if (dst) {
-            memcpy(dst, cmd->push_map, cmd->push_dw_used * 4);
-            queue->channel->push_dw_used =
-               queue->channel->push_dw_base + cmd->push_dw_used;
-            nv_channel_kickoff(queue->channel);
-         }
+         r = nvrm_queue_submit_one_cmd(queue, cmd);
       }
    }
-   return VK_SUCCESS;
+   return r;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -2946,6 +3033,34 @@ nvrm_QueueSubmit(VkQueue queue, uint32_t submitCount,
       cbs[i].commandBuffer = pSubmits[0].pCommandBuffers[i];
    }
    return nvrm_QueueSubmit2(queue, 1, &s2, fence);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_QueueWaitIdle(VkQueue _queue)
+{
+   VK_FROM_HANDLE(nvrm_queue, queue, _queue);
+   if (!queue)
+      return VK_SUCCESS;
+   if (queue->submit_fence && queue->submit_seq) {
+      if (nv_fence_wait(queue->submit_fence, queue->submit_seq,
+                        5000000000ull) != 0)
+         return VK_TIMEOUT;
+      return VK_SUCCESS;
+   }
+   if (queue->channel) {
+      if (nv_channel_wait_idle(queue->channel, 5000000000ull) != 0)
+         return VK_TIMEOUT;
+   }
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_DeviceWaitIdle(VkDevice _device)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   if (!device || !device->queue)
+      return VK_SUCCESS;
+   return nvrm_QueueWaitIdle(nvrm_queue_to_handle(device->queue));
 }
 
 /* ---- Dynamic depth/stencil/raster state (core 1.3 / EXT_extended_dynamic_state) ---- */
