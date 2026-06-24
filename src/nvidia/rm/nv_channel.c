@@ -459,6 +459,10 @@ nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
    if (!h_sub)
       return -ENODEV;
 
+   /* Default to RC notifier if caller passes 0 */
+   if (!notify_index)
+      notify_index = NV2080_NOTIFIERS_RC;
+
    r = nv_rm_alloc_event_os(ch->rm, h_sub, ch->h_channel, os_event_fd,
                             notify_index, &h_ev);
    if (r != 0)
@@ -1045,6 +1049,10 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          goto fail;
       }
    }
+
+   /* tick95: bind error CTXDMA to channel after alloc (NVOS49; non-fatal) */
+   if (ch->h_error_ctxdma)
+      (void)nv_channel_bind_error_ctxdma(ch);
 
    /* Schedule: A06C BIND+SCHEDULE and/or A06F BIND+SCHEDULE (tick79 / pass5). */
    ch->schedule_rc = -EAGAIN;

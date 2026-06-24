@@ -118,6 +118,16 @@ int nv_rm_event_set_notification(struct nv_rm_device *dev, uint32_t h_subdevice,
                                  bool notify_state, uint32_t info32,
                                  uint16_t info16);
 
+/** tick95: GPU PTIMER nanoseconds (subdevice TIMER_GET_TIME). */
+int nv_rm_timer_get_time(struct nv_rm_device *dev, uint64_t *time_nsec_out);
+
+/** Export/import RM object via Unix FD (cross-process/share). */
+int nv_rm_export_object_to_fd(struct nv_rm_device *dev, uint32_t h_parent,
+                              uint32_t h_object, int *fd_inout,
+                              uint32_t flags);
+int nv_rm_import_object_from_fd(struct nv_rm_device *dev, uint32_t h_parent,
+                                int import_fd, uint32_t *h_object_out);
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 

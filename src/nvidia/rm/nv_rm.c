@@ -549,6 +549,49 @@ nv_rm_event_set_notification(struct nv_rm_device *dev, uint32_t h_subdevice,
 #endif
 }
 
+int
+nv_rm_timer_get_time(struct nv_rm_device *dev, uint64_t *time_nsec_out)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   return nvidia_rm_timer_get_time(dev->nvdev, time_nsec_out);
+#else
+   (void)dev; (void)time_nsec_out;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_export_object_to_fd(struct nv_rm_device *dev, uint32_t h_parent,
+                          uint32_t h_object, int *fd_inout, uint32_t flags)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev || !h_object || !fd_inout)
+      return -EINVAL;
+   return nvidia_rm_export_object_to_fd(dev->nvdev, h_parent, h_object,
+                                        fd_inout, flags);
+#else
+   (void)dev; (void)h_parent; (void)h_object; (void)fd_inout; (void)flags;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_import_object_from_fd(struct nv_rm_device *dev, uint32_t h_parent,
+                            int import_fd, uint32_t *h_object_out)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   if (!dev || !dev->nvdev || !h_object_out)
+      return -EINVAL;
+   return nvidia_rm_import_object_from_fd(dev->nvdev, h_parent, import_fd,
+                                          h_object_out);
+#else
+   (void)dev; (void)h_parent; (void)import_fd; (void)h_object_out;
+   return -ENOSYS;
+#endif
+}
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
 {
