@@ -796,6 +796,15 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
    if (view->format == VK_FORMAT_R8G8B8A8_SRGB ||
        view->format == VK_FORMAT_B8G8R8A8_SRGB)
       desc.s_r_g_b_conversion = true;
+   /* Blocklinear images use TEXHEAD_BL (512B-aligned address, gobs layout) */
+   if (img->is_blocklinear && !img->is_linear) {
+      desc.blocklinear = true;
+      desc.gobs_width = img->gobs_width;
+      desc.gobs_height = img->gobs_height ? img->gobs_height : NV_TEX_GOBS_SIXTEEN;
+      desc.gobs_depth = img->gobs_depth;
+      /* Align sample address to 512B for BL header ADDRESS_BITS31TO9 */
+      desc.gpu_addr &= ~0x1ffull;
+   }
    if (samp) {
       desc.addr_u = samp->addr_u;
       desc.addr_v = samp->addr_v;
@@ -814,7 +823,7 @@ nvrm_write_combined_image_sampler(struct nvrm_device *dev,
       desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
       desc.mip_filt = NV_TEX_SAMP_FILT_NEAREST;
    }
-   nv_tex_encode_pitch_2d(&desc, out_entry);
+   nv_tex_encode_2d(&desc, out_entry);
    return 0;
 }
 

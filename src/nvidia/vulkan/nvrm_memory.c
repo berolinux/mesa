@@ -4,6 +4,25 @@
  */
 
 #include "nvrm_private.h"
+#include "nv_tex.h"
+
+/* Estimate blocklinear level-0 size: align dimensions to gob/block tiles.
+ * One gob is typically 64x8 bytes (512B) for uncompressed color; block height
+ * in gobs is commonly 16 (gobs_height=4 => 2^4) for 2D surfaces. */
+static uint32_t
+nvrm_bl_level0_size(uint32_t width, uint32_t height, uint32_t bpp,
+                    uint8_t gobs_h)
+{
+   uint32_t gob_w_px = bpp ? (64u / bpp) : 16u; /* 64B-wide gob / bpp */
+   uint32_t gob_h_px = 8;
+   uint32_t block_h_gobs = 1u << (gobs_h ? gobs_h : 4); /* default 16 gobs high */
+   uint32_t block_h_px = gob_h_px * block_h_gobs;
+   uint32_t aw = (width + gob_w_px - 1) / gob_w_px * gob_w_px;
+   uint32_t ah = (height + block_h_px - 1) / block_h_px * block_h_px;
+   if (!aw) aw = gob_w_px;
+   if (!ah) ah = block_h_px;
+   return aw * ah * (bpp ? bpp : 4);
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_AllocateMemory(VkDevice _device,
@@ -147,28 +166,51 @@ nvrm_CreateImage(VkDevice _device,
    w = pCreateInfo->extent.width ? pCreateInfo->extent.width : 1;
    h = pCreateInfo->extent.height ? pCreateInfo->extent.height : 1;
    bpp = nvrm_format_bpp(pCreateInfo->format);
+   if (!bpp)
+      bpp = 4;
    pitch = (w * bpp + 31u) & ~31u;
-   size = pitch * h;
-   if (pCreateInfo->extent.depth > 1)
-      size *= pCreateInfo->extent.depth;
-   if (pCreateInfo->arrayLayers > 1)
-      size *= pCreateInfo->arrayLayers;
-   if (pCreateInfo->mipLevels > 1)
-      size += size / 2; /* coarse mip tail estimate */
 
    img->bo = NULL;
    img->gpu_offset = 0;
    img->row_pitch = pitch;
-   img->level0_size = pitch * h;
-   img->is_linear = !(pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
-                      (pCreateInfo->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)));
-   /* OPTIMAL attachments often blocklinear on NVIDIA; sample-only may be linear */
-   if (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR)
-      img->is_linear = true;
+   img->bpp = bpp;
+   img->gobs_width = NV_TEX_GOBS_ONE;
+   img->gobs_height = NV_TEX_GOBS_SIXTEEN;
+   img->gobs_depth = NV_TEX_GOBS_ONE;
+   img->is_blocklinear = false;
+   img->is_linear = true;
+
+   /* OPTIMAL 2D color/depth attachments and sampled textures use blocklinear
+    * on NVIDIA hardware; LINEAR tiling and 1D/buffer images stay pitch. */
+   if (pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
+       pCreateInfo->imageType != VK_IMAGE_TYPE_1D &&
+       !(pCreateInfo->flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT)) {
+      img->is_blocklinear = true;
+      img->is_linear = false;
+      img->level0_size = nvrm_bl_level0_size(w, h, bpp, img->gobs_height);
+      /* Store logical pitch for copies/host access estimates */
+      img->row_pitch = pitch;
+   } else {
+      img->level0_size = pitch * h;
+      if (pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR)
+         img->is_linear = true;
+   }
+
+   size = img->level0_size;
+   if (pCreateInfo->extent.depth > 1)
+      size *= pCreateInfo->extent.depth;
+   if (pCreateInfo->arrayLayers > 1)
+      size *= pCreateInfo->arrayLayers;
+   if (pCreateInfo->mipLevels > 1) {
+      /* Geometric series estimate for mip chain (~1.33x level0 for 2D) */
+      size += size / 2;
+   }
+   /* Align total to 512B for blocklinear base address requirement */
+   if (img->is_blocklinear)
+      size = (size + 511u) & ~511u;
+   img->total_size = size;
 
    *pImage = nvrm_image_to_handle(img);
-   (void)size;
    return VK_SUCCESS;
 }
 

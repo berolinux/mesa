@@ -88,7 +88,13 @@ struct nvrm_image {
    uint64_t gpu_offset;
    uint32_t row_pitch;       /* bytes; from format Bpp * width, 32B aligned */
    uint32_t level0_size;     /* approximate level-0 plane size */
+   uint32_t total_size;      /* allocation estimate including mips/layers */
+   uint32_t bpp;             /* bytes per pixel (level 0) */
+   uint8_t  gobs_width;      /* NV_TEX_GOBS_* for blocklinear (log2 gobs) */
+   uint8_t  gobs_height;
+   uint8_t  gobs_depth;
    bool     is_linear;       /* prefer pitch/linear headers when true */
+   bool     is_blocklinear;  /* OPTIMAL tiled layout (TEXHEAD_BL / NVC6B5 BL) */
 };
 
 struct nvrm_graphics_pipeline; /* defined in nvrm_pipeline.c */
@@ -194,6 +200,12 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer
                                                    const VkImageSubresourceRange *pRanges);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyBuffer2(VkCommandBuffer commandBuffer,
                                                const VkCopyBufferInfo2 *pCopyBufferInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyImage2(VkCommandBuffer commandBuffer,
+                                              const VkCopyImageInfo2 *pCopyImageInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+                                                      const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+                                                      const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateGraphicsPipelines(VkDevice device,
                                                             VkPipelineCache pipelineCache,
                                                             uint32_t createInfoCount,
