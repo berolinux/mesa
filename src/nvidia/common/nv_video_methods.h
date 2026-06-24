@@ -536,12 +536,25 @@ struct nv_nvdec_av1_pic_setup {
    uint32_t curr_pic_idx;
    uint32_t primary_ref_frame;
    uint32_t order_hint;
+   uint32_t profile;
+   uint32_t order_hint_bits_minus_1;
+   uint32_t enable_order_hint;
+   uint32_t enable_jnt_comp;
+   uint32_t ref_frame_mvs;
+   uint32_t film_grain_params_present;
+   uint32_t apply_grain;
+   uint32_t base_qindex;
+   uint32_t tile_cols;
+   uint32_t tile_rows;
+   uint8_t ref_frame_idx[8];
    uint32_t dpb_luma_pitch;
    uint32_t dpb_chroma_pitch;
    uint64_t dpb_luma[8];
    uint64_t dpb_chroma[8];
+   uint64_t output_luma_gpu_addr;
+   uint64_t output_chroma_gpu_addr;
    uint64_t film_grain_params_addr; /* optional sideband BO */
-   uint32_t reserved[24];
+   uint32_t reserved[16];
 };
 
 /* Serialise H.264 setup into a dword array (host endian) for CPU map/upload */
@@ -734,7 +747,96 @@ nv_nvdec_hevc_apply_sps_pps(struct nv_nvdec_hevc_pic_setup *ps,
    ps->sign_data_hiding_enabled_flag = sign_data_hiding_enabled_flag;
 }
 
-/** Set HEVC DPB reference slot luma/chroma VA. */
+/**
+ * Apply AV1 sequence/frame subset into pic_setup (VAAPI/pipe_av1_picture_desc
+ * fields).  NVDEC proprietary layout is serialised via av1_pic_setup_pack;
+ * dword indices mirror NV_AV1_PS_* offsets in the minimal init path.
+ */
+static inline void
+nv_nvdec_av1_apply_seq_frame(struct nv_nvdec_av1_pic_setup *ps,
+                             uint32_t width, uint32_t height,
+                             uint32_t profile, uint32_t bit_depth_idx,
+                             uint32_t use_128x128_superblock,
+                             uint32_t enable_cdef, uint32_t mono_chrome,
+                             uint32_t subsampling_x, uint32_t subsampling_y,
+                             uint32_t enable_order_hint,
+                             uint32_t order_hint_bits_minus_1,
+                             uint32_t enable_jnt_comp, uint32_t ref_frame_mvs,
+                             uint32_t film_grain_params_present,
+                             uint32_t frame_type, uint32_t show_frame,
+                             uint32_t error_resilient_mode,
+                             uint32_t disable_cdf_update,
+                             uint32_t allow_screen_content_tools,
+                             uint32_t force_integer_mv,
+                             uint32_t use_superres, uint32_t superres_denom,
+                             uint32_t allow_high_precision_mv,
+                             uint32_t allow_warped_motion,
+                             uint32_t primary_ref_frame, uint32_t order_hint,
+                             uint32_t base_qindex,
+                             uint32_t tile_cols, uint32_t tile_rows,
+                             uint32_t apply_grain)
+{
+   if (!ps)
+      return;
+   if (!ps->width && !ps->height)
+      memset(ps, 0, sizeof(*ps));
+   ps->width = width ? width : ps->width;
+   ps->height = height ? height : ps->height;
+   ps->profile = profile;
+   /* bit_depth_idx 0=8, 1=10, 2=12 → minus8 */
+   ps->bit_depth_minus8 = bit_depth_idx ? (bit_depth_idx == 1 ? 2 : 4) : 0;
+   ps->use_128x128_superblock = use_128x128_superblock ? 1 : 0;
+   ps->enable_cdef = enable_cdef ? 1 : 0;
+   ps->mono_chrome = mono_chrome ? 1 : 0;
+   ps->subsampling_x = subsampling_x ? 1 : 0;
+   ps->subsampling_y = subsampling_y ? 1 : 0;
+   ps->enable_order_hint = enable_order_hint ? 1 : 0;
+   ps->order_hint_bits_minus_1 = order_hint_bits_minus_1 & 7u;
+   ps->enable_jnt_comp = enable_jnt_comp ? 1 : 0;
+   ps->ref_frame_mvs = ref_frame_mvs ? 1 : 0;
+   ps->film_grain_params_present = film_grain_params_present ? 1 : 0;
+   ps->frame_type = frame_type & 3u;
+   ps->intra_only = (frame_type == 2 /* INTRA_ONLY */) ? 1 : 0;
+   ps->show_frame = show_frame ? 1 : 0;
+   ps->error_resilient_mode = error_resilient_mode ? 1 : 0;
+   ps->disable_cdf_update = disable_cdf_update ? 1 : 0;
+   ps->allow_screen_content_tools = allow_screen_content_tools ? 1 : 0;
+   ps->force_integer_mv = force_integer_mv ? 1 : 0;
+   ps->use_superres = use_superres ? 1 : 0;
+   ps->enable_superres = use_superres ? 1 : 0;
+   ps->superres_denom = superres_denom ? superres_denom : 8;
+   ps->allow_high_precision_mv = allow_high_precision_mv ? 1 : 0;
+   ps->allow_warped_motion = allow_warped_motion ? 1 : 0;
+   ps->primary_ref_frame = primary_ref_frame & 7u;
+   ps->order_hint = order_hint;
+   ps->base_qindex = base_qindex & 0xffu;
+   ps->tile_cols = tile_cols;
+   ps->tile_rows = tile_rows;
+   ps->apply_grain = apply_grain ? 1 : 0;
+}
+
+static inline void
+nv_nvdec_av1_set_dpb_ref(struct nv_nvdec_av1_pic_setup *ps, unsigned slot,
+                         uint64_t luma_va, uint64_t chroma_va)
+{
+   if (!ps || slot >= 8)
+      return;
+   ps->dpb_luma[slot] = luma_va;
+   ps->dpb_chroma[slot] = chroma_va;
+}
+
+static inline void
+nv_nvdec_av1_set_ref_frame_idx(struct nv_nvdec_av1_pic_setup *ps,
+                               const uint8_t ref_frame_idx[7])
+{
+   unsigned i;
+   if (!ps)
+      return;
+   for (i = 0; i < 7; i++)
+      ps->ref_frame_idx[i] = ref_frame_idx ? ref_frame_idx[i] : 0;
+   ps->ref_frame_idx[7] = 0;
+}
+
 static inline void
 nv_nvdec_hevc_set_dpb_ref(struct nv_nvdec_hevc_pic_setup *ps, unsigned slot,
                           uint64_t luma_va, uint64_t chroma_va)
@@ -1437,8 +1539,10 @@ struct nv_nvdec_session {
    uint32_t output_chroma_pitch;
    struct nv_nvdec_h264_pic_setup h264_ps;
    struct nv_nvdec_hevc_pic_setup hevc_ps;
+   struct nv_nvdec_av1_pic_setup av1_ps;
    bool h264_ps_valid;
    bool hevc_ps_valid;
+   bool av1_ps_valid;
    bool object_set;            /* SET_OBJECT emitted on channel */
 };
 
@@ -1519,6 +1623,21 @@ nv_nvdec_session_set_hevc_dpb(struct nv_nvdec_session *s, unsigned slot,
    s->hevc_ps_valid = true;
 }
 
+/** Program AV1 reference frame slot (8-frame DPB). */
+static inline void
+nv_nvdec_session_set_av1_dpb(struct nv_nvdec_session *s, unsigned slot,
+                             uint64_t luma_va, uint64_t chroma_va)
+{
+   if (!s || slot >= 8)
+      return;
+   nv_nvdec_av1_set_dpb_ref(&s->av1_ps, slot, luma_va, chroma_va);
+   s->av1_ps.dpb_luma_pitch = s->output_luma_pitch;
+   s->av1_ps.dpb_chroma_pitch = s->output_chroma_pitch;
+   s->av1_ps.output_luma_gpu_addr = s->output_luma_gpu_addr;
+   s->av1_ps.output_chroma_gpu_addr = s->output_chroma_gpu_addr;
+   s->av1_ps_valid = true;
+}
+
 /**
  * Pack session pic_setup structs into the host-mapped pic_setup BO (if any).
  * Call after SPS/PPS load and DPB updates, before emit_frame.
@@ -1527,17 +1646,49 @@ static inline void
 nv_nvdec_session_pack_pic_setup(struct nv_nvdec_session *s)
 {
    uint32_t dwords;
+   uint32_t *pic;
    if (!s || !s->pic_setup_cpu_map || !s->pic_setup_map_bytes)
       return;
    dwords = s->pic_setup_map_bytes / 4;
-   if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
+   pic = (uint32_t *)s->pic_setup_cpu_map;
+   if (s->app_id == NV_NVDEC_APP_ID_AV1 && s->av1_ps_valid) {
+      s->av1_ps.curr_pic_idx = s->next_picture_index;
+      s->av1_ps.output_luma_gpu_addr = s->output_luma_gpu_addr;
+      s->av1_ps.output_chroma_gpu_addr = s->output_chroma_gpu_addr;
+      nv_nvdec_av1_pic_setup_pack(&s->av1_ps, pic, dwords);
+      /* Overlay NV_AV1_PS_* dword slots expected by minimal init / firmware */
+      if (dwords > NV_AV1_PS_FRAME_WH)
+         pic[NV_AV1_PS_FRAME_WH] =
+            ((s->av1_ps.height & 0xffffu) << 16) | (s->av1_ps.width & 0xffffu);
+      if (dwords > NV_AV1_PS_PROF_TIER_LEVEL)
+         pic[NV_AV1_PS_PROF_TIER_LEVEL] =
+            (s->av1_ps.profile & 7u) |
+            ((s->av1_ps.bit_depth_minus8 & 0xfu) << 8);
+      if (dwords > NV_AV1_PS_FRAME_TYPE_FLAGS)
+         pic[NV_AV1_PS_FRAME_TYPE_FLAGS] =
+            (s->av1_ps.frame_type & 3u) |
+            (s->av1_ps.show_frame ? (1u << 2) : 0) |
+            (s->av1_ps.error_resilient_mode ? (1u << 3) : 0) |
+            (s->av1_ps.use_128x128_superblock ? (1u << 8) : 0) |
+            (s->av1_ps.mono_chrome ? (1u << 9) : 0) |
+            (s->av1_ps.enable_cdef ? (1u << 10) : 0) |
+            (s->av1_ps.apply_grain ? (1u << 11) : 0);
+      if (dwords > NV_AV1_PS_ORDER_HINT)
+         pic[NV_AV1_PS_ORDER_HINT] = s->av1_ps.order_hint;
+      if (dwords > NV_AV1_PS_PRIMARY_REF)
+         pic[NV_AV1_PS_PRIMARY_REF] = s->av1_ps.primary_ref_frame & 7u;
+      if (s->output_luma_gpu_addr && dwords > NV_AV1_PS_OUTPUT_LUMA_OFF)
+         pic[NV_AV1_PS_OUTPUT_LUMA_OFF] =
+            (uint32_t)(s->output_luma_gpu_addr >> 8);
+      if (s->output_chroma_gpu_addr && dwords > NV_AV1_PS_OUTPUT_CHROMA_OFF)
+         pic[NV_AV1_PS_OUTPUT_CHROMA_OFF] =
+            (uint32_t)(s->output_chroma_gpu_addr >> 8);
+   } else if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
       s->hevc_ps.curr_pic_idx = s->next_picture_index;
-      nv_nvdec_hevc_pic_setup_pack(&s->hevc_ps,
-                                   (uint32_t *)s->pic_setup_cpu_map, dwords);
+      nv_nvdec_hevc_pic_setup_pack(&s->hevc_ps, pic, dwords);
    } else if (s->h264_ps_valid) {
       s->h264_ps.curr_pic_idx = s->next_picture_index;
-      nv_nvdec_h264_pic_setup_pack(&s->h264_ps,
-                                   (uint32_t *)s->pic_setup_cpu_map, dwords);
+      nv_nvdec_h264_pic_setup_pack(&s->h264_ps, pic, dwords);
    }
 }
 
