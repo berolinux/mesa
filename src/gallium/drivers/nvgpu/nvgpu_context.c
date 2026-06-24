@@ -1333,6 +1333,20 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    cta_y = info->block[1] ? info->block[1] : 1;
    cta_z = info->block[2] ? info->block[2] : 1;
 
+   /* Indirect compute: host-read indirect resource if mapped (path A) */
+   if (info->indirect) {
+      struct nvgpu_resource *ib = nvgpu_resource(info->indirect);
+      const uint32_t *ind = NULL;
+      if (ib && ib->cpu_ptr)
+         ind = (const uint32_t *)((const uint8_t *)ib->cpu_ptr +
+                                 info->indirect_offset);
+      if (ind) {
+         gx = ind[0] ? ind[0] : 1;
+         gy = ind[1] ? ind[1] : 1;
+         gz = ind[2] ? ind[2] : 1;
+      }
+   }
+
    if (di && di->sm_version)
       sass_ver = (uint8_t)(di->sm_version & 0xff);
 
@@ -1345,6 +1359,9 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    desc.cta_y = cta_y;
    desc.cta_z = cta_z;
    desc.register_count = regs;
+   desc.shared_mem_size = nv_qmd_align_shared_mem(
+      cs && cs->nvsh ? 0 : 0); /* shared from NIR when tracked */
+   desc.barrier_count = nv_qmd_default_barrier_count(cta_x, cta_y, cta_z);
    desc.sass_version = sass_ver;
    desc.sm_global_caching = true;
    desc.invalidate_caches = true;
