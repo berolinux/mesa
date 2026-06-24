@@ -97,6 +97,17 @@ struct nvgpu_context {
    struct pipe_stencil_ref stencil_ref;
    float blend_color[4];
    unsigned sample_mask;
+
+   /* Compute / image / SSBO bindings (Gallium set_shader_buffers/images) */
+   struct pipe_shader_buffer ssbo[PIPE_MAX_SHADER_BUFFERS];
+   unsigned num_ssbo;
+   struct pipe_image_view images[PIPE_MAX_SHADER_IMAGES];
+   unsigned num_images;
+
+   /* Conditional render: GPU addr of query/occlusion result word */
+   uint64_t cond_render_gpu_addr;
+   bool cond_render_active;
+   bool cond_render_inverted;
 };
 
 static inline struct nvgpu_context *

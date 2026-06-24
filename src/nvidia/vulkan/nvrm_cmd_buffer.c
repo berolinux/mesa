@@ -206,11 +206,135 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                          const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)pDependencyInfo;
-   /* Host WFI + texture/shader/copy invalidates.  Memory dependency scopes
-    * are not yet split by stage; full invalidates match the conservative
-    * path used by the proprietary driver after transfers. */
-   nvrm_cmd_emit_full_invalidate(cmd);
+   VkPipelineStageFlags2 src = 0, dst = 0;
+   VkAccessFlags2 src_access = 0, dst_access = 0;
+   uint32_t i;
+   bool need_shader = false, need_tex = false, need_wfi = true;
+   bool shader_instr = false, shader_data = false, shader_const = false;
+   bool tex_s = false, tex_h = false, tex_d = false;
+
+   if (!cmd || !cmd->push_map)
+      return;
+
+   if (pDependencyInfo) {
+      for (i = 0; i < pDependencyInfo->memoryBarrierCount; i++) {
+         const VkMemoryBarrier2 *b = &pDependencyInfo->pMemoryBarriers[i];
+         src |= b->srcStageMask;
+         dst |= b->dstStageMask;
+         src_access |= b->srcAccessMask;
+         dst_access |= b->dstAccessMask;
+      }
+      for (i = 0; i < pDependencyInfo->bufferMemoryBarrierCount; i++) {
+         const VkBufferMemoryBarrier2 *b =
+            &pDependencyInfo->pBufferMemoryBarriers[i];
+         src |= b->srcStageMask;
+         dst |= b->dstStageMask;
+         src_access |= b->srcAccessMask;
+         dst_access |= b->dstAccessMask;
+      }
+      for (i = 0; i < pDependencyInfo->imageMemoryBarrierCount; i++) {
+         const VkImageMemoryBarrier2 *b =
+            &pDependencyInfo->pImageMemoryBarriers[i];
+         src |= b->srcStageMask;
+         dst |= b->dstStageMask;
+         src_access |= b->srcAccessMask;
+         dst_access |= b->dstAccessMask;
+         /* Image layout transitions always need texture header/data inv. */
+         if (b->oldLayout != b->newLayout)
+            need_tex = true;
+      }
+   }
+
+   /* Empty barrier: still WFI for ordering (queue submit may batch). */
+   if (!pDependencyInfo ||
+       (pDependencyInfo->memoryBarrierCount == 0 &&
+        pDependencyInfo->bufferMemoryBarrierCount == 0 &&
+        pDependencyInfo->imageMemoryBarrierCount == 0)) {
+      nvrm_cmd_emit_full_invalidate(cmd);
+      return;
+   }
+
+   /* Writes from shader / transfer / color / depth / compute */
+   if (src_access & (VK_ACCESS_2_SHADER_WRITE_BIT |
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                     VK_ACCESS_2_TRANSFORM_FEEDBACK_WRITE_BIT_EXT |
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR)) {
+      need_wfi = true;
+      need_shader = true;
+      shader_data = true;
+      shader_const = true;
+   }
+   if (src_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                     VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
+                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)) {
+      need_tex = true;
+      tex_s = tex_h = tex_d = true;
+   }
+   if (dst_access & (VK_ACCESS_2_SHADER_READ_BIT |
+                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                     VK_ACCESS_2_UNIFORM_READ_BIT |
+                     VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
+                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                     VK_ACCESS_2_TRANSFER_READ_BIT |
+                     VK_ACCESS_2_SHADER_STORAGE_READ_BIT)) {
+      need_wfi = true;
+      if (dst_access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                        VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT)) {
+         need_tex = true;
+         tex_s = tex_h = tex_d = true;
+      }
+      if (dst_access & (VK_ACCESS_2_UNIFORM_READ_BIT |
+                        VK_ACCESS_2_SHADER_READ_BIT |
+                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                        VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT)) {
+         need_shader = true;
+         shader_data = true;
+         shader_const = true;
+      }
+   }
+   /* Shader code / pipeline bind after upload */
+   if ((src | dst) & (VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)) {
+      if (src_access & VK_ACCESS_2_SHADER_WRITE_BIT) {
+         need_shader = true;
+         shader_instr = true;
+         shader_data = true;
+      }
+   }
+   /* Host access or execution dependency only */
+   if ((src | dst) & VK_PIPELINE_STAGE_2_HOST_BIT)
+      need_wfi = true;
+   if ((src | dst) & (VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+                      VK_PIPELINE_STAGE_2_COPY_BIT |
+                      VK_PIPELINE_STAGE_2_BLIT_BIT |
+                      VK_PIPELINE_STAGE_2_CLEAR_BIT |
+                      VK_PIPELINE_STAGE_2_RESOLVE_BIT)) {
+      need_wfi = true;
+      need_tex = true;
+      tex_h = tex_d = true;
+   }
+
+   if (need_wfi)
+      nv_push_wfi(&cmd->push);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   if (need_shader || need_tex)
+      nv_3d_emit_memory_barrier(&cmd->push,
+                                shader_instr, shader_data, shader_const,
+                                tex_s, tex_h, tex_d);
+   else
+      /* Execution-only: still invalidate lightly for safety on first bring-up */
+      nv_3d_emit_memory_barrier(&cmd->push, false, true, true, false, false, false);
 }
 
 /* ---- VkEvent / VkQueryPool object management + cmd recording ---- */

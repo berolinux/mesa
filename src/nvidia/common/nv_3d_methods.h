@@ -1138,6 +1138,64 @@ nv_3d_set_zpass_pixel_count(struct nv_push *p, bool enable)
                          : NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_FALSE);
 }
 
+/* ---- Cache / pipeline barriers (3D subchannel; mirrors host WFI + inv) ---- */
+
+/** Invalidate shader I/D/C caches (post-shader-upload or SSBO/image writes). */
+static inline void
+nv_3d_invalidate_shader_caches(struct nv_push *p, bool instr, bool data, bool constant)
+{
+   uint32_t v = 0;
+   if (instr)
+      v |= NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE;
+   if (data)
+      v |= NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE;
+   if (constant)
+      v |= NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+   if (v)
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, v);
+}
+
+/** Invalidate texture sampler/header/data caches (post-image write or layout transition). */
+static inline void
+nv_3d_invalidate_texture_caches(struct nv_push *p, bool sampler, bool header, bool data)
+{
+   if (sampler)
+      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
+   if (header)
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+   if (data)
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+}
+
+/**
+ * Full conservative barrier: WFI (via caller or nv_push_wfi) then all invs.
+ * Stage bits are coarse; proprietary driver often does similar full inv after
+ * transfer/compute before sampling.
+ */
+static inline void
+nv_3d_emit_memory_barrier(struct nv_push *p,
+                          bool shader_instr, bool shader_data, bool shader_const,
+                          bool tex_sampler, bool tex_header, bool tex_data)
+{
+   nv_3d_invalidate_shader_caches(p, shader_instr, shader_data, shader_const);
+   nv_3d_invalidate_texture_caches(p, tex_sampler, tex_header, tex_data);
+}
+
+/** Texture barrier only (GL textureBarrier / VK fragment-feedback loop). */
+static inline void
+nv_3d_emit_texture_barrier(struct nv_push *p)
+{
+   nv_3d_invalidate_texture_caches(p, true, true, true);
+}
+
+/** Disable conditional rendering (always render). */
+static inline void
+nv_3d_clear_conditional_render(struct nv_push *p)
+{
+   nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE,
+                  NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+}
+
 /** Write occlusion (ZPASS) or timestamp-style report to sema addr (4 or 16 bytes). */
 static inline void
 nv_3d_report_query_release(struct nv_push *p, uint64_t sema_gpu_addr,

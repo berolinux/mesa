@@ -477,6 +477,100 @@ nvrm_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
    nvrm_get_physical_device_properties2(&pdev->vk, pProperties);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_GetPhysicalDeviceImageFormatProperties2(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
+   VkImageFormatProperties2 *pImageFormatProperties)
+{
+   VkFormat format;
+   VkImageType type;
+   VkImageTiling tiling;
+   VkImageUsageFlags usage;
+   VkImageCreateFlags flags;
+   VkFormatFeatureFlags2 feats;
+   VkImageFormatProperties *props;
+   bool optimal;
+
+   (void)physicalDevice;
+   if (!pImageFormatInfo || !pImageFormatProperties)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   format = pImageFormatInfo->format;
+   type = pImageFormatInfo->type;
+   tiling = pImageFormatInfo->tiling;
+   usage = pImageFormatInfo->usage;
+   flags = pImageFormatInfo->flags;
+   optimal = (tiling == VK_IMAGE_TILING_OPTIMAL);
+   feats = nvrm_format_feature_flags(format, optimal);
+   props = &pImageFormatProperties->imageFormatProperties;
+   memset(props, 0, sizeof(*props));
+
+   if (feats == (VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+                 VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT) &&
+       format != VK_FORMAT_UNDEFINED) {
+      /* Only transfer features: reject unless usage is transfer-only. */
+      if (usage & ~(VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
+
+   if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+       !(feats & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+       !(feats & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+       !(feats & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   if ((usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+       !(feats & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+   if (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) {
+      if (type != VK_IMAGE_TYPE_2D)
+         return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
+
+   switch (type) {
+   case VK_IMAGE_TYPE_1D:
+      props->maxExtent.width = 16384;
+      props->maxExtent.height = 1;
+      props->maxExtent.depth = 1;
+      props->maxArrayLayers = 2048;
+      break;
+   case VK_IMAGE_TYPE_2D:
+      props->maxExtent.width = 16384;
+      props->maxExtent.height = 16384;
+      props->maxExtent.depth = 1;
+      props->maxArrayLayers = 2048;
+      break;
+   case VK_IMAGE_TYPE_3D:
+      props->maxExtent.width = 2048;
+      props->maxExtent.height = 2048;
+      props->maxExtent.depth = 2048;
+      props->maxArrayLayers = 1;
+      break;
+   default:
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   }
+
+   props->maxMipLevels = 15; /* log2(16384)+1 */
+   props->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+   if ((feats & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT) ||
+       (feats & VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT))
+      props->sampleCounts |= VK_SAMPLE_COUNT_4_BIT;
+   /* Compressed / storage: single sample only */
+   if (feats & VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT)
+      if (!(feats & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT))
+         props->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+
+   props->maxResourceSize = 1ull << 31; /* 2 GiB per image; conservative */
+
+   return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_GetPhysicalDeviceQueueFamilyProperties2(
    VkPhysicalDevice physicalDevice,

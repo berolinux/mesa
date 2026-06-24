@@ -1484,12 +1484,192 @@ nvgpu_bind_compute_state(struct pipe_context *pctx, void *state)
 }
 
 static void
+nvgpu_set_shader_buffers(struct pipe_context *pctx,
+                         mesa_shader_stage shader,
+                         unsigned start_slot, unsigned count,
+                         const struct pipe_shader_buffer *buffers,
+                         unsigned unbind_num_trailing_slots)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   unsigned i, total;
+   (void)shader; /* single shared SSBO table; compute/FS share for now */
+   if (start_slot >= PIPE_MAX_SHADER_BUFFERS)
+      return;
+   total = count + unbind_num_trailing_slots;
+   if (start_slot + total > PIPE_MAX_SHADER_BUFFERS)
+      total = PIPE_MAX_SHADER_BUFFERS - start_slot;
+   for (i = 0; i < total; i++) {
+      unsigned s = start_slot + i;
+      if (i < count && buffers && buffers[i].buffer) {
+         pipe_resource_reference(&ctx->ssbo[s].buffer, buffers[i].buffer);
+         ctx->ssbo[s].buffer_offset = buffers[i].buffer_offset;
+         ctx->ssbo[s].buffer_size = buffers[i].buffer_size;
+      } else {
+         pipe_resource_reference(&ctx->ssbo[s].buffer, NULL);
+         ctx->ssbo[s].buffer_offset = 0;
+         ctx->ssbo[s].buffer_size = 0;
+      }
+   }
+   if (start_slot + total > ctx->num_ssbo)
+      ctx->num_ssbo = start_slot + total;
+}
+
+static void
+nvgpu_set_shader_images(struct pipe_context *pctx,
+                        mesa_shader_stage shader,
+                        unsigned start_slot, unsigned count,
+                        unsigned unbind_num_trailing_slots,
+                        const struct pipe_image_view *images)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   unsigned i, total;
+   (void)shader;
+   if (start_slot >= PIPE_MAX_SHADER_IMAGES)
+      return;
+   total = count + unbind_num_trailing_slots;
+   if (start_slot + total > PIPE_MAX_SHADER_IMAGES)
+      total = PIPE_MAX_SHADER_IMAGES - start_slot;
+   for (i = 0; i < total; i++) {
+      unsigned s = start_slot + i;
+      if (i < count && images && images[i].resource) {
+         ctx->images[s] = images[i];
+         pipe_resource_reference(&ctx->images[s].resource, images[i].resource);
+      } else {
+         pipe_resource_reference(&ctx->images[s].resource, NULL);
+         memset(&ctx->images[s], 0, sizeof(ctx->images[s]));
+      }
+   }
+   if (start_slot + total > ctx->num_images)
+      ctx->num_images = start_slot + total;
+}
+
+static void
 nvgpu_set_global_binding(struct pipe_context *pctx,
                          unsigned first, unsigned count,
                          struct pipe_resource **resources,
                          uint32_t **handles)
 {
-   (void)pctx; (void)first; (void)count; (void)resources; (void)handles;
+   struct pipe_shader_buffer tmp[PIPE_MAX_SHADER_BUFFERS];
+   unsigned i, n = count;
+   (void)handles;
+   if (first >= PIPE_MAX_SHADER_BUFFERS)
+      return;
+   if (first + n > PIPE_MAX_SHADER_BUFFERS)
+      n = PIPE_MAX_SHADER_BUFFERS - first;
+   memset(tmp, 0, sizeof(tmp));
+   if (resources) {
+      for (i = 0; i < n; i++) {
+         if (!resources[i])
+            continue;
+         tmp[i].buffer = resources[i];
+         tmp[i].buffer_offset = 0;
+         tmp[i].buffer_size = resources[i]->width0;
+      }
+   }
+   nvgpu_set_shader_buffers(pctx, MESA_SHADER_COMPUTE, first, n,
+                            resources ? tmp : NULL, 0);
+}
+
+static void
+nvgpu_memory_barrier(struct pipe_context *pctx, unsigned flags)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   bool sh_d = false, sh_c = false, sh_i = false;
+   bool tx_s = false, tx_h = false, tx_d = false;
+
+   if (!nvgpu_push_start(ctx, &push, 32))
+      return;
+   if (flags & (PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_CONSTANT_BUFFER |
+                PIPE_BARRIER_INDIRECT_BUFFER | PIPE_BARRIER_VERTEX_BUFFER |
+                PIPE_BARRIER_INDEX_BUFFER | PIPE_BARRIER_STREAMOUT_BUFFER |
+                PIPE_BARRIER_GLOBAL_BUFFER | PIPE_BARRIER_UPDATE_BUFFER)) {
+      sh_d = sh_c = true;
+   }
+   if (flags & (PIPE_BARRIER_TEXTURE | PIPE_BARRIER_FRAMEBUFFER |
+                PIPE_BARRIER_IMAGE | PIPE_BARRIER_UPDATE_BUFFER |
+                PIPE_BARRIER_UPDATE_TEXTURE)) {
+      tx_s = tx_h = tx_d = true;
+   }
+   if (flags & PIPE_BARRIER_MAPPED_BUFFER)
+      sh_d = true;
+   nv_3d_emit_memory_barrier(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d);
+   nvgpu_push_finish(ctx, &push, true);
+}
+
+static void
+nvgpu_texture_barrier(struct pipe_context *pctx, unsigned flags)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   (void)flags;
+   if (!nvgpu_push_start(ctx, &push, 16))
+      return;
+   nv_3d_emit_texture_barrier(&push);
+   nvgpu_push_finish(ctx, &push, true);
+}
+
+static void
+nvgpu_render_condition(struct pipe_context *pctx, struct pipe_query *pq,
+                       bool condition, enum pipe_render_cond_flag mode)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   (void)mode;
+   if (!pq) {
+      ctx->cond_render_active = false;
+      ctx->cond_render_inverted = false;
+      ctx->cond_render_gpu_addr = 0;
+      if (nvgpu_push_start(ctx, &push, 16)) {
+         nv_3d_clear_conditional_render(&push);
+         nvgpu_push_finish(ctx, &push, true);
+      }
+      return;
+   }
+   ctx->cond_render_active = true;
+   ctx->cond_render_inverted = condition;
+   if (ctx->cond_render_gpu_addr && nvgpu_push_start(ctx, &push, 32)) {
+      nv_3d_set_conditional_render(&push, ctx->cond_render_gpu_addr,
+                                   ctx->cond_render_inverted);
+      nvgpu_push_finish(ctx, &push, true);
+   }
+}
+
+static void
+nvgpu_clear_buffer(struct pipe_context *pctx, struct pipe_resource *pres,
+                   unsigned offset, unsigned size, const void *clear_value,
+                   int clear_value_size)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_resource *res = nvgpu_resource(pres);
+   const struct nv_device_info *di;
+   struct nv_push push;
+   uint64_t addr;
+   uint32_t fill_data = 0;
+   uint32_t class_copy = 0;
+   unsigned i;
+
+   if (!pres || !res || size == 0)
+      return;
+   addr = res->gpu_offset + offset;
+   di = ctx->screen ? ctx->screen->info : NULL;
+   class_copy = di ? di->class_copy : 0;
+   if (clear_value && clear_value_size > 0) {
+      const uint8_t *cv = clear_value;
+      for (i = 0; i < 4 && i < (unsigned)clear_value_size; i++)
+         fill_data |= ((uint32_t)cv[i]) << (8 * i);
+      if (clear_value_size == 2)
+         fill_data = (fill_data & 0xffffu) | ((fill_data & 0xffffu) << 16);
+      else if (clear_value_size == 1) {
+         fill_data &= 0xffu;
+         fill_data |= fill_data << 8;
+         fill_data |= fill_data << 16;
+      }
+   }
+   if (!nvgpu_push_start(ctx, &push, 64))
+      return;
+   nv_copy_push_remap_fill_u32(&push, class_copy, addr, size & ~3u, fill_data);
+   nvgpu_push_finish(ctx, &push, true);
 }
 
 struct pipe_context *
@@ -1570,6 +1750,12 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.bind_compute_state = nvgpu_bind_compute_state;
    ctx->base.delete_compute_state = nvgpu_delete_shader_state;
    ctx->base.set_global_binding = nvgpu_set_global_binding;
+   ctx->base.set_shader_buffers = nvgpu_set_shader_buffers;
+   ctx->base.set_shader_images = nvgpu_set_shader_images;
+   ctx->base.memory_barrier = nvgpu_memory_barrier;
+   ctx->base.texture_barrier = nvgpu_texture_barrier;
+   ctx->base.render_condition = nvgpu_render_condition;
+   ctx->base.clear_buffer = nvgpu_clear_buffer;
    ctx->base.launch_grid = nvgpu_launch_grid;
 
    nvgpu_ensure_channel(ctx);

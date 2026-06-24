@@ -35,6 +35,8 @@ nvrm_init_entrypoints(void)
       nvrm_GetPhysicalDeviceFeatures;
    nvrm_physical_device_entrypoints.GetPhysicalDeviceFormatProperties2 =
       nvrm_GetPhysicalDeviceFormatProperties2;
+   nvrm_physical_device_entrypoints.GetPhysicalDeviceImageFormatProperties2 =
+      nvrm_GetPhysicalDeviceImageFormatProperties2;
    nvrm_physical_device_entrypoints.GetPhysicalDeviceQueueFamilyProperties2 =
       nvrm_GetPhysicalDeviceQueueFamilyProperties2;
    nvrm_physical_device_entrypoints.GetPhysicalDeviceMemoryProperties2 =

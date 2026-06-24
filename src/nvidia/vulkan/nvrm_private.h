@@ -331,6 +331,10 @@ VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceFeatures(VkPhysicalDevice physi
 VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
                                                                    VkFormat format,
                                                                    VkFormatProperties2 *pFormatProperties);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_GetPhysicalDeviceImageFormatProperties2(
+   VkPhysicalDevice physicalDevice,
+   const VkPhysicalDeviceImageFormatInfo2 *pImageFormatInfo,
+   VkImageFormatProperties2 *pImageFormatProperties);
 VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
                                                                         uint32_t *pQueueFamilyPropertyCount,
                                                                         VkQueueFamilyProperties2 *pQueueFamilyProperties);
