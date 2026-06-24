@@ -149,6 +149,7 @@ struct nv_smoke_hw_result {
    /* G3 phase detail */
    int g3_submit_rc;
    int g3_sema_only_rc; /* secondary: 3D sema-only if clear path fails */
+   int g3_clear_host_sema_rc; /* tick86: 3D clear + host sema; -1 n/a */
    int g3_preflight_rc;
    int g3_host_sema_rc;
    int g3_host_sema_mode; /* winning/last nv_host_sema_mode; -1 n/a */

@@ -18,10 +18,11 @@
  *   (b) emit a fixed method sequence via host-side "shadow program" that
  *       duplicates what the macro *should* emit (path C' correctness).
  *
- * Pass5 (610.43.02 glcore) shows real CALL_MME traffic at method offs
- * 0x3800 (5), 0x3998 (21), 0x39e0 (45 hottest) — confirms HW uses MME, not
- * only GL "immediate mode" strings.  ISA still unvalidated → keep END stubs
- * and rely on host path A/B/C' for indirect draws.
+ * Pass5/8 (610.43.02 glcore) shows real CALL_MME traffic at method offs
+ * 0x3800 (hdr 0x20010e00 ×4), 0x3998, 0x39e0 hottest — confirms HW uses MME.
+ * Pass8: only method header const in binary; data words runtime-computed.
+ * ISA still unvalidated → keep END stubs; host path A/B/C' for indirect draws.
+ * LOAD_MME_INSTRUCTION_RAM + CALL_MME_MACRO(i) emit helpers below prime state.
  *
  * Host-side shadow programs live in nv_3d_methods.h / callers; this header
  * owns instruction constants and multi-insn program tables.
@@ -155,6 +156,54 @@ nv_mme_programs_are_stubs(const struct nv_mme_program progs[NV_MME_SLOT_COUNT])
          return true;
    }
    return false;
+}
+
+/**
+ * Pass8: emit LOAD_MME_INSTRUCTION_RAM for one program then CALL_MME_MACRO(slot).
+ * Requires 3D class already SET_OBJECT on push. Safe with END-only stubs (no-op macro).
+ * Method offsets: CALL_MME_MACRO(i) @ 0x3800 + i*8 (NVC597 family).
+ */
+#ifndef NVC597_LOAD_MME_INSTRUCTION_RAM
+/* Fallback if class header not included; matches Maxwell+ inc method pattern */
+#define NV_MME_METHOD_LOAD_INSN_RAM   0x0450u
+#define NV_MME_METHOD_CALL_MACRO_BASE 0x3800u
+#else
+#define NV_MME_METHOD_LOAD_INSN_RAM   NVC597_LOAD_MME_INSTRUCTION_RAM
+#define NV_MME_METHOD_CALL_MACRO_BASE NVC597_CALL_MME_MACRO(0)
+#endif
+
+static inline void
+nv_mme_emit_load_and_call_end_stub(struct nv_push *p,
+                                   const struct nv_mme_program *prog)
+{
+   uint32_t i;
+   uint32_t call_off;
+
+   if (!p || !prog || prog->insn_count == 0)
+      return;
+
+   /* Load instruction words into MME RAM (start at ram_offset in dwords) */
+   for (i = 0; i < prog->insn_count && i < NV_MME_MAX_INSNS_PER_MACRO; i++) {
+      /* Some gens use start/data pairs; emit data dwords at load method */
+      nv_push_method(p, NV_MME_METHOD_LOAD_INSN_RAM + (i ? 4u : 0u),
+                     prog->insns[i]);
+   }
+   call_off = NV_MME_METHOD_CALL_MACRO_BASE + prog->slot * 8u;
+   nv_push_method(p, call_off, 0); /* CALL_MME_MACRO(slot) with 0 data args */
+}
+
+/** Prime both indirect slots with END-only macros (state init; draws still path A/B). */
+static inline void
+nv_mme_emit_prime_indirect_stubs(struct nv_push *p)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_COUNT];
+   unsigned i;
+
+   if (!p)
+      return;
+   nv_mme_build_indirect_draw_programs(progs);
+   for (i = 0; i < NV_MME_SLOT_COUNT; i++)
+      nv_mme_emit_load_and_call_end_stub(p, &progs[i]);
 }
 
 #ifdef __cplusplus

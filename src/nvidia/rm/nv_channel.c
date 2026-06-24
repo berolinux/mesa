@@ -2226,6 +2226,37 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
    return last;
 }
 
+/* Pass8 glcore 3D class imm ladder (newest first; C997/CA97/CB97/CC97 present) */
+static void
+nv_channel_g3_fill_class_ladder(struct nv_channel *ch, uint32_t prefer,
+                                uint32_t *classes, unsigned *n_io,
+                                unsigned max_n)
+{
+   unsigned n = 0;
+   unsigned i;
+   static const uint32_t ladder[] = {
+      0x0000cc97u, 0x0000cb97u, 0x0000ca97u, 0x0000c997u,
+      0x0000c797u, 0x0000c697u, 0x0000c597u, 0x0000c397u,
+   };
+
+   if (!classes || !n_io || !max_n)
+      return;
+   if (prefer)
+      classes[n++] = prefer;
+   if (ch && ch->class_3d_bound && n < max_n)
+      classes[n++] = ch->class_3d_bound;
+   if (ch && ch->info && ch->info->class_3d && n < max_n)
+      classes[n++] = ch->info->class_3d;
+   if (ch && n < max_n) {
+      uint32_t r = nv_channel_resolve_class_3d(ch, 0);
+      if (r)
+         classes[n++] = r;
+   }
+   for (i = 0; i < sizeof(ladder) / sizeof(ladder[0]) && n < max_n; i++)
+      classes[n++] = ladder[i];
+   *n_io = n;
+}
+
 int
 nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
                                 uint32_t class_3d,
@@ -2244,15 +2275,24 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
    struct nv_push push;
    uint32_t *map;
    uint32_t need = 128;
-   uint32_t c3;
+   uint32_t classes[12];
+   unsigned n = 12, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
    uint32_t c[4];
+   uint32_t prefer;
 
    if (!ch || !sema_gpu_addr)
       return -EINVAL;
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   c3 = nv_channel_resolve_class_3d(ch, class_3d);
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   prefer = class_3d ? class_3d : 0;
+   nv_channel_g3_fill_class_ladder(ch, prefer, classes, &n, 12);
 
    if (!ct_format)
       ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
@@ -2261,25 +2301,51 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
    else
       memset(c, 0, sizeof(c));
 
-   if (sema_reset && sema_cpu)
-      sema_cpu[0] = 0;
+   for (i = 0; i < n; i++) {
+      uint32_t c3 = classes[i];
+      unsigned t;
+      int r;
 
-   map = nv_channel_push_begin(ch, need);
-   if (!map)
-      return -ENOMEM;
+      if (!c3)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == c3)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = c3;
 
-   nv_push_init(&push, map, need);
-   if (emit_draw)
-      nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
-                                    ct_format, c, false /* sema after draw */,
-                                    sema_gpu_addr, sema_payload);
-   else
-      nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
-                                     ct_format, c, sema_gpu_addr, sema_payload);
-   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
 
-   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      if (emit_draw)
+         nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                       ct_format, c, false,
+                                       sema_gpu_addr, sema_payload);
+      else
+         nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                        ct_format, c, sema_gpu_addr,
+                                        sema_payload);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         if (!ch->class_3d_bound)
+            ch->class_3d_bound = c3;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
 }
 
 int
@@ -2295,26 +2361,242 @@ nv_channel_g3_sema_only_submit(struct nv_channel *ch,
    struct nv_push push;
    uint32_t *map;
    uint32_t need = 32;
-   uint32_t c3;
+   uint32_t classes[12];
+   unsigned n = 12, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
+   uint32_t prefer;
 
    if (!ch || !sema_gpu_addr)
       return -EINVAL;
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   c3 = nv_channel_resolve_class_3d(ch, class_3d);
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
 
-   if (sema_reset && sema_cpu)
-      sema_cpu[0] = 0;
+   prefer = class_3d ? class_3d : 0;
+   nv_channel_g3_fill_class_ladder(ch, prefer, classes, &n, 12);
 
-   map = nv_channel_push_begin(ch, need);
-   if (!map)
-      return -ENOMEM;
+   for (i = 0; i < n; i++) {
+      uint32_t c3 = classes[i];
+      unsigned t;
+      int r;
 
-   nv_push_init(&push, map, need);
-   nv_3d_emit_g3_sema_only(&push, c3, sema_gpu_addr, sema_payload);
-   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+      if (!c3)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == c3)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = c3;
 
-   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      nv_3d_emit_g3_sema_only(&push, c3, sema_gpu_addr, sema_payload);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         if (!ch->class_3d_bound)
+            ch->class_3d_bound = c3;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+/*
+ * Tick86: 3D clear/sema methods without 3D sema; complete via host sema
+ * (G1 ce_hs / G2 qmd_hs analog). Tries class ladder + sema modes.
+ */
+int
+nv_channel_g3_clear_then_host_sema_submit(struct nv_channel *ch,
+                                          uint32_t class_3d,
+                                          uint64_t ct_gpu_addr,
+                                          uint32_t ct_w, uint32_t ct_h,
+                                          uint32_t ct_format,
+                                          const uint32_t color_ui[4],
+                                          bool emit_draw,
+                                          uint64_t sema_gpu_addr,
+                                          volatile uint32_t *sema_cpu,
+                                          uint32_t sema_payload,
+                                          bool sema_reset,
+                                          uint64_t wait_timeout_ns,
+                                          bool check_notifier,
+                                          int *host_sema_mode_out,
+                                          uint32_t *class_used_out)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 128;
+   uint32_t classes[12];
+   unsigned n = 12, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
+   uint32_t c[4];
+   uint32_t prefer;
+   enum nv_host_sema_mode sema_modes_try[NV_HOST_SEMA_MODE_COUNT];
+   unsigned n_sm = 0, si, mi;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (host_sema_mode_out)
+      *host_sema_mode_out = -1;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   prefer = class_3d ? class_3d : 0;
+   nv_channel_g3_fill_class_ladder(ch, prefer, classes, &n, 12);
+
+   if (!ct_format)
+      ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+
+   if (ch->host_sema_mode_pref >= 0 &&
+       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
+   {
+      static const enum nv_host_sema_mode def_order[] = {
+         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
+         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
+         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
+         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+      };
+      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
+         enum nv_host_sema_mode m = def_order[mi];
+         unsigned j;
+         bool dup = false;
+         for (j = 0; j < n_sm; j++) {
+            if (sema_modes_try[j] == m) {
+               dup = true;
+               break;
+            }
+         }
+         if (!dup)
+            sema_modes_try[n_sm++] = m;
+      }
+   }
+
+   for (i = 0; i < n; i++) {
+      uint32_t c3 = classes[i];
+      unsigned t;
+      int r;
+
+      if (!c3)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == c3)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = c3;
+
+      for (si = 0; si < n_sm; si++) {
+         enum nv_host_sema_mode sm = sema_modes_try[si];
+
+         if (sema_reset && sema_cpu)
+            sema_cpu[0] = 0;
+
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+
+         nv_push_init(&push, map, need);
+         /* 3D clear without sema in 3D methods; host sema completes */
+         if (emit_draw)
+            nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                          ct_format, c, false, 0, 0);
+         else
+            nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                           ct_format, c, 0, 0);
+         nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+         nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr,
+                                                 sema_payload, true, sm);
+         nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                         wait_timeout_ns, check_notifier);
+         if (host_sema_mode_out)
+            *host_sema_mode_out = (int)sm;
+         if (r == 0) {
+            ch->host_sema_mode_pref = (int)sm;
+            if (!ch->class_3d_bound)
+               ch->class_3d_bound = c3;
+            if (class_used_out)
+               *class_used_out = c3;
+            return 0;
+         }
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+      }
+
+      /* Two-kick: 3D clear then host sema ladder */
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      if (emit_draw)
+         nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                       ct_format, c, false, 0, 0);
+      else
+         nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                        ct_format, c, 0, 0);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_kickoff(ch);
+      if (r) {
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+         continue;
+      }
+
+      r = nv_channel_gpfifo_host_sema_submit_ex(ch, sema_gpu_addr, sema_cpu,
+                                                sema_payload, false,
+                                                wait_timeout_ns,
+                                                check_notifier,
+                                                host_sema_mode_out);
+      if (r == 0) {
+         if (!ch->class_3d_bound)
+            ch->class_3d_bound = c3;
+         if (class_used_out)
+            *class_used_out = c3;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
 }

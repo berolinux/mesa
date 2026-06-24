@@ -398,6 +398,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g3_host_sema_mode = -1;
    res.g1_ce_host_sema_rc = -1;
    res.g2_qmd_host_sema_rc = -1;
+   res.g3_clear_host_sema_rc = -1;
    res.g1_fault_method_rc = -1;
    res.g1_rc = 1;
    res.g2_rc = 1;
@@ -753,6 +754,30 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             res.g3_sema_only_rc = nv_channel_g3_sema_only_submit(
                ch, 0, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
                check_notifier);
+
+            /* Tick86: kickoff ok but 3D sema failed — clear + host sema */
+            if (res.g3_host_sema_rc == 0 && res.g3_rc != 0) {
+               int g3hs_mode = -1;
+               uint32_t g3hs_class = 0;
+
+               if (sc->sema_cpu)
+                  sc->sema_cpu[0] = 0;
+               nv_channel_notifier_reset(ch);
+               res.g3_clear_host_sema_rc =
+                  nv_channel_g3_clear_then_host_sema_submit(
+                     ch, 0, sc->ct_gpu, 64, 64, 0, NULL, false,
+                     sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+                     check_notifier, &g3hs_mode, &g3hs_class);
+               if (res.g3_clear_host_sema_rc == 0) {
+                  if (g3hs_mode >= 0)
+                     res.g3_host_sema_mode = g3hs_mode;
+                  if (g3hs_class)
+                     res.g3_class_3d = g3hs_class;
+                  res.g3_submit_rc = 0;
+                  res.g3_rc = 0;
+                  res.slices_ok |= NV_SMOKE_HW_G3;
+               }
+            }
          }
          if (nv_smoke_hw_env_verbose())
             nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g3");

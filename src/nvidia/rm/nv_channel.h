@@ -301,6 +301,27 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
                                             bool check_notifier,
                                             int *host_sema_mode_out);
 
+/**
+ * G3: clear/draw methods without 3D sema; complete via host sema (tick86).
+ * Use when host sema ok but 3D sema/clear path fails (kickoff works).
+ */
+int
+nv_channel_g3_clear_then_host_sema_submit(struct nv_channel *ch,
+                                          uint32_t class_3d,
+                                          uint64_t ct_gpu_addr,
+                                          uint32_t ct_w, uint32_t ct_h,
+                                          uint32_t ct_format,
+                                          const uint32_t color_ui[4],
+                                          bool emit_draw,
+                                          uint64_t sema_gpu_addr,
+                                          volatile uint32_t *sema_cpu,
+                                          uint32_t sema_payload,
+                                          bool sema_reset,
+                                          uint64_t wait_timeout_ns,
+                                          bool check_notifier,
+                                          int *host_sema_mode_out,
+                                          uint32_t *class_used_out);
+
 /** G1 sema-only CE fence (no data transfer) + submit/wait. */
 int
 nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
