@@ -144,6 +144,59 @@ extern "C" {
 #define NVC597_TOPOLOGY_TRIANGLE_FAN            0x6
 #define NVC597_TOPOLOGY_QUADS                   0x7
 
+/* SPA / program region / pipeline shader (nvidia-3d nv3dLoadProgram pattern) */
+#define NVC597_SET_SPA_VERSION                  0x0310
+#define NVC597_SET_PROGRAM_REGION_A             0x1608  /* stable since NV9097/NVC097 */
+#define NVC597_SET_PROGRAM_REGION_B             0x160c
+
+#define NVC597_SET_PIPELINE_SHADER(j)           (0x2000 + (j) * 64)
+#define NVC597_SET_PIPELINE_SHADER_ENABLE_TRUE  0x1
+#define NVC597_SET_PIPELINE_SHADER_ENABLE_FALSE 0x0
+#define NVC597_SET_PIPELINE_SHADER_TYPE_SHIFT   4
+#define NVC597_SET_PIPELINE_SHADER_TYPE_VERTEX_CULL_BEFORE_FETCH 0x0
+#define NVC597_SET_PIPELINE_SHADER_TYPE_VERTEX  0x1
+#define NVC597_SET_PIPELINE_SHADER_TYPE_TESSELLATION_INIT 0x2
+#define NVC597_SET_PIPELINE_SHADER_TYPE_TESSELLATION 0x3
+#define NVC597_SET_PIPELINE_SHADER_TYPE_GEOMETRY 0x4
+#define NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL   0x5
+
+#define NVC597_SET_PIPELINE_REGISTER_COUNT(j)   (0x200c + (j) * 64)
+#define NVC597_SET_PIPELINE_BINDING(j)          (0x2010 + (j) * 64)
+#define NVC597_SET_PIPELINE_PROGRAM_ADDRESS_A(j) (0x2014 + (j) * 64)
+#define NVC597_SET_PIPELINE_PROGRAM_ADDRESS_B(j) (0x2018 + (j) * 64)
+
+#define NVC597_SET_CONSTANT_BUFFER_SELECTOR_A   0x2380
+#define NVC597_SET_CONSTANT_BUFFER_SELECTOR_B   0x2384
+#define NVC597_SET_CONSTANT_BUFFER_SELECTOR_C   0x2388
+#define NVC597_BIND_GROUP_CONSTANT_BUFFER(j)    (0x2410 + (j) * 32)
+#define NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_TRUE  0x1
+#define NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_FALSE 0x0
+#define NVC597_BIND_GROUP_CONSTANT_BUFFER_SHADER_SLOT_SHIFT 4
+
+/* Report semaphore (3D engine completion signal; nvidia-3d / nvkms-headsurface) */
+#define NVC597_SET_REPORT_SEMAPHORE_A           0x1b00
+#define NVC597_SET_REPORT_SEMAPHORE_B           0x1b04
+#define NVC597_SET_REPORT_SEMAPHORE_C           0x1b08
+#define NVC597_SET_REPORT_SEMAPHORE_D           0x1b0c
+#define NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_RELEASE      0x0
+#define NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_ACQUIRE      0x1
+#define NVC597_SET_REPORT_SEMAPHORE_D_RELEASE_AFTER_WRITES   (1u << 4)
+#define NVC597_SET_REPORT_SEMAPHORE_D_PIPELINE_LOCATION_ALL  (0xfu << 12)
+#define NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_ONE_WORD (1u << 28)
+#define NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS 0
+#define NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE     (1u << 2)
+
+/* Pipeline stage index (j in SET_PIPELINE_SHADER(j)) */
+#define NV_3D_PIPE_STAGE_VERTEX                 0
+#define NV_3D_PIPE_STAGE_TESS_INIT              1
+#define NV_3D_PIPE_STAGE_TESS                   2
+#define NV_3D_PIPE_STAGE_GEOMETRY               3
+#define NV_3D_PIPE_STAGE_PIXEL                  4
+
+/* Bind group indices used by nvidia-3d (vertex=0, pixel=4 typically) */
+#define NV_3D_BIND_GROUP_VERTEX                 0
+#define NV_3D_BIND_GROUP_PIXEL                  4
+
 /* Surface descriptor for RT/ZETA setup */
 struct nv_3d_surface {
    uint64_t gpu_addr;
@@ -429,6 +482,161 @@ nv_3d_emit_draw_index_buffer(struct nv_push *p, uint32_t first, uint32_t count)
 {
    nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_A, first);
    nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_B, count);
+}
+
+/** Map pipe_format (numeric, see p_format.h) to vertex component bit-width code. */
+static inline uint32_t
+nv_3d_vertex_comp_from_pipe(unsigned pipe_fmt)
+{
+   switch (pipe_fmt) {
+   case 1:  /* B8G8R8A8_UNORM */
+   case 9:  /* R8G8B8A8_UNORM */
+   case 3:  /* A8R8G8B8_UNORM */
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R8_G8_B8_A8;
+   case 31: /* R32_FLOAT */
+   case 32: /* R32_UINT */
+   case 33: /* R32_SINT */
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32;
+   case 34: /* R32G32_FLOAT */
+   case 35: /* R32G32_UINT */
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32;
+   case 36: /* R32G32B32_FLOAT */
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32;
+   case 39: /* R32G32B32A32_FLOAT */
+   case 40: /* R32G32B32A32_UINT */
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32_A32;
+   case 12: /* R16G16_UNORM / similar */
+   case 13:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R16_G16;
+   case 14: /* R16G16B16A16 */
+   case 15:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R16_G16_B16_A16;
+   case 6:  /* R8G8_UNORM */
+   case 7:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R8_G8;
+   default:
+      return NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_R32_G32_B32;
+   }
+}
+
+/** SPA version (affects simulators; required by nvidia-3d channel init). */
+static inline void
+nv_3d_set_spa_version(struct nv_push *p, uint32_t major, uint32_t minor)
+{
+   nv_push_method(p, NVC597_SET_SPA_VERSION,
+                  (minor & 0xff) | ((major & 0xff) << 8));
+}
+
+/**
+ * Program region base address.  On modern HW this may be optional when
+ * SET_PIPELINE_PROGRAM_ADDRESS carries absolute VAs; still emitted for
+ * compatibility with Fermi-era channel init patterns.
+ */
+static inline void
+nv_3d_set_program_region(struct nv_push *p, uint64_t gpu_addr)
+{
+   nv_push_method(p, NVC597_SET_PROGRAM_REGION_A,
+                  (uint32_t)(gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_PROGRAM_REGION_B,
+                  (uint32_t)(gpu_addr & 0xffffffffu));
+}
+
+/**
+ * Load a pipeline shader stage (nv3dLoadProgram): enable+type, program address,
+ * register count, bind group.
+ *
+ * stage: NV_3D_PIPE_STAGE_*
+ * type:  NVC597_SET_PIPELINE_SHADER_TYPE_*
+ * program_addr: absolute GPU VA of shader header/code entry
+ */
+static inline void
+nv_3d_load_pipeline_shader(struct nv_push *p, unsigned stage, unsigned type,
+                           uint64_t program_addr, uint32_t register_count,
+                           uint32_t bind_group)
+{
+   uint32_t shader_word = NVC597_SET_PIPELINE_SHADER_ENABLE_TRUE |
+                          ((type & 0xf) << NVC597_SET_PIPELINE_SHADER_TYPE_SHIFT);
+
+   nv_push_method(p, NVC597_SET_PIPELINE_SHADER(stage), shader_word);
+   nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_A(stage),
+                  (uint32_t)(program_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_PIPELINE_PROGRAM_ADDRESS_B(stage),
+                  (uint32_t)(program_addr & 0xffffffffu));
+   nv_push_method(p, NVC597_SET_PIPELINE_REGISTER_COUNT(stage),
+                  register_count & 0x1ff);
+   nv_push_method(p, NVC597_SET_PIPELINE_BINDING(stage),
+                  bind_group & 0x7);
+}
+
+/** Disable a pipeline stage (e.g. unused geometry). */
+static inline void
+nv_3d_disable_pipeline_shader(struct nv_push *p, unsigned stage)
+{
+   nv_push_method(p, NVC597_SET_PIPELINE_SHADER(stage),
+                  NVC597_SET_PIPELINE_SHADER_ENABLE_FALSE);
+}
+
+/** Select constant buffer for subsequent BIND_GROUP_CONSTANT_BUFFER. */
+static inline void
+nv_3d_set_constant_buffer_selector(struct nv_push *p, uint32_t size_bytes,
+                                   uint64_t gpu_addr)
+{
+   nv_push_method(p, NVC597_SET_CONSTANT_BUFFER_SELECTOR_A, size_bytes & 0x1ffff);
+   nv_push_method(p, NVC597_SET_CONSTANT_BUFFER_SELECTOR_B,
+                  (uint32_t)(gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_CONSTANT_BUFFER_SELECTOR_C,
+                  (uint32_t)(gpu_addr & 0xffffffffu));
+}
+
+/** Bind selected CB to bind_group / shader_slot (nvidia-3d nv3dBindCb). */
+static inline void
+nv_3d_bind_group_constant_buffer(struct nv_push *p, unsigned bind_group,
+                                 unsigned shader_slot, bool valid)
+{
+   uint32_t v = (valid ? NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_TRUE
+                       : NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_FALSE) |
+                ((shader_slot & 0x1f) << NVC597_BIND_GROUP_CONSTANT_BUFFER_SHADER_SLOT_SHIFT);
+   nv_push_method(p, NVC597_BIND_GROUP_CONSTANT_BUFFER(bind_group), v);
+}
+
+/**
+ * 3D report semaphore release (writes payload when pipeline reaches location).
+ * nvidia-3d / nvkms uses PIPELINE_LOCATION_ALL + RELEASE + ONE_WORD/FOUR_WORDS.
+ */
+static inline void
+nv_3d_report_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload, bool one_word)
+{
+   uint32_t d = NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_RELEASE |
+                NVC597_SET_REPORT_SEMAPHORE_D_RELEASE_AFTER_WRITES |
+                NVC597_SET_REPORT_SEMAPHORE_D_PIPELINE_LOCATION_ALL |
+                NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE |
+                (one_word ? NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_ONE_WORD
+                          : NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS);
+
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_A,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_B,
+                  (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_C, payload);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_D, d);
+}
+
+/** Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object). */
+static inline void
+nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload)
+{
+   /* Offset must be 4-byte aligned; SEMAPHOREB stores bits 31:2 */
+   nv_push_method(p, NVC36F_SEMAPHOREA,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB,
+                  (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED,
+                  NVC36F_SEMAPHORED_OPERATION_RELEASE |
+                  NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
+                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
 }
 
 static inline void

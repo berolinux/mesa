@@ -99,6 +99,40 @@ nv_copy_push_buffer_copy(struct nv_push *p, uint32_t class_copy,
    nv_push_wfi(p);
 }
 
+/**
+ * Multi-line pitch 2D image copy (LINEAR/PITCH sources and destinations).
+ * line_length = bytes per scanline to copy (width * bpp)
+ * pitch_in/out = row stride in bytes
+ * line_count = number of rows
+ */
+static inline void
+nv_copy_emit_image_2d(struct nv_push *p,
+                      uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                      uint32_t line_length, uint32_t pitch_in,
+                      uint32_t pitch_out, uint32_t line_count)
+{
+   if (!line_count)
+      line_count = 1;
+   nv_copy_emit_buffer_copy(p, src_gpu_addr, dst_gpu_addr,
+                            line_length, pitch_in, pitch_out, line_count);
+}
+
+/** Set copy object + 2D pitch image copy + WFI. */
+static inline void
+nv_copy_push_image_2d(struct nv_push *p, uint32_t class_copy,
+                      uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                      uint32_t line_length, uint32_t pitch_in,
+                      uint32_t pitch_out, uint32_t line_count)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_image_2d(p, src_gpu_addr, dst_gpu_addr,
+                         line_length, pitch_in, pitch_out, line_count);
+   nv_push_wfi(p);
+}
+
 #ifdef __cplusplus
 }
 #endif
