@@ -375,7 +375,10 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
              * sema_only ok + remap ok + copy fail => pitch/src issue
              * sema_only ok + remap fail => CE class/REMAP methods
              * all fail => schedule/doorbell/GPPut not executing methods
+             * Reset notifier between probes so a stale channel error does not
+             * poison later wait_check results.
              */
+            nv_channel_notifier_reset(ch);
             if (sc->sema_cpu)
                sc->sema_cpu[0] = 0;
             res.g1_sema_only_rc = nv_channel_g1_ce_sema_only_submit(ch, 0,
@@ -387,6 +390,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             if (sc->sema_cpu)
                res.g1_sema_observed = sc->sema_cpu[0];
 
+            nv_channel_notifier_reset(ch);
             if (sc->dst_cpu)
                memset(sc->dst_cpu, 0, 256);
             if (sc->sema_cpu)
@@ -400,6 +404,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g1_fill_observed = ((const uint32_t *)sc->dst_cpu)[0];
 
             /* Quaternary: host/GPFIFO sema (no CE) — isolates kickoff vs CE */
+            nv_channel_notifier_reset(ch);
             if (sc->sema_cpu)
                sc->sema_cpu[0] = 0;
             res.g1_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
@@ -472,16 +477,13 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                regs = g2_shader->register_count;
          }
          res.g2_prog_gpu = prog;
-         res.g2_submit_rc = nv_channel_g2_compute_smoke_sema_submit(ch, 0, prog,
-                                                                    regs, sass,
-                                                                    sc->qmd_gpu,
-                                                                    sc->qmd_cpu,
-                                                                    sc->sema_gpu,
-                                                                    sc->sema_cpu,
-                                                                    sc->sema_payload,
-                                                                    true, true, true,
-                                                                    to,
-                                                                    check_notifier);
+         nv_channel_notifier_reset(ch);
+         res.g2_submit_rc = nv_channel_g2_compute_smoke_sema_submit_try_classes(
+            ch, prog, regs, sass, sc->qmd_gpu, sc->qmd_cpu, sc->sema_gpu,
+            sc->sema_cpu, sc->sema_payload, true, true, true, to,
+            check_notifier, &res.g2_class_compute);
+         if (!res.g2_class_compute)
+            res.g2_class_compute = nv_channel_resolve_class_compute(ch, 0);
          res.g2_rc = res.g2_submit_rc;
          if (sc->dst_cpu)
             res.g2_store_observed = ((volatile uint32_t *)sc->dst_cpu)[0];

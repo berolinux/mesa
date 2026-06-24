@@ -1438,6 +1438,83 @@ nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
 }
 
 int
+nv_channel_g2_compute_smoke_sema_submit_try_classes(struct nv_channel *ch,
+                                                    uint64_t program_gpu_addr,
+                                                    uint32_t register_count,
+                                                    uint8_t sass_version,
+                                                    uint64_t qmd_gpu_addr,
+                                                    void *qmd_host,
+                                                    uint64_t sema_gpu_addr,
+                                                    volatile uint32_t *sema_cpu,
+                                                    uint32_t sema_payload,
+                                                    bool sema_reset,
+                                                    bool emit_init_state,
+                                                    bool method_invalidate,
+                                                    uint64_t wait_timeout_ns,
+                                                    bool check_notifier,
+                                                    uint32_t *class_used_out)
+{
+   uint32_t classes[6];
+   unsigned n = 0, i;
+   int last = -EINVAL;
+   uint32_t tried[6];
+   unsigned nt = 0;
+
+   if (!ch || !qmd_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   if (ch->class_compute_bound)
+      classes[n++] = ch->class_compute_bound;
+   if (ch->info && ch->info->class_compute)
+      classes[n++] = ch->info->class_compute;
+   classes[n++] = nv_channel_resolve_class_compute(ch, 0);
+   classes[n++] = 0x0000c7c0u;
+   classes[n++] = 0x0000c6c0u;
+   classes[n++] = 0x0000c5c0u;
+   classes[n++] = 0x0000c3c0u;
+
+   for (i = 0; i < n; i++) {
+      uint32_t cc = classes[i];
+      unsigned t;
+      int r;
+      if (!cc)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == cc)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 6)
+         tried[nt++] = cc;
+
+      r = nv_channel_g2_compute_smoke_sema_submit(ch, cc, program_gpu_addr,
+                                                  register_count, sass_version,
+                                                  qmd_gpu_addr, qmd_host,
+                                                  sema_gpu_addr, sema_cpu,
+                                                  sema_payload, sema_reset,
+                                                  emit_init_state,
+                                                  method_invalidate,
+                                                  wait_timeout_ns,
+                                                  check_notifier);
+      if (r == 0) {
+         if (class_used_out)
+            *class_used_out = cc;
+         if (!ch->class_compute_bound)
+            ch->class_compute_bound = cc;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+int
 nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
                                 uint32_t class_3d,
                                 uint64_t ct_gpu_addr,
