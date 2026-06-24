@@ -240,6 +240,90 @@ nvrm_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount,
          continue;
       img->bo = mem->bo;
       img->gpu_offset = nv_rm_bo_gpu_offset(mem->bo) + pBindInfos[i].memoryOffset;
+      /* Blocklinear base must be 512B-aligned */
+      if (img->is_blocklinear)
+         img->gpu_offset &= ~0x1ffull;
    }
    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_CreateBuffer(VkDevice _device,
+                  const VkBufferCreateInfo *pCreateInfo,
+                  const VkAllocationCallbacks *pAllocator,
+                  VkBuffer *pBuffer)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   struct nvrm_buffer *buf;
+
+   buf = vk_buffer_create(&device->vk, pCreateInfo, pAllocator, sizeof(*buf));
+   if (!buf)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   buf->bo = NULL;
+   buf->addr = 0;
+   *pBuffer = nvrm_buffer_to_handle(buf);
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_DestroyBuffer(VkDevice _device, VkBuffer _buffer,
+                   const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   VK_FROM_HANDLE(nvrm_buffer, buf, _buffer);
+   if (!buf)
+      return;
+   vk_buffer_destroy(&device->vk, pAllocator, &buf->vk);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_BindBufferMemory2(VkDevice _device, uint32_t bindInfoCount,
+                       const VkBindBufferMemoryInfo *pBindInfos)
+{
+   VK_FROM_HANDLE(nvrm_device, device, _device);
+   uint32_t i;
+   (void)device;
+   for (i = 0; i < bindInfoCount; i++) {
+      VK_FROM_HANDLE(nvrm_buffer, buf, pBindInfos[i].buffer);
+      VK_FROM_HANDLE(nvrm_device_memory, mem, pBindInfos[i].memory);
+      if (!buf || !mem || !mem->bo)
+         continue;
+      buf->bo = mem->bo;
+      buf->addr = nv_rm_bo_gpu_offset(mem->bo) + pBindInfos[i].memoryOffset;
+   }
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_GetBufferMemoryRequirements2(VkDevice _device,
+                                  const VkBufferMemoryRequirementsInfo2 *pInfo,
+                                  VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VK_FROM_HANDLE(nvrm_buffer, buf, pInfo->buffer);
+   VkDeviceSize size = buf ? buf->vk.size : 256;
+   (void)_device;
+   pMemoryRequirements->memoryRequirements.size = (size + 255) & ~255ull;
+   pMemoryRequirements->memoryRequirements.alignment = 256;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x3; /* VRAM or sysmem */
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_GetImageMemoryRequirements2(VkDevice _device,
+                                 const VkImageMemoryRequirementsInfo2 *pInfo,
+                                 VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VK_FROM_HANDLE(nvrm_image, img, pInfo->image);
+   VkDeviceSize size = 4096;
+   VkDeviceSize align = 4096;
+   (void)_device;
+   if (img) {
+      size = img->total_size ? img->total_size : img->level0_size;
+      if (!size)
+         size = 4096;
+      if (img->is_blocklinear)
+         align = 512;
+   }
+   pMemoryRequirements->memoryRequirements.size = (size + align - 1) & ~(align - 1);
+   pMemoryRequirements->memoryRequirements.alignment = align;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = 0x3;
 }

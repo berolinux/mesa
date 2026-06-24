@@ -318,10 +318,28 @@ VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
                                                 uint32_t groupCountX,
                                                 uint32_t groupCountY,
                                                 uint32_t groupCountZ);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                                                    VkBuffer buffer,
+                                                    VkDeviceSize offset);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdDispatch(VkCommandBuffer commandBuffer,
                                             uint32_t groupCountX,
                                             uint32_t groupCountY,
                                             uint32_t groupCountZ);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_CreateBuffer(VkDevice device,
+                                                 const VkBufferCreateInfo *pCreateInfo,
+                                                 const VkAllocationCallbacks *pAllocator,
+                                                 VkBuffer *pBuffer);
+VKAPI_ATTR void VKAPI_CALL nvrm_DestroyBuffer(VkDevice device, VkBuffer buffer,
+                                              const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL nvrm_BindBufferMemory2(VkDevice device,
+                                                      uint32_t bindInfoCount,
+                                                      const VkBindBufferMemoryInfo *pBindInfos);
+VKAPI_ATTR void VKAPI_CALL nvrm_GetBufferMemoryRequirements2(VkDevice device,
+                                                             const VkBufferMemoryRequirementsInfo2 *pInfo,
+                                                             VkMemoryRequirements2 *pMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL nvrm_GetImageMemoryRequirements2(VkDevice device,
+                                                            const VkImageMemoryRequirementsInfo2 *pInfo,
+                                                            VkMemoryRequirements2 *pMemoryRequirements);
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_BindImageMemory2(VkDevice device,
                                                      uint32_t bindInfoCount,
                                                      const VkBindImageMemoryInfo *pBindInfos);

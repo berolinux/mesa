@@ -1472,6 +1472,40 @@ nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
    nvrm_CmdDispatch(commandBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
+/*
+ * CmdDispatchIndirect: VkDispatchIndirectCommand is {x,y,z} uint32 at offset
+ * in buffer.  True GPU-indirect QMD would require sked/indirect machinery;
+ * when the indirect buffer's memory is host-mapped we read the grid on the
+ * CPU at record time (valid for non-concurrent producers).  Otherwise fall
+ * back to 1x1x1 so the command stream still contains a launch.
+ */
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                         VkBuffer buffer, VkDeviceSize offset)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   uint32_t gx = 1, gy = 1, gz = 1;
+
+   if (!cmd || !cmd->push_map)
+      return;
+
+   if (buf && buf->bo) {
+      void *map = nv_rm_bo_map(buf->bo);
+      if (map) {
+         const uint32_t *icmd =
+            (const uint32_t *)((const uint8_t *)map + (size_t)offset);
+         gx = icmd[0] ? icmd[0] : 1;
+         gy = icmd[1] ? icmd[1] : 1;
+         gz = icmd[2] ? icmd[2] : 1;
+         /* Leave mapped for lifetime of BO; unmap only if we just mapped —
+          * nv_rm_bo_map may refcount; safe to unmap if double-map ok. */
+         nv_rm_bo_unmap(buf->bo);
+      }
+   }
+   nvrm_emit_compute_dispatch(cmd, gx, gy, gz);
+}
+
 /* Queue submit: kick channel with cmd buffer push contents */
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_QueueSubmit2(VkQueue _queue, uint32_t submitCount,

@@ -43,6 +43,11 @@ nvrm_init_entrypoints(void)
    NVRM_SET(FreeMemory, nvrm_FreeMemory);
    NVRM_SET(MapMemory, nvrm_MapMemory);
    NVRM_SET(UnmapMemory, nvrm_UnmapMemory);
+   NVRM_SET(CreateBuffer, nvrm_CreateBuffer);
+   NVRM_SET(DestroyBuffer, nvrm_DestroyBuffer);
+   NVRM_SET(BindBufferMemory2, nvrm_BindBufferMemory2);
+   NVRM_SET(GetBufferMemoryRequirements2, nvrm_GetBufferMemoryRequirements2);
+   NVRM_SET(GetImageMemoryRequirements2, nvrm_GetImageMemoryRequirements2);
    NVRM_SET(CreateImage, nvrm_CreateImage);
    NVRM_SET(DestroyImage, nvrm_DestroyImage);
    NVRM_SET(BindImageMemory2, nvrm_BindImageMemory2);
@@ -72,6 +77,7 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdDrawIndexed, nvrm_CmdDrawIndexed);
    NVRM_SET(CmdDispatch, nvrm_CmdDispatch);
    NVRM_SET(CmdDispatchBase, nvrm_CmdDispatchBase);
+   NVRM_SET(CmdDispatchIndirect, nvrm_CmdDispatchIndirect);
    NVRM_SET(CmdCopyBuffer2, nvrm_CmdCopyBuffer2);
    NVRM_SET(CmdCopyImage2, nvrm_CmdCopyImage2);
    NVRM_SET(CmdCopyBufferToImage2, nvrm_CmdCopyBufferToImage2);
