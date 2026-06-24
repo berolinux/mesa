@@ -11,6 +11,7 @@
 
 #include "nv_rm.h"
 #include "nv_device_info.h"
+#include "nv_fence.h"
 
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
@@ -362,6 +363,39 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
 }
 
 static void
+/* Fence: opaque handle is nv_fence*; wait on latest seq in the fence object. */
+static void
+nvgpu_fence_reference(struct pipe_screen *pscreen,
+                      struct pipe_fence_handle **dst,
+                      struct pipe_fence_handle *src)
+{
+   (void)pscreen;
+   if (dst)
+      *dst = src;
+}
+
+static bool
+nvgpu_fence_finish(struct pipe_screen *pscreen,
+                   struct pipe_context *pctx,
+                   struct pipe_fence_handle *fence,
+                   uint64_t timeout)
+{
+   struct nv_fence *f = (struct nv_fence *)fence;
+   uint32_t seq;
+   (void)pscreen;
+   (void)pctx;
+
+   if (!f)
+      return true;
+   seq = f->seq;
+   if (!seq)
+      return true;
+   if (timeout == 0)
+      return nv_fence_signaled(f, seq);
+   return nv_fence_wait(f, seq, timeout) == 0;
+}
+
+static void
 nvgpu_destroy_screen(struct pipe_screen *pscreen)
 {
    struct nvgpu_screen *screen = nvgpu_screen(pscreen);
@@ -435,6 +469,8 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.resource_from_handle = nvgpu_resource_from_handle;
    screen->base.resource_destroy = nvgpu_resource_destroy;
    screen->base.query_memory_info = nvgpu_query_memory_info;
+   screen->base.fence_reference = nvgpu_fence_reference;
+   screen->base.fence_finish = nvgpu_fence_finish;
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
 

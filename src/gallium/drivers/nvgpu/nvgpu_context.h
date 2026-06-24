@@ -14,8 +14,22 @@ struct nvgpu_screen;
 struct nv_rm_bo;
 struct nv_push;
 struct nv_channel;
+struct nv_shader;
+struct nv_fence;
 
 #define NVGPU_PUSH_DWORDS  (64 * 1024)
+
+/* Gallium CSO for vertex elements: array + count (pipe only passes array) */
+struct nvgpu_velems_state {
+   unsigned num_elements;
+   struct pipe_vertex_element ve[PIPE_MAX_ATTRIBS];
+};
+
+/* Gallium shader CSO: pipe_shader_state + compiled/uploaded nv_shader */
+struct nvgpu_shader_cso {
+   struct pipe_shader_state base;
+   struct nv_shader *nvsh;
+};
 
 struct nvgpu_context {
    struct pipe_context base;
@@ -30,8 +44,16 @@ struct nvgpu_context {
    uint32_t push_dw_size;
    uint32_t push_dw_used;
 
+   /* Fence sema (shared by flush / pipe_fence_handle as opaque pointer) */
+   struct nv_fence *fence;
+   uint32_t last_fence_seq;
+
    struct blitter_context *blitter;
    struct pipe_debug_callback debug;
+
+   /* Program region base for SET_PROGRAM_REGION (first uploaded shader BO) */
+   uint64_t program_region_base;
+   bool program_region_emitted;
 
    /* Bound state (minimal) */
    void *fs;
