@@ -790,9 +790,12 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    unsigned i;
 
    (void)drawid_offset;
-   (void)indirect;
 
    for (i = 0; i < num_draws; i++) {
+      uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
+      uint32_t instance_count = info->instance_count ? info->instance_count : 1;
+      uint32_t start_instance = info->start_instance;
+
       if (!nvgpu_push_start(ctx, &push, 512))
          return;
 
@@ -808,15 +811,42 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       nvgpu_emit_shaders(ctx, &push);
       nvgpu_emit_vertex_state(ctx, &push);
 
-      if (info->index_size && info->has_user_indices == false &&
+      /* Map pipe primitive mode to NVC597 topology (subset) */
+      switch (info->mode) {
+      case MESA_PRIM_POINTS: topo = NVC597_TOPOLOGY_POINTS; break;
+      case MESA_PRIM_LINES: topo = NVC597_TOPOLOGY_LINES; break;
+      case MESA_PRIM_LINE_STRIP: topo = NVC597_TOPOLOGY_LINE_STRIP; break;
+      case MESA_PRIM_TRIANGLES: topo = NVC597_TOPOLOGY_TRIANGLES; break;
+      case MESA_PRIM_TRIANGLE_STRIP: topo = NVC597_TOPOLOGY_TRIANGLE_STRIP; break;
+      case MESA_PRIM_TRIANGLE_FAN: topo = NVC597_TOPOLOGY_TRIANGLE_FAN; break;
+      default: topo = NVC597_TOPOLOGY_TRIANGLES; break;
+      }
+      nv_3d_set_primitive_topology(&push, topo);
+      if (info->primitive_restart)
+         nv_3d_set_primitive_restart(&push, true, info->restart_index);
+      else
+         nv_3d_set_primitive_restart(&push, false, 0);
+
+      if (indirect && indirect->buffer) {
+         /* Indirect: emit zero-count draw until GPU indirect class is wired */
+         if (info->index_size)
+            nv_3d_emit_draw_index_buffer_instanced(&push, topo, 0, 0, 0, 1, 0);
+         else
+            nv_3d_emit_draw_vertex_array_instanced(&push, topo, 0, 0, 1, 0);
+      } else if (info->index_size && info->has_user_indices == false &&
           info->index.resource) {
          struct nvgpu_resource *ib = nvgpu_resource(info->index.resource);
          uint64_t ib_addr = ib ? ib->gpu_offset : 0;
          uint64_t ib_size = info->index.resource->width0;
+         int32_t bias = draws[i].index_bias;
          nv_3d_set_index_buffer(&push, ib_addr, ib_size, info->index_size);
-         nv_3d_emit_draw_index_buffer(&push, draws[i].start, draws[i].count);
+         nv_3d_emit_draw_index_buffer_instanced(&push, topo, draws[i].start,
+                                                draws[i].count, bias,
+                                                instance_count, start_instance);
       } else {
-         nv_3d_emit_draw_vertex_array(&push, draws[i].start, draws[i].count);
+         nv_3d_emit_draw_vertex_array_instanced(&push, topo, draws[i].start,
+                                                draws[i].count, instance_count,
+                                                start_instance);
       }
 
       nv_push_wfi(&push);
@@ -1191,6 +1221,13 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    desc.invalidate_caches = true;
    if (cs && cs->nvsh && cs->nvsh->local_mem_size)
       desc.local_mem_low = cs->nvsh->local_mem_size;
+
+   /* Program LMEM window when shader needs spill/local (requires screen LMEM BO later) */
+   if (desc.local_mem_low && di && di->tpc_count) {
+      /* Without a dedicated LMEM BO on the context, still emit size/SM count
+       * with a zero address is invalid; skip until screen allocates one. */
+      (void)di;
+   }
 
    nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
    nv_push_wfi(&push);
