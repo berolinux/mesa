@@ -106,7 +106,9 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            " g1_svram=%d g1_bvram=%d g1_sgpu=0x%llx g1_dgpu=0x%llx"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
            " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_store=%d"
-           " g2_host_sema=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
+           " g2_host_sema=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx g2_had_prog=%d"
+           " g3_pre=%d g3_submit=%d g3_sema_only=%d g3_host_sema=%d g3_class=0x%x"
+           " g3_h_3d=0x%x\n",
            p,
            (unsigned)res->slices_run, (unsigned)res->slices_ok,
            res->g1_rc, res->g2_rc, res->g3_rc,
@@ -131,7 +133,11 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            res->g2_submit_rc, res->g2_store_rc, res->g2_host_sema_rc,
            (unsigned)res->g2_store_observed,
            (unsigned)res->g2_class_compute,
-           (unsigned long long)res->g2_prog_gpu);
+           (unsigned long long)res->g2_prog_gpu,
+           res->g2_had_prog ? 1 : 0,
+           res->g3_preflight_rc, res->g3_submit_rc, res->g3_sema_only_rc,
+           res->g3_host_sema_rc, (unsigned)res->g3_class_3d,
+           (unsigned)res->g3_h_obj_3d);
    if (res->g1_rc < 0 && (res->slices_run & NV_SMOKE_HW_G1)) {
       fprintf(stderr,
               "%s: G1 bring-up hints: class_copy=0x%x preflight=%d (detail=%d) "
@@ -164,6 +170,17 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
               (unsigned long long)res->g2_prog_gpu,
               res->g2_submit_rc, res->g2_store_rc, res->g2_host_sema_rc,
               (unsigned)res->g2_store_observed);
+   }
+   if (res->g3_rc < 0 && (res->slices_run & NV_SMOKE_HW_G3)) {
+      fprintf(stderr,
+              "%s: G3 bring-up hints: class_3d=0x%x h_3d=0x%x pre=%d host_sema=%d "
+              "submit=%d sema_only=%d\n"
+              "  host_sema ok, sema_only ok, clear fail => CLEAR_SURFACE/RT methods\n"
+              "  host_sema ok, sema_only fail => 3D class/sema methods\n"
+              "  host_sema fail => kickoff (schedule/GPPut@0x8c/doorbell@0x90/token)\n",
+              p, (unsigned)res->g3_class_3d, (unsigned)res->g3_h_obj_3d,
+              res->g3_preflight_rc, res->g3_host_sema_rc,
+              res->g3_submit_rc, res->g3_sema_only_rc);
    }
 }
 
@@ -502,14 +519,24 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          uint64_t store_gpu = sc->dst_gpu; /* reuse G1 dst BO as G2 store target */
          bool expect_store = false;
 
-         /* Reset sema between slices (G1 may have left payload set) */
+         /* Host sema first (same kickoff gate as G1; G1 may have left sema set) */
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
+         nv_channel_notifier_reset(ch);
+         if (res.g2_preflight_rc == -EAGAIN)
+            res.g2_host_sema_rc = -EAGAIN;
+         else
+            res.g2_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
+               ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+               check_notifier);
+
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         if (sc->dst_cpu)
+            memset(sc->dst_cpu, 0, 256);
 
          /* Prefer store-imm smoke shader targeting dst_bo[0] */
          if (g2_shader && sc->rm && store_gpu) {
-            if (sc->dst_cpu)
-               memset(sc->dst_cpu, 0, 256);
             if (nv_shader_upload_compute_smoke(g2_shader, 1 /* store_imm */,
                                                store_imm, store_gpu, 16) == 0 &&
                 g2_shader->uploaded) {
@@ -525,6 +552,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                regs = g2_shader->register_count;
          }
          res.g2_prog_gpu = prog;
+         res.g2_had_prog = (prog != 0);
          nv_channel_notifier_reset(ch);
          res.g2_submit_rc = nv_channel_g2_compute_smoke_sema_submit_try_classes(
             ch, prog, regs, sass, sc->qmd_gpu, sc->qmd_cpu, sc->sema_gpu,
@@ -545,14 +573,9 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g2_store_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G2;
             }
-         } else if (res.g2_submit_rc != 0 && res.g2_submit_rc != -EAGAIN) {
-            /* Secondary: host sema — kickoff ok vs QMD/compute class issue */
-            if (sc->sema_cpu)
-               sc->sema_cpu[0] = 0;
-            res.g2_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
-               ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
-               check_notifier);
          }
+         if (nv_smoke_hw_env_verbose())
+            nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g2");
          if (res.g2_rc && !r)
             r = res.g2_rc;
       }
@@ -560,17 +583,58 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G3) {
       res.slices_run |= NV_SMOKE_HW_G3;
-      /* emit_draw=false: no shaders; clear+sema only (safer first HW bring-up) */
-      res.g3_rc = nv_channel_g3_clear_sema_submit(ch, 0, sc->ct_gpu,
-                                                  64, 64, 0, NULL,
-                                                  false /* no draw */,
-                                                  sc->sema_gpu, sc->sema_cpu,
-                                                  sc->sema_payload, true, to,
-                                                  check_notifier);
-      if (res.g3_rc == 0)
-         res.slices_ok |= NV_SMOKE_HW_G3;
-      if (res.g3_rc && !r)
-         r = res.g3_rc;
+      (void)nv_channel_ensure_engine_objects(ch);
+      res.g3_class_3d = nv_channel_resolve_class_3d(ch, 0);
+      res.g3_h_obj_3d = ch->h_obj_3d;
+      res.g3_preflight_rc = nv_channel_submit_preflight(ch, NULL);
+
+      if (sc->sema_cpu)
+         sc->sema_cpu[0] = 0;
+      nv_channel_notifier_reset(ch);
+      if (res.g3_preflight_rc != 0 && res.g3_preflight_rc != -EAGAIN) {
+         res.g3_rc = res.g3_preflight_rc;
+         res.g3_submit_rc = res.g3_preflight_rc;
+         if (res.g3_rc && !r)
+            r = res.g3_rc;
+      } else if (res.g3_preflight_rc == -EAGAIN) {
+         res.g3_host_sema_rc = -EAGAIN;
+         res.g3_submit_rc = -EAGAIN;
+         res.g3_rc = -EAGAIN;
+         if (!r)
+            r = res.g3_rc;
+      } else {
+         /* Host sema first (kickoff gate; same as G1/G2) */
+         res.g3_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
+            ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+            check_notifier);
+
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         nv_channel_notifier_reset(ch);
+         /* emit_draw=false: no shaders; clear+sema only (safer first HW bring-up) */
+         res.g3_submit_rc = nv_channel_g3_clear_sema_submit(ch, 0, sc->ct_gpu,
+                                                            64, 64, 0, NULL,
+                                                            false /* no draw */,
+                                                            sc->sema_gpu, sc->sema_cpu,
+                                                            sc->sema_payload, true, to,
+                                                            check_notifier);
+         res.g3_rc = res.g3_submit_rc;
+         if (res.g3_submit_rc == 0) {
+            res.slices_ok |= NV_SMOKE_HW_G3;
+         } else if (res.g3_submit_rc != 0 && res.g3_submit_rc != -EAGAIN) {
+            /* Secondary: 3D sema-only (isolates clear methods vs sema/class) */
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            nv_channel_notifier_reset(ch);
+            res.g3_sema_only_rc = nv_channel_g3_sema_only_submit(
+               ch, 0, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+               check_notifier);
+         }
+         if (nv_smoke_hw_env_verbose())
+            nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g3");
+         if (res.g3_rc && !r)
+            r = res.g3_rc;
+      }
    }
 
    if (result_out)
@@ -607,6 +671,7 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
 {
    struct nv_rm_device *rm = NULL;
    struct nv_channel *ch = NULL;
+   struct nv_shader *g2_shader = NULL;
    struct nv_smoke_hw_result res;
    int run_r = -ENODEV;
    int try_gpu;
@@ -697,7 +762,15 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
               "submit_ready_rc=%d (non-fatal; G1 preflight may retry)\n",
               buf_va_rc, eng_rc, sready_rc);
 
-   run_r = nv_smoke_hw_run_oneshot(rm, ch, slices, NULL, timeout_ns,
+   /* G2: allocate store-imm compute smoke shader when G2 requested */
+   if (slices & NV_SMOKE_HW_G2) {
+      g2_shader = nv_shader_create(rm, NV_SHADER_KIND_COMPUTE);
+      if (!g2_shader && nv_smoke_hw_env_verbose())
+         fprintf(stderr, "nv_smoke_hw_run_standalone: nv_shader_create(compute) "
+                         "failed; G2 will run with program_gpu=0\n");
+   }
+
+   run_r = nv_smoke_hw_run_oneshot(rm, ch, slices, g2_shader, timeout_ns,
                                    check_notifier, &res);
    /* preserve standalone phase codes in result (oneshot overwrites via stack res) */
    {
@@ -714,6 +787,8 @@ nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
          nv_smoke_hw_log_result(&out, "nv_smoke_hw_standalone");
    }
 
+   if (g2_shader)
+      nv_shader_destroy(g2_shader);
    nv_channel_destroy(ch);
    nv_rm_device_close(rm);
    return run_r;

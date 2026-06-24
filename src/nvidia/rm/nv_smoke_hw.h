@@ -131,12 +131,20 @@ struct nv_smoke_hw_result {
    int g2_submit_rc;
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
    int g2_preflight_rc;
-   int g2_host_sema_rc; /* secondary: host/GPFIFO sema if compute submit fails */
+   int g2_host_sema_rc; /* host/GPFIFO sema (run before compute; kickoff gate) */
    int g2_engine_alloc_rc;
    uint32_t g2_h_obj_compute;
    uint32_t g2_store_observed; /* dst_cpu[0] after G2 when mapped */
    uint32_t g2_class_compute;
    uint64_t g2_prog_gpu;
+   bool g2_had_prog;    /* true if program_gpu non-zero at dispatch */
+   /* G3 phase detail */
+   int g3_submit_rc;
+   int g3_sema_only_rc; /* secondary: 3D sema-only if clear path fails */
+   int g3_preflight_rc;
+   int g3_host_sema_rc;
+   uint32_t g3_class_3d;
+   uint32_t g3_h_obj_3d;
 };
 
 /** True if NV_SMOKE_HW_VERBOSE is set (non-empty, not "0"). */

@@ -377,9 +377,11 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
          ch->schedule_rc = ret;
    }
 
-   /* Work submit token (Volta+) via channel GPFIFO ctrl; try channel then TSG */
-   {
+   /* Work submit token (Turing+ / class > C36E): NOTIF_INDEX then GET_TOKEN.
+    * 610.43.02 glcore RE (a53229 then a53269); try channel then TSG parent. */
+   if (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu) {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
+      NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
       uint32_t token_parents[2];
       unsigned ti, ntp = 0;
 
@@ -387,6 +389,11 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       if (ch->h_channel_group)
          token_parents[ntp++] = ch->h_channel_group;
       for (ti = 0; ti < ntp && !ch->has_work_submit_token; ti++) {
+         memset(&nip, 0, sizeof(nip));
+         nip.index = NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN;
+         (void)nv_rm_control(rm, token_parents[ti],
+                             NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
+                             &nip, sizeof(nip));
          memset(&tok, 0, sizeof(tok));
          if (nv_rm_control(rm, token_parents[ti],
                            NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
@@ -394,15 +401,6 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
             ch->work_submit_token = tok.workSubmitToken;
             ch->has_work_submit_token = true;
          }
-      }
-      /* Best-effort: set default notifier index for token (non-fatal) */
-      if (ch->has_work_submit_token) {
-         NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
-         memset(&nip, 0, sizeof(nip));
-         nip.index = NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN;
-         (void)nv_rm_control(rm, ch->h_channel,
-                             NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
-                             &nip, sizeof(nip));
       }
    }
 
@@ -801,13 +799,18 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       }
    }
 
-   /* Doorbell prerequisites (Volta+): usermode page + work submit token */
+   /* Doorbell prerequisites (Volta+ / class > C36E): usermode + work_submit_token.
+    * 610.43.02 glcore RE (ac5557): doorbell path only when gpfifo_class > 0xC36E.
+    * Blob channel setup (a53229/a53269): SET_NOTIF_INDEX then GET_WORK_SUBMIT_TOKEN.
+    */
    if (!ch->usermode_map && ch->rm) {
       (void)nv_rm_device_ensure_usermode(ch->rm);
       ch->usermode_map = nv_rm_device_usermode_map(ch->rm);
    }
-   if (!ch->has_work_submit_token && ch->rm) {
+   if (!ch->has_work_submit_token && ch->rm &&
+       (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu)) {
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
+      NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
       uint32_t token_parents[2];
       unsigned ti, ntp = 0;
 
@@ -815,6 +818,12 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       if (ch->h_channel_group)
          token_parents[ntp++] = ch->h_channel_group;
       for (ti = 0; ti < ntp; ti++) {
+         /* Best-effort: bind error-context notifier slot before token fetch */
+         memset(&nip, 0, sizeof(nip));
+         nip.index = 0;
+         (void)nv_rm_control(ch->rm, token_parents[ti],
+                             NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
+                             &nip, sizeof(nip));
          memset(&tok, 0, sizeof(tok));
          if (nv_rm_control(ch->rm, token_parents[ti],
                            NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
@@ -824,7 +833,7 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
             break;
          }
       }
-      /* Pre-Volta / older GPFIFO classes: token ctrl may fail; GPPut-only ok */
+      /* Pre-Turing (class <= C36E): token ctrl may fail; GPPut-only ok */
    }
 
    return 0;
@@ -906,10 +915,13 @@ nv_channel_kickoff(struct nv_channel *ch)
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
 
    /*
-    * Ring doorbell when we have usermode map + token.  Pre-Volta / no token
-    * still publishes USERD GPPut (GPPut-only kick path).
+    * Ring doorbell when we have usermode map + token and GPFIFO class is
+    * Turing+ (class > 0xC36E).  610.43.02 glcore@ac5557 skips doorbell for
+    * older classes (GPPut-only kick).  Pre-Volta / no token still publishes
+    * USERD GPPut only.
     */
-   ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
+   ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL &&
+                   (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu);
 
    /* libdrm helper: write GPFIFO entry, advance put, USERD GPPut, doorbell */
    r = nvidia_gpfifo_submit_one(ch->gpfifo_cpu, ch->gpfifo_entries,
