@@ -368,6 +368,9 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       }
    }
 
+   /* Engine objects under channel (copy/compute/3d) — best-effort before first methods */
+   (void)nv_channel_ensure_engine_objects(ch);
+
    /* Refresh usermode map if device got it after channel start */
    if (!ch->usermode_map)
       ch->usermode_map = nv_rm_device_usermode_map(rm);
@@ -389,6 +392,15 @@ nv_channel_destroy(struct nv_channel *ch)
 #if defined(HAVE_LIBDRM_NVIDIA)
    if (ch->rm) {
       uint32_t h_dev = nv_rm_device_device_handle(ch->rm);
+      /* Free engine objects before channel (parent = channel) */
+      if (ch->h_channel) {
+         if (ch->h_obj_copy)
+            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_copy);
+         if (ch->h_obj_compute)
+            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_compute);
+         if (ch->h_obj_3d)
+            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_3d);
+      }
       if (ch->h_channel) {
          uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group : h_dev;
          nv_rm_free_object(ch->rm, h_parent, ch->h_channel);
@@ -437,6 +449,76 @@ nv_channel_push_used(struct nv_channel *ch)
 }
 
 int
+nv_channel_ensure_engine_objects(struct nv_channel *ch)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+   return -ENOSYS;
+#else
+   uint32_t cc, ccomp, c3;
+   int any_ok = 0;
+   int last_fail = 0;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+
+   cc = nv_channel_resolve_class_copy(ch, 0);
+   ccomp = nv_channel_resolve_class_compute(ch, 0);
+   c3 = nv_channel_resolve_class_3d(ch, 0);
+
+   /*
+    * Allocate engine classes as children of the GPFIFO channel.  Params are
+    * often NULL/empty for DMA_COPY / COMPUTE / 3D (class-specific data is
+    * programmed via methods after SET_OBJECT with the class ID).
+    */
+   if (!ch->h_obj_copy && cc) {
+      uint32_t h = 0;
+      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, cc, NULL, 0);
+      if (r == 0 && h) {
+         ch->h_obj_copy = h;
+         ch->class_copy_bound = cc;
+         any_ok = 1;
+      } else {
+         last_fail = r ? r : -EIO;
+      }
+   } else if (ch->h_obj_copy) {
+      any_ok = 1;
+   }
+
+   if (!ch->h_obj_compute && ccomp) {
+      uint32_t h = 0;
+      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, ccomp, NULL, 0);
+      if (r == 0 && h) {
+         ch->h_obj_compute = h;
+         ch->class_compute_bound = ccomp;
+         any_ok = 1;
+      } else if (!last_fail) {
+         last_fail = r ? r : -EIO;
+      }
+   } else if (ch->h_obj_compute) {
+      any_ok = 1;
+   }
+
+   if (!ch->h_obj_3d && c3) {
+      uint32_t h = 0;
+      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, c3, NULL, 0);
+      if (r == 0 && h) {
+         ch->h_obj_3d = h;
+         ch->class_3d_bound = c3;
+         any_ok = 1;
+      } else if (!last_fail) {
+         last_fail = r ? r : -EIO;
+      }
+   } else if (ch->h_obj_3d) {
+      any_ok = 1;
+   }
+
+   ch->engine_alloc_rc = any_ok ? 0 : (last_fail ? last_fail : -ENOENT);
+   return ch->engine_alloc_rc;
+#endif
+}
+
+int
 nv_channel_ensure_submit_ready(struct nv_channel *ch)
 {
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -445,6 +527,9 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
 #else
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
+
+   /* Engine objects (idempotent) — needed before CE/compute/3D methods on some RM builds */
+   (void)nv_channel_ensure_engine_objects(ch);
 
    /* Schedule if create-time schedule failed (channel won't run methods) */
    if (!ch->scheduled) {

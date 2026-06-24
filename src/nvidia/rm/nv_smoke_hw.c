@@ -66,9 +66,9 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
       return;
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
-           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_db=%d"
+           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d"
-           " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x"
+           " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_notif=0x%x/0x%x"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
            " g2_pre=%d g2_submit=%d g2_store=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
            p,
@@ -76,11 +76,13 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            res->g1_rc, res->g2_rc, res->g3_rc,
            res->g1_preflight_rc, res->g1_preflight_detail,
            res->g1_was_scheduled ? 1 : 0, res->g1_schedule_rc,
+           res->g1_engine_alloc_rc, (unsigned)res->g1_h_obj_copy,
            res->g1_had_doorbell ? 1 : 0,
            res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
            res->g1_remap_fill_rc, res->g1_host_sema_rc,
            (unsigned)res->g1_sema_observed, (unsigned)res->g1_fill_observed,
            (unsigned)res->g1_class_copy,
+           (unsigned)res->g1_notifier_status, (unsigned)res->g1_notifier_info32,
            (unsigned)res->g1_userd_gp_get, (unsigned)res->g1_userd_gp_put,
            (unsigned)res->g1_host_gpfifo_put,
            res->g2_preflight_rc, res->g2_submit_rc, res->g2_store_rc,
@@ -92,8 +94,10 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
               "%s: G1 bring-up hints: class_copy=0x%x preflight=%d (detail=%d) "
               "sched=%d schedule_rc=%d doorbell=%d submit=%d sema_only=%d remap=%d host_sema=%d\n"
               "  USERD GPGet=%u GPPut=%u host_gpfifo_put=%u (GPGet!=GPPut => ring not consumed)\n"
-              "  host_sema ok, CE fails => kickoff works; fix CE class/methods (class_copy)\n"
+              "  host_sema ok, CE fails => kickoff works; fix CE class/methods or h_obj_copy alloc\n"
               "  host_sema fail => schedule/doorbell/GPPut (not CE)\n"
+              "  g1_eng_rc!=0 / h_copy=0 => RmAlloc copy under channel failed (engine context)\n"
+              "  g1_notif non-zero => channel error notifier (method/engine fault)\n"
               "  sema_only ok, copy fail, remap ok = pitch/src OFFSET_IN issue\n"
               "  sema_only ok, copy+remap fail = CE class/methods\n"
               "  payload_rc=-EIO = sema ok but 256B dst!=src (wrong offsets/VAS)\n",
@@ -260,7 +264,13 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
       res.g1_was_scheduled = ch->scheduled;
       res.g1_schedule_rc = ch->schedule_rc;
+      res.g1_engine_alloc_rc = ch->engine_alloc_rc;
+      res.g1_h_obj_copy = ch->h_obj_copy;
+      res.g1_notifier_status = 0xffff;
       res.g1_had_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
+      (void)nv_channel_ensure_engine_objects(ch);
+      res.g1_engine_alloc_rc = ch->engine_alloc_rc;
+      res.g1_h_obj_copy = ch->h_obj_copy;
 
       if (res.g1_preflight_rc != 0 && res.g1_preflight_rc != -EAGAIN) {
          /* Hard failure: missing channel objects — skip submit noise */
@@ -345,6 +355,14 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          }
          nv_channel_userd_snapshot(ch, &res.g1_userd_gp_get, &res.g1_userd_gp_put,
                                    &res.g1_host_gpfifo_put);
+         {
+            uint16_t nst = 0xffff;
+            uint32_t ninfo = 0;
+            if (nv_channel_notifier_status(ch, &nst, &ninfo) == 0) {
+               res.g1_notifier_status = nst;
+               res.g1_notifier_info32 = ninfo;
+            }
+         }
          if (res.g1_rc && !r)
             r = res.g1_rc;
       }

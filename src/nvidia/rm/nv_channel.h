@@ -45,6 +45,14 @@ struct nv_channel {
    uint32_t h_vaspace;             /* FERMI_VASPACE_A passed at channel alloc */
    uint32_t h_channel_group;       /* KEPLER_CHANNEL_GROUP_A if used */
    uint32_t h_ctxshare;            /* FERMI_CONTEXT_SHARE_A if used */
+   /* Engine objects allocated under channel (RM context; SET_OBJECT still uses class ID) */
+   uint32_t h_obj_copy;            /* DMA copy class (e.g. AMPERE_DMA_COPY_A) */
+   uint32_t h_obj_compute;         /* compute class */
+   uint32_t h_obj_3d;              /* 3D class */
+   uint32_t class_copy_bound;      /* class ID used for h_obj_copy alloc (0 if none) */
+   uint32_t class_compute_bound;
+   uint32_t class_3d_bound;
+   int engine_alloc_rc;            /* 0 ok, negative if all engine allocs failed */
    uint32_t engine_type;
    uint32_t gpfifo_class;
    uint32_t work_submit_token;
@@ -105,6 +113,14 @@ nv_channel_push_begin(struct nv_channel *ch, uint32_t need_dwords);
  * use nv_channel_submit_preflight() for strict G1 bring-up checks.
  */
 int nv_channel_ensure_submit_ready(struct nv_channel *ch);
+
+/**
+ * Best-effort RmAlloc of copy/compute/3D engine objects as children of the
+ * channel (parent = h_channel).  Required on many RM paths before methods on
+ * those engines are valid; SET_OBJECT in the PB still uses the hardware class ID.
+ * Safe to call multiple times; skips classes already allocated.
+ */
+int nv_channel_ensure_engine_objects(struct nv_channel *ch);
 
 /**
  * G1/G2 bring-up preflight: ensure_submit_ready + verify channel has USERD/GPFIFO/push
