@@ -116,6 +116,8 @@ struct nvrm_cmd_buffer {
    struct nvrm_device *device;
    struct nv_rm_bo *push_bo;
    struct nv_rm_bo *qmd_bo;   /* scratch for inline QMD GPU address field */
+   struct nv_rm_bo *lmem_bo;  /* compute global LMEM backing (spill/scratch) */
+   bool lmem_programmed;      /* SET_SHADER_LOCAL_MEMORY* already emitted */
    uint32_t *push_map;
    uint32_t push_dw_cap;
    uint32_t push_dw_used;

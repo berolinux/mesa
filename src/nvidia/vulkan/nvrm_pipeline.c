@@ -13,6 +13,7 @@
 #include "nv_fence.h"
 #include "nv_tex.h"
 #include "nv_qmd.h"
+#include "nv_copy_methods.h"
 #include "nv_device_info.h"
 #include "nv_rm.h"
 
@@ -1365,6 +1366,29 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
 
 
 /* NVC3C0 QMD-based compute dispatch (clc3c0 / clc3c0qmd v02.02). */
+#ifndef NVRM_LMEM_SCRATCH_SIZE
+#define NVRM_LMEM_SCRATCH_SIZE (256 * 1024)
+#endif
+
+static void
+nvrm_ensure_compute_lmem(struct nvrm_cmd_buffer *cmd)
+{
+   const struct nv_device_info *info;
+   uint64_t lmem_addr;
+   uint32_t sm_count = 1;
+
+   if (!cmd || cmd->lmem_programmed || !cmd->lmem_bo)
+      return;
+   info = cmd->device ? cmd->device->info : NULL;
+   if (info && info->tpc_count)
+      sm_count = info->tpc_count;
+   lmem_addr = nv_rm_bo_gpu_offset(cmd->lmem_bo);
+   if (!lmem_addr)
+      return;
+   nv_compute_set_shader_local_memory(&cmd->push, lmem_addr,
+                                      NVRM_LMEM_SCRATCH_SIZE, sm_count);
+   cmd->lmem_programmed = true;
+}
 
 static void
 nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
@@ -1454,6 +1478,7 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
    if (!cmd || !cmd->push_map)
       return;
 
+   nvrm_ensure_compute_lmem(cmd);
    nvrm_fill_compute_desc(cmd, &desc, gx, gy, gz, &class_compute);
 
    if (cmd->qmd_bo) {
@@ -1501,14 +1526,10 @@ nvrm_CmdDispatchBase(VkCommandBuffer commandBuffer,
  * Path A (host-readable indirect BO): read grid at record time, materialize
  * full QMD into cmd->qmd_bo with correct CTA_RASTER_*, then SEND_PCAS.
  *
- * Path B (GPU-only indirect BO, no host map): still materialize QMD with 1x1x1
- * grid into qmd_bo, then note indirect GPU VA in comments/state for a future
- * copy-engine patch of CTA_RASTER dwords (12/13/14) before PCAS.  For now
- * launch 1x1x1 so the stream remains valid.
- *
- * Path C (qmd_bo + indirect host map): encode QMD with 1x1x1, patch grid
- * dwords in the host-mirrored QMD via nv_qmd_patch_grid, re-issue via
- * normal dispatch (avoids re-reading shader/CB fields).
+ * Path B (GPU-only indirect BO): materialize QMD with placeholder 1x1x1 grid
+ * into qmd_bo (host mirror + inline load), then CE-copy 12 bytes from the
+ * indirect buffer into QMD dwords 12..14 (CTA_RASTER width/height/depth),
+ * then SEND_PCAS.  Requires qmd_bo + indirect buffer GPU VAs.
  */
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
@@ -1517,16 +1538,26 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
    struct nv_qmd_desc desc;
+   const struct nv_device_info *info;
    uint32_t class_compute = 0;
+   uint32_t class_copy = 0;
    uint32_t gx = 1, gy = 1, gz = 1;
    uint64_t qmd_addr = 0;
+   uint64_t indirect_addr = 0;
    void *qmd_host = NULL;
    bool have_grid = false;
+   uint32_t qmd_tmp[NV_QMD_DWORDS];
 
    if (!cmd || !cmd->push_map)
       return;
 
+   nvrm_ensure_compute_lmem(cmd);
+   info = cmd->device ? cmd->device->info : NULL;
+   if (info)
+      class_copy = info->class_copy;
+
    if (buf && buf->bo) {
+      indirect_addr = nv_rm_bo_gpu_offset(buf->bo) + (uint64_t)offset;
       void *map = nv_rm_bo_map(buf->bo);
       if (map) {
          const uint32_t *icmd =
@@ -1537,11 +1568,8 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
          have_grid = true;
          nv_rm_bo_unmap(buf->bo);
       }
-      /* else: indirect buffer not host-mappable; GPU CE patch path not yet wired */
-      (void)offset;
    }
 
-   /* Preferred: fill desc once, materialize into QMD scratch, optional patch */
    nvrm_fill_compute_desc(cmd, &desc, gx, gy, gz, &class_compute);
 
    if (cmd->qmd_bo) {
@@ -1551,15 +1579,15 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
       qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
    }
 
-   if (qmd_host && have_grid) {
-      /* Encode with grid already in desc; mirror ensures QMD BO matches inline */
+   if (have_grid) {
+      /* Path A: grid known on CPU */
       nv_compute_emit_dispatch_materialized(&cmd->push, &desc, qmd_addr,
                                             qmd_host, class_compute);
-   } else if (qmd_host) {
-      /* No indirect grid yet: materialize 1x1x1, leave room for GPU patch */
-      uint32_t qmd_tmp[NV_QMD_DWORDS];
+   } else if (qmd_addr && indirect_addr) {
+      /* Path B: materialize placeholder QMD, CE-patch grid from indirect BO */
       nv_qmd_materialize(&desc, qmd_tmp, qmd_host);
-      /* Future: emit CE copy from indirect buffer into qmd_host dwords 12-14 */
+      nv_copy_patch_qmd_grid_from_indirect(&cmd->push, class_copy,
+                                           indirect_addr, qmd_addr);
       if (class_compute)
          nv_compute_set_object(&cmd->push, class_compute);
       else

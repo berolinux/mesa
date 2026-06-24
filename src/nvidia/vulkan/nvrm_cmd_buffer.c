@@ -14,6 +14,7 @@
 
 #define NVRM_CMD_PUSH_DWORDS (32 * 1024)
 #define NVRM_QMD_SCRATCH_SIZE  4096  /* 256B QMD + padding, 256B aligned */
+#define NVRM_LMEM_SCRATCH_SIZE (256 * 1024)  /* global LMEM window for spills */
 
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
@@ -48,8 +49,20 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       req.map_gpu_va = true;
       cmd->qmd_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
    }
+   /* Global LMEM backing for compute spill/scratch (SET_SHADER_LOCAL_MEMORY*) */
+   if (!cmd->lmem_bo && cmd->device && cmd->device->rm) {
+      memset(&req, 0, sizeof(req));
+      req.size = NVRM_LMEM_SCRATCH_SIZE;
+      req.alignment = 4096;
+      req.vram = true;
+      req.cpu_access = false;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      cmd->lmem_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+   }
    cmd->push_dw_used = 0;
    cmd->compute_init_done = false;
+   cmd->lmem_programmed = false;
    cmd->bound_compute_pipeline = NULL;
    if (cmd->push_map)
       nv_push_init(&cmd->push, cmd->push_map, cmd->push_dw_cap);

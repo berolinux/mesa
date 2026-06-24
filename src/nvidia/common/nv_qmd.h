@@ -45,9 +45,19 @@ extern "C" {
 #define NVC3C0_SET_INLINE_QMD_ADDRESS_A      0x0318
 #define NVC3C0_SET_INLINE_QMD_ADDRESS_B      0x031c
 #define NVC3C0_LOAD_INLINE_QMD_DATA(i)       (0x0320 + (i) * 4)
-#define NVC3C0_SET_SHADER_LOCAL_MEMORY_A     0x02e4
-#define NVC3C0_SET_SHADER_LOCAL_MEMORY_B     0x02e8
-#define NVC3C0_SET_SHADER_LOCAL_MEMORY_C     0x02ec
+/* Non-throttled local mem size (legacy method block used by some paths) */
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_C  0x02ec
+/* Global LMEM backing address + window (clc3c0.h) */
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_A     0x0790
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_B     0x0794
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A  0x07b0
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_WINDOW_B  0x07b4
+/* Keep aliases for older code that used 0x02e4 block as "local memory" */
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_SIZE_A  NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_SIZE_B  NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B
+#define NVC3C0_SET_SHADER_LOCAL_MEMORY_SIZE_C  NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_C
 #define NVC3C0_INVALIDATE_SHADER_CACHES      0x021c
 #define NVC3C0_INVALIDATE_TEXTURE_HEADER_CACHE 0x0228
 #define NVC3C0_INVALIDATE_TEXTURE_SAMPLER_CACHE 0x022c
@@ -419,13 +429,48 @@ nv_qmd_patch_grid(uint32_t qmd[NV_QMD_DWORDS],
    if (!gx) gx = 1;
    if (!gy) gy = 1;
    if (!gz) gz = 1;
-   /* Clear then set MW fields (zero whole QMD words overlapping raster bits) */
    /* CTA_RASTER_WIDTH 415:384 spans dwords 12..12 (bits 0..31 of dw12) */
    /* CTA_RASTER_HEIGHT 431:416 spans dwords 13 (bits 0..15) */
    /* CTA_RASTER_DEPTH 463:448 spans dwords 14 (bits 0..15) */
    qmd[12] = gx; /* bits 384..415 fully within dword 12 */
    qmd[13] = (qmd[13] & 0xffff0000u) | (gy & 0xffffu);
    qmd[14] = (qmd[14] & 0xffff0000u) | (gz & 0xffffu);
+}
+
+/** Byte offsets of CTA raster dwords within a 256-byte QMD (for CE copies). */
+#define NV_QMD_OFF_CTA_RASTER_WIDTH_DW   (12u * 4u)  /* bits 415:384 */
+#define NV_QMD_OFF_CTA_RASTER_HEIGHT_DW  (13u * 4u)  /* low 16 of bits 431:416 */
+#define NV_QMD_OFF_CTA_RASTER_DEPTH_DW   (14u * 4u)  /* low 16 of bits 463:448 */
+
+/**
+ * Program compute-class global LMEM backing store (address + size window).
+ * lmem_gpu_addr should be a device BO sized for worst-case threads * local_mem
+ * per SM; for minimal spill-only shaders a small BO (e.g. 64KB) is enough.
+ */
+static inline void
+nv_compute_set_shader_local_memory(struct nv_push *p, uint64_t lmem_gpu_addr,
+                                   uint32_t size_bytes, uint32_t max_sm_count)
+{
+   uint32_t sz = size_bytes ? size_bytes : 0x10000u; /* default 64KB */
+
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   /* Global LMEM region base */
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_A,
+                  (uint32_t)((lmem_gpu_addr >> 32) & 0x1ffffu));
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_B,
+                  (uint32_t)(lmem_gpu_addr & 0xffffffffu));
+   /* Window base (often same as region start for simple drivers) */
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A,
+                  (uint32_t)((lmem_gpu_addr >> 32) & 0x1ffffu));
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_WINDOW_B,
+                  (uint32_t)(lmem_gpu_addr & 0xffffffffu));
+   /* Non-throttled size: SIZE_UPPER in A (bits 7:0 of high part), lower in B */
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A, 0);
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B, sz);
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_C,
+                  max_sm_count ? (max_sm_count & 0x1ffu) : 1u);
 }
 
 #ifdef __cplusplus

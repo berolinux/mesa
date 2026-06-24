@@ -67,6 +67,62 @@ nv_copy_set_object(struct nv_push *p, uint32_t class_copy)
 }
 
 /**
+ * Copy a small contiguous range (e.g. 4 or 12 bytes) from indirect dispatch
+ * buffer into a QMD field — used to patch CTA_RASTER_* before SEND_PCAS when
+ * the indirect BO is not host-mappable.  pitch=size, line_count=1, pitch layouts.
+ */
+static inline void
+nv_copy_emit_small_linear(struct nv_push *p,
+                          uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                          uint32_t size_bytes)
+{
+   uint32_t launch;
+
+   if (!p || !size_bytes)
+      return;
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * Patch QMD CTA raster from a VkDispatchIndirectCommand at indirect_gpu_addr
+ * (3x uint32 x,y,z).  Copies 12 bytes onto QMD dwords 12..14 (width in dw12,
+ * height/depth in low 16 of dw13/dw14 — height/depth >65535 not representable
+ * in QMD MW fields; CE copies full 32-bit words which is correct for width and
+ * sufficient for typical height/depth < 65536).
+ */
+static inline void
+nv_copy_patch_qmd_grid_from_indirect(struct nv_push *p, uint32_t class_copy,
+                                     uint64_t indirect_gpu_addr,
+                                     uint64_t qmd_gpu_addr)
+{
+   if (!p || !indirect_gpu_addr || !qmd_gpu_addr)
+      return;
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   /* One 12-byte copy covers indirect x,y,z -> QMD dw12,dw13,dw14 sequentially */
+   nv_copy_emit_small_linear(p, indirect_gpu_addr,
+                             qmd_gpu_addr + 12u * 4u, 12);
+}
+
+/**
  * Linear buffer-to-buffer copy (pitch layout, virtual addresses, single line).
  * For multi-line 2D copies set pitch_in/pitch_out/line_count and multi-line bit.
  */
