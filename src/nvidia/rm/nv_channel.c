@@ -901,25 +901,57 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
       NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tok;
       NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS nip;
       uint32_t token_parents[2];
-      unsigned ti, ntp = 0;
+      /* Pass7 glcore a532b2: try default slot 0, WORK_SUBMIT_TOKEN type, and
+       * pass7-style (0x10>>4)=1 plus a few error-context strides. */
+      static const uint32_t notif_idxs[] = {
+         0u,
+         NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN,
+         1u,
+         2u,
+         0x10u >> 4, /* pass7 lea(+0x10)>>4 with base 0 */
+      };
+      unsigned ti, ntp = 0, ni;
 
       token_parents[ntp++] = ch->h_channel;
       if (ch->h_channel_group)
          token_parents[ntp++] = ch->h_channel_group;
-      for (ti = 0; ti < ntp; ti++) {
-         /* Best-effort: bind error-context notifier slot before token fetch */
-         memset(&nip, 0, sizeof(nip));
-         nip.index = 0;
-         (void)nv_rm_control(ch->rm, token_parents[ti],
-                             NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
-                             &nip, sizeof(nip));
-         memset(&tok, 0, sizeof(tok));
-         if (nv_rm_control(ch->rm, token_parents[ti],
-                           NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
-                           &tok, sizeof(tok)) == 0) {
-            ch->work_submit_token = tok.workSubmitToken;
-            ch->has_work_submit_token = true;
-            break;
+
+      /* Optional: enable per-channel error notify in TSG (a06f0108; OGKM param is bool only) */
+      if (ch->h_channel_group) {
+         NVA06F_CTRL_SET_ERROR_NOTIFIER_PARAMS enp;
+
+         memset(&enp, 0, sizeof(enp));
+         enp.bNotifyEachChannelInTSG = NV_TRUE;
+         (void)nv_rm_control(ch->rm, ch->h_channel,
+                             NVA06F_CTRL_CMD_SET_ERROR_NOTIFIER,
+                             &enp, sizeof(enp));
+      }
+
+      for (ti = 0; ti < ntp && !ch->has_work_submit_token; ti++) {
+         for (ni = 0; ni < 5u; ni++) {
+            memset(&nip, 0, sizeof(nip));
+            nip.index = notif_idxs[ni];
+            (void)nv_rm_control(ch->rm, token_parents[ti],
+                                NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
+                                &nip, sizeof(nip));
+            memset(&tok, 0, sizeof(tok));
+            if (nv_rm_control(ch->rm, token_parents[ti],
+                              NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                              &tok, sizeof(tok)) == 0) {
+               ch->work_submit_token = tok.workSubmitToken;
+               ch->has_work_submit_token = true;
+               break;
+            }
+         }
+         /* Last resort: GET_TOKEN without SET_NOTIF (cuda path; pass7) */
+         if (!ch->has_work_submit_token) {
+            memset(&tok, 0, sizeof(tok));
+            if (nv_rm_control(ch->rm, token_parents[ti],
+                              NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN,
+                              &tok, sizeof(tok)) == 0) {
+               ch->work_submit_token = tok.workSubmitToken;
+               ch->has_work_submit_token = true;
+            }
          }
       }
       /* Pre-Turing (class <= C36E): token ctrl may fail; GPPut-only ok */
@@ -1391,6 +1423,104 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
          if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
             return r;
       }
+   }
+   return last;
+}
+
+int
+nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
+                                            uint32_t class_copy,
+                                            uint64_t src_gpu_addr,
+                                            uint64_t dst_gpu_addr,
+                                            uint32_t size_bytes,
+                                            uint64_t sema_gpu_addr,
+                                            volatile uint32_t *sema_cpu,
+                                            uint32_t sema_payload,
+                                            bool sema_reset,
+                                            uint64_t wait_timeout_ns,
+                                            bool check_notifier,
+                                            int *host_sema_mode_out)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 48;
+   uint32_t classes[16];
+   unsigned n = 16, i, nt = 0;
+   uint32_t tried[16];
+   int pre, last = -EINVAL;
+   uint32_t prefer = 0;
+
+   if (!ch || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (host_sema_mode_out)
+      *host_sema_mode_out = -1;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (class_copy)
+      prefer = class_copy;
+   else if (ch->class_copy_bound)
+      prefer = ch->class_copy_bound;
+   else if (ch->info && ch->info->class_copy)
+      prefer = ch->info->class_copy;
+   else
+      prefer = nv_channel_resolve_class_copy(ch, 0);
+   nv_device_info_fill_class_ladder(2, prefer, classes, &n);
+
+   for (i = 0; i < n; i++) {
+      uint32_t cl = classes[i];
+      unsigned t;
+      int r;
+
+      if (!cl)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == cl)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 16)
+         tried[nt++] = cl;
+
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      /* CE data copy only — completion via host sema (pass7), not CE sema */
+      nv_copy_set_object(&push, cl);
+      nv_copy_emit_buffer_copy(&push, src_gpu_addr, dst_gpu_addr, size_bytes,
+                               0, 0, 1);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_kickoff(ch);
+      if (r) {
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+         continue;
+      }
+
+      r = nv_channel_gpfifo_host_sema_submit_ex(ch, sema_gpu_addr, sema_cpu,
+                                                sema_payload, false,
+                                                wait_timeout_ns,
+                                                check_notifier,
+                                                host_sema_mode_out);
+      if (r == 0) {
+         if (!ch->class_copy_bound)
+            ch->class_copy_bound = cl;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
    }
    return last;
 }

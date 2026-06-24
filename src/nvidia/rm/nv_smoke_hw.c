@@ -134,7 +134,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
            " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_spath=%d g1_sbind=%d g1_tsg=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
-           " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d g1_hs_mode=%d"
+           " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_ce_hs=%d g1_host_sema=%d g1_hs_mode=%d"
            " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x"
            " g1_notif=0x%x/0x%x"
            " g1_svram=%d g1_bvram=%d g1_sgpu=0x%llx g1_dgpu=0x%llx"
@@ -152,7 +152,8 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            res->g1_engine_alloc_rc, (unsigned)res->g1_h_obj_copy,
            res->g1_had_doorbell ? 1 : 0,
            res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
-           res->g1_remap_fill_rc, res->g1_host_sema_rc, res->g1_host_sema_mode,
+           res->g1_remap_fill_rc, res->g1_ce_host_sema_rc,
+           res->g1_host_sema_rc, res->g1_host_sema_mode,
            (unsigned)res->g1_sema_observed, (unsigned)res->g1_fill_observed,
            (unsigned)res->g1_class_copy,
            (unsigned)res->g1_gpfifo_class,
@@ -395,6 +396,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g1_host_sema_mode = -1;
    res.g2_host_sema_mode = -1;
    res.g3_host_sema_mode = -1;
+   res.g1_ce_host_sema_rc = -1;
    res.g1_fault_method_rc = -1;
    res.g1_rc = 1;
    res.g2_rc = 1;
@@ -494,6 +496,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          } else if (res.g1_submit_rc != 0 && res.g1_submit_rc != -EAGAIN) {
             /*
              * Secondary: sema-only CE fence.  Tertiary: REMAP fill+sema (no src).
+             * Pass7 quaternary: CE copy (no CE sema) + host sema — use when
+             * host_sema ok but CE sema methods fail (completion via NVC36F).
              * sema_only ok + remap ok + copy fail => pitch/src issue
              * sema_only ok + remap fail => CE class/REMAP methods
              * host_sema ok + all CE fail => CE class/methods (kickoff works)
@@ -523,6 +527,41 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g1_sema_observed = sc->sema_cpu[0];
             if (sc->dst_cpu)
                res.g1_fill_observed = ((const uint32_t *)sc->dst_cpu)[0];
+
+            /* Pass7: if kickoff works (host sema ok), try CE data + host sema */
+            if (res.g1_host_sema_rc == 0 && res.g1_rc != 0) {
+               int ce_hs_mode = -1;
+
+               nv_channel_notifier_reset(ch);
+               if (sc->src_cpu)
+                  memset(sc->src_cpu, 0xa5, 256);
+               if (sc->dst_cpu)
+                  memset(sc->dst_cpu, 0, 256);
+               if (sc->sema_cpu)
+                  sc->sema_cpu[0] = 0;
+               res.g1_ce_host_sema_rc = nv_channel_g1_ce_copy_then_host_sema_submit(
+                  ch, 0, sc->src_gpu, sc->dst_gpu, 256, sc->sema_gpu,
+                  sc->sema_cpu, sc->sema_payload, true, to, check_notifier,
+                  &ce_hs_mode);
+               if (sc->sema_cpu)
+                  res.g1_sema_observed = sc->sema_cpu[0];
+               if (res.g1_ce_host_sema_rc == 0) {
+                  if (ce_hs_mode >= 0)
+                     res.g1_host_sema_mode = ce_hs_mode;
+                  if (sc->src_cpu && sc->dst_cpu &&
+                      memcmp(sc->src_cpu, sc->dst_cpu, 256) != 0) {
+                     res.g1_payload_rc = -EIO;
+                     res.g1_rc = -EIO;
+                  } else {
+                     res.g1_payload_rc = 0;
+                     res.g1_submit_rc = 0;
+                     res.g1_rc = 0;
+                     res.slices_ok |= NV_SMOKE_HW_G1;
+                     if (ch->class_copy_bound)
+                        res.g1_class_copy = ch->class_copy_bound;
+                  }
+               }
+            }
          } else if (res.g1_submit_rc == -EAGAIN) {
             res.g1_sema_only_rc = -EAGAIN;
             res.g1_remap_fill_rc = -EAGAIN;

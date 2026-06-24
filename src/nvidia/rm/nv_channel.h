@@ -282,6 +282,25 @@ nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,
                                               bool try_pipelined,
                                               uint32_t *class_used_out);
 
+/**
+ * Pass7 G1 strategy when host sema works but CE sema does not: emit CE copy
+ * without CE sema (LAUNCH_DMA data only), then NVC36F host sema release.
+ * Completes via host sema memory write; validates copy via sema_cpu/payload.
+ */
+int
+nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
+                                            uint32_t class_copy,
+                                            uint64_t src_gpu_addr,
+                                            uint64_t dst_gpu_addr,
+                                            uint32_t size_bytes,
+                                            uint64_t sema_gpu_addr,
+                                            volatile uint32_t *sema_cpu,
+                                            uint32_t sema_payload,
+                                            bool sema_reset,
+                                            uint64_t wait_timeout_ns,
+                                            bool check_notifier,
+                                            int *host_sema_mode_out);
+
 /** G1 sema-only CE fence (no data transfer) + submit/wait. */
 int
 nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
