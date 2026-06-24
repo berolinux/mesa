@@ -914,12 +914,17 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
 static void
 nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
                          const union pipe_color_union *color,
-                         double depth, unsigned stencil)
+                         double depth, unsigned stencil,
+                         const struct pipe_scissor_state *scissor_state,
+                         uint32_t color_clear_mask,
+                         uint8_t stencil_clear_mask)
 {
    struct nv_push push;
    const struct nv_device_info *info = ctx->screen->info;
    uint32_t class_3d = info ? info->class_3d : 0;
    const uint32_t *color_ui = color ? color->ui : NULL;
+   uint32_t sc_x = 0, sc_y = 0, sc_w = 0, sc_h = 0;
+   bool sc_enable = false;
 
    if (!nvgpu_push_start(ctx, &push, 256))
       return;
@@ -933,7 +938,46 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
    /* Program RTs/ZETA before CLEAR_SURFACE (required for HW to have a target) */
    nvgpu_emit_framebuffer(ctx, &push);
    nvgpu_emit_fixed_func(ctx, &push);
-   nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth, stencil);
+
+   /* Optional scissor clip for partial clears (pipe_scissor_state) */
+   if (scissor_state) {
+      sc_x = scissor_state->minx;
+      sc_y = scissor_state->miny;
+      sc_w = scissor_state->maxx > scissor_state->minx
+         ? (uint32_t)(scissor_state->maxx - scissor_state->minx) : 0;
+      sc_h = scissor_state->maxy > scissor_state->miny
+         ? (uint32_t)(scissor_state->maxy - scissor_state->miny) : 0;
+      if (sc_w && sc_h) {
+         sc_enable = true;
+         nv_3d_set_scissor_n(&push, 0, (int32_t)sc_x, (int32_t)sc_y, sc_w, sc_h);
+         nv_3d_set_surface_clip(&push, sc_x, sc_y, sc_w, sc_h);
+      }
+   }
+   (void)color_clear_mask;
+   (void)stencil_clear_mask;
+
+   /* MRT clear when only specific colour targets requested (buffers bits 4..11) */
+   if ((buffers & PIPE_CLEAR_COLOR) && color_ui) {
+      unsigned ti;
+      bool any_mrt = false;
+      for (ti = 0; ti < 8; ti++) {
+         if (buffers & (PIPE_CLEAR_COLOR0 << ti)) {
+            nv_3d_emit_clear_surface_mrt(&push, ti, color_ui, true, true,
+                                         true, true);
+            any_mrt = true;
+         }
+      }
+      if (!any_mrt)
+         nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth,
+                                  stencil);
+      else if (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL))
+         nv_3d_emit_clear_surface(&push,
+                                  buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL),
+                                  NULL, (float)depth, stencil);
+   } else {
+      nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth, stencil);
+   }
+   (void)sc_enable;
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);
 }
@@ -946,10 +990,9 @@ nvgpu_clear(struct pipe_context *pctx, unsigned buffers,
             double depth, unsigned stencil)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
-   (void)scissor_state;
-   (void)color_clear_mask;
-   (void)stencil_clear_mask;
-   nvgpu_emit_clear_methods(ctx, buffers, color, depth, stencil);
+   nvgpu_emit_clear_methods(ctx, buffers, color, depth, stencil,
+                            scissor_state, color_clear_mask,
+                            stencil_clear_mask);
 }
 
 static void
