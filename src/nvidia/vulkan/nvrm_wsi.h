@@ -10,4 +10,7 @@
 VkResult nvrm_init_wsi(struct nvrm_physical_device *pdev);
 void nvrm_finish_wsi(struct nvrm_physical_device *pdev);
 
+VKAPI_ATTR VkResult VKAPI_CALL
+nvrm_QueuePresent2(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
+
 #endif /* NVRM_WSI_H */
