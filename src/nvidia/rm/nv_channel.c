@@ -50,6 +50,9 @@ nv_channel_resolve_class_copy(const struct nv_channel *ch, uint32_t explicit_cla
 {
    if (explicit_class)
       return explicit_class;
+   /* Prefer class that successfully RmAlloc'd under this channel */
+   if (ch && ch->class_copy_bound)
+      return ch->class_copy_bound;
    if (ch && ch->info && ch->info->class_copy)
       return ch->info->class_copy;
    return NV_CH_FALLBACK_COPY;
@@ -61,6 +64,8 @@ nv_channel_resolve_class_compute(const struct nv_channel *ch,
 {
    if (explicit_class)
       return explicit_class;
+   if (ch && ch->class_compute_bound)
+      return ch->class_compute_bound;
    if (ch && ch->info && ch->info->class_compute)
       return ch->info->class_compute;
    return NV_CH_FALLBACK_COMPUTE;
@@ -71,6 +76,8 @@ nv_channel_resolve_class_3d(const struct nv_channel *ch, uint32_t explicit_class
 {
    if (explicit_class)
       return explicit_class;
+   if (ch && ch->class_3d_bound)
+      return ch->class_3d_bound;
    if (ch && ch->info && ch->info->class_3d)
       return ch->info->class_3d;
    return NV_CH_FALLBACK_3D;
@@ -448,6 +455,55 @@ nv_channel_push_used(struct nv_channel *ch)
    return ch ? (ch->push_dw_used - ch->push_dw_base) : 0;
 }
 
+/*
+ * Try RmAlloc(h_class) under channel, then device, then subdevice.
+ * Some RM builds only accept engine objects under one of these parents.
+ */
+static int
+nv_channel_try_alloc_engine(struct nv_channel *ch, uint32_t h_class,
+                            uint32_t *h_out, uint32_t *h_parent_out)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch; (void)h_class; (void)h_out; (void)h_parent_out;
+   return -ENOSYS;
+#else
+   uint32_t parents[4];
+   unsigned n = 0, i;
+   int last = -ENOENT;
+
+   if (!ch || !ch->rm || !h_class || !h_out)
+      return -EINVAL;
+   if (h_parent_out)
+      *h_parent_out = 0;
+
+   parents[n++] = ch->h_channel;
+   if (ch->h_channel_group)
+      parents[n++] = ch->h_channel_group;
+   parents[n++] = nv_rm_device_device_handle(ch->rm);
+   {
+      uint32_t h_sub = nv_rm_device_subdevice_handle(ch->rm);
+      if (h_sub)
+         parents[n++] = h_sub;
+   }
+
+   for (i = 0; i < n; i++) {
+      uint32_t h = 0;
+      int r;
+      if (!parents[i])
+         continue;
+      r = nv_rm_alloc_object(ch->rm, parents[i], &h, h_class, NULL, 0);
+      if (r == 0 && h) {
+         *h_out = h;
+         if (h_parent_out)
+            *h_parent_out = parents[i];
+         return 0;
+      }
+      last = r ? r : -EIO;
+   }
+   return last;
+#endif
+}
+
 int
 nv_channel_ensure_engine_objects(struct nv_channel *ch)
 {
@@ -456,63 +512,152 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    return -ENOSYS;
 #else
    uint32_t cc, ccomp, c3;
+   /* Class fallbacks if refined class fails alloc (same method layouts often) */
+   uint32_t copy_alts[7];
+   uint32_t compute_alts[5];
+   uint32_t t3d_alts[4];
    int any_ok = 0;
    int last_fail = 0;
+   unsigned ai;
 
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
 
-   cc = nv_channel_resolve_class_copy(ch, 0);
-   ccomp = nv_channel_resolve_class_compute(ch, 0);
-   c3 = nv_channel_resolve_class_3d(ch, 0);
+   /*
+    * Use info/fallback only (not class_*_bound yet) to avoid skipping alternates
+    * when a prior partial bind exists.
+    */
+   cc = 0;
+   ccomp = 0;
+   c3 = 0;
+   if (ch->info) {
+      cc = ch->info->class_copy;
+      ccomp = ch->info->class_compute;
+      c3 = ch->info->class_3d;
+   }
+   if (!cc)
+      cc = NV_CH_FALLBACK_COPY;
+   if (!ccomp)
+      ccomp = NV_CH_FALLBACK_COMPUTE;
+   if (!c3)
+      c3 = NV_CH_FALLBACK_3D;
+
+   copy_alts[0] = cc;
+   copy_alts[1] = 0x0000c7b5u; /* AMPERE_DMA_COPY_B */
+   copy_alts[2] = 0x0000c6b5u; /* AMPERE_DMA_COPY_A */
+   copy_alts[3] = 0x0000c5b5u; /* TURING_DMA_COPY_A */
+   copy_alts[4] = 0x0000c3b5u; /* VOLTA_DMA_COPY_A */
+   copy_alts[5] = 0x0000c1b5u; /* PASCAL_DMA_COPY_B */
+   copy_alts[6] = 0x0000b0b5u; /* MAXWELL_DMA_COPY_A */
+
+   compute_alts[0] = ccomp;
+   compute_alts[1] = 0x0000c7c0u; /* AMPERE_COMPUTE_B */
+   compute_alts[2] = 0x0000c6c0u; /* AMPERE_COMPUTE_A */
+   compute_alts[3] = 0x0000c5c0u; /* TURING_COMPUTE_A */
+   compute_alts[4] = 0x0000c3c0u; /* VOLTA_COMPUTE_A */
+
+   t3d_alts[0] = c3;
+   t3d_alts[1] = 0x0000c797u;
+   t3d_alts[2] = 0x0000c697u;
+   t3d_alts[3] = 0x0000c597u; /* TURING_A_3D_A */
+
+   if (!ch->h_obj_copy) {
+      uint32_t tried[8];
+      unsigned nt = 0;
+      for (ai = 0; ai < sizeof(copy_alts) / sizeof(copy_alts[0]); ai++) {
+         uint32_t cl = copy_alts[ai];
+         uint32_t h = 0;
+         unsigned t;
+         int r;
+         if (!cl)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cl)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 8)
+            tried[nt++] = cl;
+         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         if (r == 0 && h) {
+            ch->h_obj_copy = h;
+            ch->class_copy_bound = cl;
+            any_ok = 1;
+            break;
+         }
+         last_fail = r ? r : -EIO;
+      }
+   } else {
+      any_ok = 1;
+   }
+
+   if (!ch->h_obj_compute) {
+      uint32_t tried[8];
+      unsigned nt = 0;
+      for (ai = 0; ai < sizeof(compute_alts) / sizeof(compute_alts[0]); ai++) {
+         uint32_t cl = compute_alts[ai];
+         uint32_t h = 0;
+         unsigned t;
+         int r;
+         if (!cl)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cl)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 8)
+            tried[nt++] = cl;
+         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         if (r == 0 && h) {
+            ch->h_obj_compute = h;
+            ch->class_compute_bound = cl;
+            any_ok = 1;
+            break;
+         }
+         if (!last_fail)
+            last_fail = r ? r : -EIO;
+      }
+   } else {
+      any_ok = 1;
+   }
+
+   if (!ch->h_obj_3d) {
+      uint32_t tried[8];
+      unsigned nt = 0;
+      for (ai = 0; ai < sizeof(t3d_alts) / sizeof(t3d_alts[0]); ai++) {
+         uint32_t cl = t3d_alts[ai];
+         uint32_t h = 0;
+         unsigned t;
+         int r;
+         if (!cl)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cl)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 8)
+            tried[nt++] = cl;
+         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         if (r == 0 && h) {
+            ch->h_obj_3d = h;
+            ch->class_3d_bound = cl;
+            any_ok = 1;
+            break;
+         }
+         if (!last_fail)
+            last_fail = r ? r : -EIO;
+      }
+   } else {
+      any_ok = 1;
+   }
 
    /*
-    * Allocate engine classes as children of the GPFIFO channel.  Params are
-    * often NULL/empty for DMA_COPY / COMPUTE / 3D (class-specific data is
-    * programmed via methods after SET_OBJECT with the class ID).
+    * If RM bound a different class than classlist refine, prefer the bound
+    * class for SET_OBJECT / resolve helpers on this channel (stored in
+    * class_*_bound; callers can read via channel fields).
     */
-   if (!ch->h_obj_copy && cc) {
-      uint32_t h = 0;
-      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, cc, NULL, 0);
-      if (r == 0 && h) {
-         ch->h_obj_copy = h;
-         ch->class_copy_bound = cc;
-         any_ok = 1;
-      } else {
-         last_fail = r ? r : -EIO;
-      }
-   } else if (ch->h_obj_copy) {
-      any_ok = 1;
-   }
-
-   if (!ch->h_obj_compute && ccomp) {
-      uint32_t h = 0;
-      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, ccomp, NULL, 0);
-      if (r == 0 && h) {
-         ch->h_obj_compute = h;
-         ch->class_compute_bound = ccomp;
-         any_ok = 1;
-      } else if (!last_fail) {
-         last_fail = r ? r : -EIO;
-      }
-   } else if (ch->h_obj_compute) {
-      any_ok = 1;
-   }
-
-   if (!ch->h_obj_3d && c3) {
-      uint32_t h = 0;
-      int r = nv_rm_alloc_object(ch->rm, ch->h_channel, &h, c3, NULL, 0);
-      if (r == 0 && h) {
-         ch->h_obj_3d = h;
-         ch->class_3d_bound = c3;
-         any_ok = 1;
-      } else if (!last_fail) {
-         last_fail = r ? r : -EIO;
-      }
-   } else if (ch->h_obj_3d) {
-      any_ok = 1;
-   }
-
    ch->engine_alloc_rc = any_ok ? 0 : (last_fail ? last_fail : -ENOENT);
    return ch->engine_alloc_rc;
 #endif
@@ -693,9 +838,13 @@ nv_channel_kickoff(struct nv_channel *ch)
    /*
     * Extra doorbell ring if submit_one did not (no token at submit time) but
     * we obtained token+map mid-submit — rare race with ensure_submit_ready.
+    * Second ring is harmless and helps if first ring raced GPPut visibility.
     */
-   if (!ring_doorbell && ch->usermode_map && ch->has_work_submit_token)
+   if (ch->usermode_map && ch->has_work_submit_token) {
+      if (!ring_doorbell)
+         nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
       nvidia_rm_doorbell_ring(ch->usermode_map, ch->work_submit_token);
+   }
 
    ch->push_dw_base = ch->push_dw_used;
    return 0;

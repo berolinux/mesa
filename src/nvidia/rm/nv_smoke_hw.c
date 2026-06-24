@@ -70,7 +70,8 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d"
            " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_notif=0x%x/0x%x"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
-           " g2_pre=%d g2_submit=%d g2_store=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
+           " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_store=%d"
+           " g2_host_sema=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
            p,
            (unsigned)res->slices_run, (unsigned)res->slices_ok,
            res->g1_rc, res->g2_rc, res->g3_rc,
@@ -85,7 +86,9 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            (unsigned)res->g1_notifier_status, (unsigned)res->g1_notifier_info32,
            (unsigned)res->g1_userd_gp_get, (unsigned)res->g1_userd_gp_put,
            (unsigned)res->g1_host_gpfifo_put,
-           res->g2_preflight_rc, res->g2_submit_rc, res->g2_store_rc,
+           res->g2_preflight_rc, res->g2_engine_alloc_rc,
+           (unsigned)res->g2_h_obj_compute,
+           res->g2_submit_rc, res->g2_store_rc, res->g2_host_sema_rc,
            (unsigned)res->g2_store_observed,
            (unsigned)res->g2_class_compute,
            (unsigned long long)res->g2_prog_gpu);
@@ -111,12 +114,15 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
    }
    if (res->g2_rc < 0 && (res->slices_run & NV_SMOKE_HW_G2)) {
       fprintf(stderr,
-              "%s: G2 bring-up hints: class_compute=0x%x prog=0x%llx submit=%d "
-              "store_rc=%d obs=0x%x (store_rc=-EIO=sema ok but shader store wrong; "
-              "prog=0 means exit-only / no store-imm shader uploaded)\n",
-              p, (unsigned)res->g2_class_compute,
+              "%s: G2 bring-up hints: class_compute=0x%x h_comp=0x%x eng_rc=%d "
+              "prog=0x%llx submit=%d store_rc=%d host_sema=%d obs=0x%x\n"
+              "  host_sema ok, submit fail => QMD/compute class/SPA (not kickoff)\n"
+              "  host_sema fail => same as G1 kickoff issues\n"
+              "  store_rc=-EIO => sema ok but shader store wrong; prog=0 => no store-imm shader\n",
+              p, (unsigned)res->g2_class_compute, (unsigned)res->g2_h_obj_compute,
+              res->g2_engine_alloc_rc,
               (unsigned long long)res->g2_prog_gpu,
-              res->g2_submit_rc, res->g2_store_rc,
+              res->g2_submit_rc, res->g2_store_rc, res->g2_host_sema_rc,
               (unsigned)res->g2_store_observed);
    }
 }
@@ -370,7 +376,10 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G2) {
       res.slices_run |= NV_SMOKE_HW_G2;
+      (void)nv_channel_ensure_engine_objects(ch);
       res.g2_class_compute = nv_channel_resolve_class_compute(ch, 0);
+      res.g2_engine_alloc_rc = ch->engine_alloc_rc;
+      res.g2_h_obj_compute = ch->h_obj_compute;
       res.g2_preflight_rc = nv_channel_submit_preflight(ch, NULL);
       if (!sc->qmd_gpu || !sc->qmd_cpu) {
          res.g2_rc = -EINVAL;
@@ -433,6 +442,13 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g2_store_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G2;
             }
+         } else if (res.g2_submit_rc != 0 && res.g2_submit_rc != -EAGAIN) {
+            /* Secondary: host sema — kickoff ok vs QMD/compute class issue */
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            res.g2_host_sema_rc = nv_channel_gpfifo_host_sema_submit(
+               ch, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+               check_notifier);
          }
          if (res.g2_rc && !r)
             r = res.g2_rc;

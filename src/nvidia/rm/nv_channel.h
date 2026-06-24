@@ -49,6 +49,9 @@ struct nv_channel {
    uint32_t h_obj_copy;            /* DMA copy class (e.g. AMPERE_DMA_COPY_A) */
    uint32_t h_obj_compute;         /* compute class */
    uint32_t h_obj_3d;              /* 3D class */
+   uint32_t h_obj_copy_parent;     /* RM parent used for alloc (for correct free) */
+   uint32_t h_obj_compute_parent;
+   uint32_t h_obj_3d_parent;
    uint32_t class_copy_bound;      /* class ID used for h_obj_copy alloc (0 if none) */
    uint32_t class_compute_bound;
    uint32_t class_3d_bound;
@@ -115,10 +118,11 @@ nv_channel_push_begin(struct nv_channel *ch, uint32_t need_dwords);
 int nv_channel_ensure_submit_ready(struct nv_channel *ch);
 
 /**
- * Best-effort RmAlloc of copy/compute/3D engine objects as children of the
- * channel (parent = h_channel).  Required on many RM paths before methods on
- * those engines are valid; SET_OBJECT in the PB still uses the hardware class ID.
- * Safe to call multiple times; skips classes already allocated.
+ * Best-effort RmAlloc of copy/compute/3D engine objects (parent = channel,
+ * then channel_group, device, subdevice; class alternates on failure).
+ * Required on many RM paths before engine methods; SET_OBJECT still uses class ID.
+ * On success, class_*_bound is set and resolve_class_* prefers it.
+ * Safe to call multiple times; skips engines already allocated.
  */
 int nv_channel_ensure_engine_objects(struct nv_channel *ch);
 
