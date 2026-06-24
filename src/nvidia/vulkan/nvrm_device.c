@@ -739,12 +739,14 @@ nvrm_device_smoke_hw_run(struct nvrm_device *device, uint32_t slices,
       }
    }
 
+   /* Allocate compute smoke shader; G2 runner uploads store-imm variant when needed */
    if (!device->smoke_cs) {
       device->smoke_cs = nv_shader_create(device->rm, NV_SHADER_KIND_COMPUTE);
       if (device->smoke_cs)
          (void)nv_shader_upload_compute_smoke(device->smoke_cs, 0, 0, 0, 16);
    }
 
+   /* First silicon: NV_SMOKE_HW_SLICES=1 runs G1 only (see nv_smoke_hw.h) */
    r = nv_smoke_hw_run_on_channel(ch, device->smoke_hw, slices,
                                   device->smoke_cs, timeout_ns, true, &res);
    /* Always log when env requested (bring-up); verbose adds phase detail */

@@ -65,19 +65,35 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
       return;
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
-           " g1_submit=%d g1_payload=%d g1_sema=0x%x g1_class=0x%x\n",
+           " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_sema=0x%x g1_class=0x%x"
+           " g2_submit=%d g2_store=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
            p,
            (unsigned)res->slices_run, (unsigned)res->slices_ok,
            res->g1_rc, res->g2_rc, res->g3_rc,
-           res->g1_submit_rc, res->g1_payload_rc,
+           res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
            (unsigned)res->g1_sema_observed,
-           (unsigned)res->g1_class_copy);
+           (unsigned)res->g1_class_copy,
+           res->g2_submit_rc, res->g2_store_rc,
+           (unsigned)res->g2_store_observed,
+           (unsigned)res->g2_class_compute,
+           (unsigned long long)res->g2_prog_gpu);
    if (res->g1_rc < 0 && (res->slices_run & NV_SMOKE_HW_G1)) {
       fprintf(stderr,
-              "%s: G1 bring-up hints: class_copy=0x%x submit_rc=%d "
-              "(EINVAL=bad class/args, ETIMEDOUT/EIO=sema wait, "
-              "payload_rc=-EIO means sema ok but CE copy wrong)\n",
-              p, (unsigned)res->g1_class_copy, res->g1_submit_rc);
+              "%s: G1 bring-up hints: class_copy=0x%x submit_rc=%d sema_only_rc=%d "
+              "(EINVAL=bad class/args, ETIMEDOUT=sema/GPFIFO wait, "
+              "payload_rc=-EIO=sema ok but CE copy wrong; sema_only isolates CE vs sema)\n",
+              p, (unsigned)res->g1_class_copy, res->g1_submit_rc,
+              res->g1_sema_only_rc);
+   }
+   if (res->g2_rc < 0 && (res->slices_run & NV_SMOKE_HW_G2)) {
+      fprintf(stderr,
+              "%s: G2 bring-up hints: class_compute=0x%x prog=0x%llx submit=%d "
+              "store_rc=%d obs=0x%x (store_rc=-EIO=sema ok but shader store wrong; "
+              "prog=0 means exit-only / no store-imm shader uploaded)\n",
+              p, (unsigned)res->g2_class_compute,
+              (unsigned long long)res->g2_prog_gpu,
+              res->g2_submit_rc, res->g2_store_rc,
+              (unsigned)res->g2_store_observed);
    }
 }
 
@@ -216,14 +232,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;
-      if (ch->info)
-         res.g1_class_copy = ch->info->class_copy;
+      res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
       if (!sc->src_gpu || !sc->dst_gpu) {
-         res.g1_rc = -EINVAL;
-         res.g1_submit_rc = -EINVAL;
-         r = res.g1_rc;
-      } else if (!res.g1_class_copy && !ch->info) {
-         /* No class_copy on channel — submit will also fail; record early */
          res.g1_rc = -EINVAL;
          res.g1_submit_rc = -EINVAL;
          r = res.g1_rc;
@@ -255,6 +265,22 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                res.g1_payload_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G1;
             }
+         } else if (res.g1_submit_rc != 0) {
+            /*
+             * Secondary probe: sema-only CE fence.  If this succeeds, sema/GPFIFO
+             * path works and failure is in copy methods/class; if it fails too,
+             * fix channel/submit/sema before debugging CE pitch.
+             */
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            res.g1_sema_only_rc = nv_channel_g1_ce_sema_only_submit(ch, 0,
+                                                                    sc->sema_gpu,
+                                                                    sc->sema_cpu,
+                                                                    sc->sema_payload,
+                                                                    true, to,
+                                                                    check_notifier);
+            if (sc->sema_cpu)
+               res.g1_sema_observed = sc->sema_cpu[0];
          }
          if (res.g1_rc && !r)
             r = res.g1_rc;
@@ -263,13 +289,20 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G2) {
       res.slices_run |= NV_SMOKE_HW_G2;
+      res.g2_class_compute = nv_channel_resolve_class_compute(ch, 0);
       if (!sc->qmd_gpu || !sc->qmd_cpu) {
          res.g2_rc = -EINVAL;
+         res.g2_submit_rc = -EINVAL;
          if (!r)
             r = res.g2_rc;
       } else {
          uint32_t store_imm = sc->g2_store_imm ? sc->g2_store_imm : 0xdeadbeefu;
          uint64_t store_gpu = sc->dst_gpu; /* reuse G1 dst BO as G2 store target */
+         bool expect_store = false;
+
+         /* Reset sema between slices (G1 may have left payload set) */
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
 
          /* Prefer store-imm smoke shader targeting dst_bo[0] */
          if (g2_shader && sc->rm && store_gpu) {
@@ -281,6 +314,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                prog = g2_shader->code_gpu_addr;
                if (g2_shader->register_count)
                   regs = g2_shader->register_count;
+               expect_store = true;
             }
          }
          if (!prog && g2_shader && g2_shader->uploaded) {
@@ -288,21 +322,30 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             if (g2_shader->register_count)
                regs = g2_shader->register_count;
          }
-         res.g2_rc = nv_channel_g2_compute_smoke_sema_submit(ch, 0, prog, regs,
-                                                             sass, sc->qmd_gpu,
-                                                             sc->qmd_cpu,
-                                                             sc->sema_gpu,
-                                                             sc->sema_cpu,
-                                                             sc->sema_payload,
-                                                             true, true, true,
-                                                             to, check_notifier);
-         if (res.g2_rc == 0) {
+         res.g2_prog_gpu = prog;
+         res.g2_submit_rc = nv_channel_g2_compute_smoke_sema_submit(ch, 0, prog,
+                                                                    regs, sass,
+                                                                    sc->qmd_gpu,
+                                                                    sc->qmd_cpu,
+                                                                    sc->sema_gpu,
+                                                                    sc->sema_cpu,
+                                                                    sc->sema_payload,
+                                                                    true, true, true,
+                                                                    to,
+                                                                    check_notifier);
+         res.g2_rc = res.g2_submit_rc;
+         if (sc->dst_cpu)
+            res.g2_store_observed = ((volatile uint32_t *)sc->dst_cpu)[0];
+         if (res.g2_submit_rc == 0) {
             /* If store-imm path and mapped, verify first dword */
-            if (store_gpu && sc->dst_cpu &&
-                ((volatile uint32_t *)sc->dst_cpu)[0] != store_imm)
+            if (expect_store && store_gpu && sc->dst_cpu &&
+                ((volatile uint32_t *)sc->dst_cpu)[0] != store_imm) {
+               res.g2_store_rc = -EIO;
                res.g2_rc = -EIO;
-            else
+            } else {
+               res.g2_store_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G2;
+            }
          }
          if (res.g2_rc && !r)
             r = res.g2_rc;

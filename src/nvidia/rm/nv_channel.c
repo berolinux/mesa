@@ -34,6 +34,48 @@ now_ns(void)
    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Fallback class IDs (open-gpu-kernel-modules class headers; match nv_device_info) */
+#ifndef NV_CH_FALLBACK_COPY
+#define NV_CH_FALLBACK_COPY     0x0000c6b5u  /* AMPERE_DMA_COPY_A / NVC6B5-class */
+#endif
+#ifndef NV_CH_FALLBACK_COMPUTE
+#define NV_CH_FALLBACK_COMPUTE  0x0000c3c0u  /* VOLTA_COMPUTE_A / NVC3C0 methods */
+#endif
+#ifndef NV_CH_FALLBACK_3D
+#define NV_CH_FALLBACK_3D       0x0000c597u  /* TURING_A_3D_A / NVC597 methods */
+#endif
+
+uint32_t
+nv_channel_resolve_class_copy(const struct nv_channel *ch, uint32_t explicit_class)
+{
+   if (explicit_class)
+      return explicit_class;
+   if (ch && ch->info && ch->info->class_copy)
+      return ch->info->class_copy;
+   return NV_CH_FALLBACK_COPY;
+}
+
+uint32_t
+nv_channel_resolve_class_compute(const struct nv_channel *ch,
+                                 uint32_t explicit_class)
+{
+   if (explicit_class)
+      return explicit_class;
+   if (ch && ch->info && ch->info->class_compute)
+      return ch->info->class_compute;
+   return NV_CH_FALLBACK_COMPUTE;
+}
+
+uint32_t
+nv_channel_resolve_class_3d(const struct nv_channel *ch, uint32_t explicit_class)
+{
+   if (explicit_class)
+      return explicit_class;
+   if (ch && ch->info && ch->info->class_3d)
+      return ch->info->class_3d;
+   return NV_CH_FALLBACK_3D;
+}
+
 struct nv_channel *
 nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
                   uint32_t gpfifo_entries, uint32_t push_dwords)
@@ -549,11 +591,7 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   cc = class_copy;
-   if (!cc && ch->info)
-      cc = ch->info->class_copy;
-   if (!cc)
-      return -EINVAL;
+   cc = nv_channel_resolve_class_copy(ch, class_copy);
 
    if (sema_reset && sema_cpu)
       sema_cpu[0] = 0;
@@ -592,11 +630,7 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   cc = class_copy;
-   if (!cc && ch->info)
-      cc = ch->info->class_copy;
-   if (!cc)
-      return -EINVAL;
+   cc = nv_channel_resolve_class_copy(ch, class_copy);
 
    if (sema_reset && sema_cpu)
       sema_cpu[0] = 0;
@@ -641,11 +675,7 @@ nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
    if (!sema_payload && sema_gpu_addr)
       sema_payload = 0x42u;
 
-   cc = class_compute;
-   if (!cc && ch->info)
-      cc = ch->info->class_compute;
-   if (!cc)
-      return -EINVAL;
+   cc = nv_channel_resolve_class_compute(ch, class_compute);
 
    if (sema_reset && sema_cpu)
       sema_cpu[0] = 0;
@@ -734,11 +764,7 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   c3 = class_3d;
-   if (!c3 && ch->info)
-      c3 = ch->info->class_3d;
-   if (!c3)
-      return -EINVAL;
+   c3 = nv_channel_resolve_class_3d(ch, class_3d);
 
    if (!ct_format)
       ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
@@ -788,11 +814,7 @@ nv_channel_g3_sema_only_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   c3 = class_3d;
-   if (!c3 && ch->info)
-      c3 = ch->info->class_3d;
-   if (!c3)
-      return -EINVAL;
+   c3 = nv_channel_resolve_class_3d(ch, class_3d);
 
    if (sema_reset && sema_cpu)
       sema_cpu[0] = 0;

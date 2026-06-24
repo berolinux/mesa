@@ -81,6 +81,18 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
 void
 nv_channel_destroy(struct nv_channel *ch);
 
+/**
+ * Resolve engine class for smoke/submit when ch->info is missing or class is 0.
+ * order: explicit arg > ch->info > Turing/Ampere-ish fallbacks (host encode
+ * selftests use NVC6B5/NVC3C0/NVC597 placeholders; HW should use real classlist).
+ */
+uint32_t nv_channel_resolve_class_copy(const struct nv_channel *ch,
+                                       uint32_t explicit_class);
+uint32_t nv_channel_resolve_class_compute(const struct nv_channel *ch,
+                                          uint32_t explicit_class);
+uint32_t nv_channel_resolve_class_3d(const struct nv_channel *ch,
+                                     uint32_t explicit_class);
+
 /** Begin recording methods into the pushbuffer; returns pointer to write at */
 uint32_t *
 nv_channel_push_begin(struct nv_channel *ch, uint32_t need_dwords);

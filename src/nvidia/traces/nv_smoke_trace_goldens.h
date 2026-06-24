@@ -5,6 +5,7 @@
  * Self-generated host encode goldens (from nv_smoke_selftest / nvidia_smoke_host).
  * Not proprietary captures — used for regression of our encoder only.
  * Replace with 610.43.02 / HW traces when available via trace_compare_*.
+ * Regenerated tick58 from live encode.
  */
 #ifndef NV_SMOKE_TRACE_GOLDENS_H
 #define NV_SMOKE_TRACE_GOLDENS_H
@@ -25,7 +26,6 @@ static const uint32_t nv_smoke_golden_g1_push[] = {
 };
 #define nv_smoke_golden_g1_push_DWORDS  24u
 #define nv_smoke_golden_g1_push_BYTES   (24u * 4u)
-
 static const uint32_t nv_smoke_golden_g2_push[] = {
    0x00012000u, 0x0000c3c0u, 0x00012096u, 0x00000000u, 0x00012087u, 0x00000001u,
    0x0001208au, 0x00000000u, 0x0001208bu, 0x00000000u, 0x0001208cu, 0x00000000u,
@@ -55,7 +55,6 @@ static const uint32_t nv_smoke_golden_g2_push[] = {
 };
 #define nv_smoke_golden_g2_push_DWORDS  150u
 #define nv_smoke_golden_g2_push_BYTES   (150u * 4u)
-
 static const uint32_t nv_smoke_golden_g2_qmd[] = {
    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00001440u, 0xfc000000u,
    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x04000000u,
@@ -71,7 +70,6 @@ static const uint32_t nv_smoke_golden_g2_qmd[] = {
 };
 #define nv_smoke_golden_g2_qmd_DWORDS  64u
 #define nv_smoke_golden_g2_qmd_BYTES   (64u * 4u)
-
 static const uint32_t nv_smoke_golden_g3_push[] = {
    0x00010000u, 0x0000c597u, 0x00010200u, 0x00000000u, 0x00010201u, 0x00500000u,
    0x00010202u, 0x00000040u, 0x00010203u, 0x00000040u, 0x00010204u, 0x000000d5u,
@@ -82,7 +80,6 @@ static const uint32_t nv_smoke_golden_g3_push[] = {
 };
 #define nv_smoke_golden_g3_push_DWORDS  34u
 #define nv_smoke_golden_g3_push_BYTES   (34u * 4u)
-
 
 /** Compare live encode against embedded goldens (host only). Returns 0 ok. */
 static inline int

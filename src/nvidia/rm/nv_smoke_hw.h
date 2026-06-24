@@ -75,8 +75,15 @@ struct nv_smoke_hw_result {
    /* G1 phase detail for bring-up (0 = n/a or success path) */
    int g1_submit_rc;   /* return from nv_channel_g1_ce_copy_sema_submit */
    int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
+   int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
    uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
    uint32_t g1_class_copy;    /* class used (0 if unknown) */
+   /* G2 phase detail */
+   int g2_submit_rc;
+   int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
+   uint32_t g2_store_observed; /* dst_cpu[0] after G2 when mapped */
+   uint32_t g2_class_compute;
+   uint64_t g2_prog_gpu;
 };
 
 /** True if NV_SMOKE_HW_VERBOSE is set (non-empty, not "0"). */
