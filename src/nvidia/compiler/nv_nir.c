@@ -113,15 +113,23 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
       return nv_sass_emit_mov_rr(sb, rd, ra);
 
    case nir_op_ineg:
-   case nir_op_fneg:
-      /* approximate: 0 - Ra via IADD/FADD with RZ — use IADD Ra, -1 style MOV for now */
+      /* IADD Rd, RZ, -Ra */
       ra = src_reg(&alu->src[0].src);
-      return nv_sass_emit_iadd_rri(sb, rd, ra, 0); /* placeholder identity; refine later */
+      return nv_sass_emit_iadd_neg_rb(sb, rd, 0xff, ra);
+
+   case nir_op_fneg:
+      /* FADD Rd, -Ra, +0 via FMNMX/MOV+MUFU; approximate with FADD Ra, RZ using neg later */
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_fadd_rrr(sb, rd, ra, 0xff);
 
    case nir_op_iabs:
+      ra = src_reg(&alu->src[0].src);
+      /* IMNMX Rd, Ra, -Ra max — approximate MOV for now; real path uses IMNMX */
+      return nv_sass_emit_imnmx(sb, rd, ra, ra, true, true);
+
    case nir_op_fabs:
       ra = src_reg(&alu->src[0].src);
-      return nv_sass_emit_mov_rr(sb, rd, ra);
+      return nv_sass_emit_fmnmx(sb, rd, ra, ra, true);
 
    case nir_op_iadd:
       ra = src_reg(&alu->src[0].src);
@@ -131,8 +139,7 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
    case nir_op_isub:
       ra = src_reg(&alu->src[0].src);
       rb = src_reg(&alu->src[1].src);
-      /* IADD Rd, Ra, -Rb not yet; emit IADD as placeholder */
-      return nv_sass_emit_iadd_rrr(sb, rd, ra, rb);
+      return nv_sass_emit_iadd_neg_rb(sb, rd, ra, rb);
 
    case nir_op_imul:
       ra = src_reg(&alu->src[0].src);
@@ -184,26 +191,91 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
       return nv_sass_emit_lop3(sb, rd, ra, 0xff, 0xff, 0x33);
 
    case nir_op_ishl:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_shf_l(sb, rd, ra, rb);
+
    case nir_op_ishr:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_shf_r(sb, rd, ra, rb, true);
+
    case nir_op_ushr:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_shf_r(sb, rd, ra, rb, false);
+
    case nir_op_imin:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_imnmx(sb, rd, ra, rb, false, true);
+
    case nir_op_imax:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_imnmx(sb, rd, ra, rb, true, true);
+
    case nir_op_umin:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_imnmx(sb, rd, ra, rb, false, false);
+
    case nir_op_umax:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_imnmx(sb, rd, ra, rb, true, false);
+
    case nir_op_fmin:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_fmnmx(sb, rd, ra, rb, false);
+
    case nir_op_fmax:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_fmnmx(sb, rd, ra, rb, true);
+
    case nir_op_f2i32:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_f2i(sb, rd, ra, true);
+
    case nir_op_f2u32:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_f2i(sb, rd, ra, false);
+
    case nir_op_i2f32:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_i2f(sb, rd, ra, true);
+
    case nir_op_u2f32:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_i2f(sb, rd, ra, false);
+
    case nir_op_frcp:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_RCP);
+
    case nir_op_frsq:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_RSQ);
+
    case nir_op_fsqrt:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_SQRT);
+
+   case nir_op_flog2:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_LG2);
+
+   case nir_op_fexp2:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_EX2);
+
    case nir_op_ffloor:
    case nir_op_fceil:
    case nir_op_ftrunc:
    case nir_op_fround_even:
-      /* Not yet encoded: pass through first source so dependent code has a value */
+      /* F2F rounding modes not yet split; pass through */
       ra = src_reg(&alu->src[0].src);
       return nv_sass_emit_mov_rr(sb, rd, ra);
 
@@ -236,11 +308,28 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       return nv_sass_emit_stg_u32(sb, ra, rb);
 
    case nir_intrinsic_load_ubo:
-   case nir_intrinsic_load_uniform:
-   case nir_intrinsic_load_push_constant:
-      /* UBO path: for now S2R/MOV zero; real c[bank][off] encoding later */
+   case nir_intrinsic_load_uniform: {
+      /* LDC Rd, c[bank][off].  Bank/offset from const sources when available. */
+      uint8_t bank = 0;
+      uint16_t off_dw = 0;
       rd = ssa_reg(&intr->def);
-      return nv_sass_emit_mov_ri(sb, rd, 0);
+      if (nir_src_is_const(intr->src[0]))
+         bank = (uint8_t)(nir_src_as_uint(intr->src[0]) & 0x1f);
+      if (intr->intrinsic == nir_intrinsic_load_ubo &&
+          nir_src_is_const(intr->src[1]))
+         off_dw = (uint16_t)((nir_src_as_uint(intr->src[1]) / 4) & 0xffff);
+      return nv_sass_emit_ldc(sb, rd, bank, off_dw);
+   }
+
+   case nir_intrinsic_load_push_constant:
+      /* Push constants mapped to constant bank 1 on NVIDIA 3D class */
+      rd = ssa_reg(&intr->def);
+      {
+         uint16_t off_dw = 0;
+         if (nir_src_is_const(intr->src[0]))
+            off_dw = (uint16_t)((nir_src_as_uint(intr->src[0]) / 4) & 0xffff);
+         return nv_sass_emit_ldc(sb, rd, 1, off_dw);
+      }
 
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_local_invocation_id:
@@ -307,9 +396,33 @@ static bool
 isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
 {
    uint8_t rd = ssa_reg(&tex->def);
+   uint8_t ra = 0;
+   uint8_t tex_idx = 0;
+   unsigned i;
+
    sb->has_tex = true;
-   /* TEX/TLD not yet fully encoded; write zero result so dependents compile */
-   return nv_sass_emit_mov_ri(sb, rd, 0);
+   for (i = 0; i < tex->num_srcs; i++) {
+      if (tex->src[i].src_type == nir_tex_src_coord ||
+          tex->src[i].src_type == nir_tex_src_backend1)
+         ra = src_reg(&tex->src[i].src);
+      if (tex->src[i].src_type == nir_tex_src_texture_handle ||
+          tex->src[i].src_type == nir_tex_src_sampler_handle)
+         tex_idx = (uint8_t)(tex->texture_index & 0xff);
+   }
+   if (!tex_idx)
+      tex_idx = (uint8_t)(tex->texture_index & 0xff);
+
+   switch (tex->op) {
+   case nir_texop_txf:
+   case nir_texop_txf_ms:
+      return nv_sass_emit_tld(sb, rd, ra, tex_idx);
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+   default:
+      return nv_sass_emit_tex(sb, rd, ra, tex_idx);
+   }
 }
 
 static bool

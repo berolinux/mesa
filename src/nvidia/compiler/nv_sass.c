@@ -223,3 +223,133 @@ nv_sass_buf_copy_out(const struct nv_sass_buf *b,
    memcpy(dst, b->dwords, n * sizeof(uint32_t));
    return n;
 }
+
+
+bool
+nv_sass_emit_shf_l(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb), NV_SASS_SHF_L_HI_BASE);
+}
+
+bool
+nv_sass_emit_shf_r(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb,
+                   bool arithmetic)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   uint32_t hi = NV_SASS_SHF_R_HI_BASE;
+   if (arithmetic)
+      hi |= (1u << 12); /* arithmetic shift flag approx */
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb), hi);
+}
+
+bool
+nv_sass_emit_imnmx(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb,
+                   bool is_max, bool is_signed)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   uint32_t hi = NV_SASS_IMNMX_HI_BASE;
+   if (is_max)
+      hi |= NV_SASS_MINMAX_MAX_BIT;
+   if (!is_signed)
+      hi |= (1u << 10); /* unsigned variant bit approx */
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb), hi);
+}
+
+bool
+nv_sass_emit_fmnmx(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb,
+                   bool is_max)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   uint32_t hi = NV_SASS_FMNMX_HI_BASE;
+   if (is_max)
+      hi |= NV_SASS_MINMAX_MAX_BIT;
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb), hi);
+}
+
+bool
+nv_sass_emit_f2i(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_signed)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   uint32_t hi = NV_SASS_F2I_HI_BASE;
+   if (!is_signed)
+      hi |= (1u << 13);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, 0xff), hi);
+}
+
+bool
+nv_sass_emit_i2f(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_signed)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   uint32_t hi = NV_SASS_I2F_HI_BASE;
+   if (!is_signed)
+      hi |= (1u << 13);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, 0xff), hi);
+}
+
+bool
+nv_sass_emit_mufu(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t mufu_op)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   return nv_sass_emit_raw(b,
+                           (uint32_t)rd | ((uint32_t)ra << 8) | ((uint32_t)mufu_op << 20),
+                           NV_SASS_MUFU_HI_BASE);
+}
+
+bool
+nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank,
+                 uint16_t offset_dwords)
+{
+   nv_sass_note_reg(b, rd);
+   /* LDC Rd, c[bank][offset]; bank in bits, offset in dwords * 4 for byte addr */
+   uint32_t lo = (uint32_t)rd | ((uint32_t)(offset_dwords & 0xffff) << 8);
+   uint32_t hi = NV_SASS_LDC_HI_BASE | ((uint32_t)(bank & 0x1f) << 0);
+   return nv_sass_emit_raw(b, lo, hi);
+}
+
+bool
+nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
+                 uint8_t tex_idx)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra_coord);
+   b->has_tex = true;
+   return nv_sass_emit_raw(b,
+                           pack_lo_rrr(rd, ra_coord, 0) | ((uint32_t)tex_idx << 24),
+                           NV_SASS_TEX_HI_BASE);
+}
+
+bool
+nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
+                 uint8_t tex_idx)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra_coord);
+   b->has_tex = true;
+   return nv_sass_emit_raw(b,
+                           pack_lo_rrr(rd, ra_coord, 0) | ((uint32_t)tex_idx << 24),
+                           NV_SASS_TLD_HI_BASE);
+}
+
+bool
+nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
+                         uint8_t rb)
+{
+   /* IADD Rd, Ra, -Rb: set negate-B modifier in hi (bit varies by SM; bit 9 common) */
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb),
+                           NV_SASS_IADD_HI_BASE | (1u << 9));
+}

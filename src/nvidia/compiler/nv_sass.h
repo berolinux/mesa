@@ -77,6 +77,42 @@ extern "C" {
 /* BRA / relative branch (lo has offset, hi has BRA class) */
 #define NV_SASS_BRA_HI_BASE     0xe2400000u
 
+/* SHF.L / SHF.R — shift left/right (Maxwell SHF class approx) */
+#define NV_SASS_SHF_L_HI_BASE   0x5cf80000u
+#define NV_SASS_SHF_R_HI_BASE   0x5cf80200u  /* direction bit in hi */
+
+/* IMNMX / FMNMX — integer/float min/max */
+#define NV_SASS_IMNMX_HI_BASE   0x5c600000u
+#define NV_SASS_FMNMX_HI_BASE   0x5c600800u  /* FP variant bit in hi */
+
+/* F2I / I2F conversions */
+#define NV_SASS_F2I_HI_BASE     0x5cb00000u
+#define NV_SASS_I2F_HI_BASE     0x5cb80000u
+
+/* MUFU — multi-function (RCP/RSQ/SQRT/LG2/EX2/SIN/COS approximations) */
+#define NV_SASS_MUFU_HI_BASE    0x50800000u
+#define NV_SASS_MUFU_RCP        0
+#define NV_SASS_MUFU_RSQ        1
+#define NV_SASS_MUFU_LG2        2
+#define NV_SASS_MUFU_EX2        3
+#define NV_SASS_MUFU_SIN        4
+#define NV_SASS_MUFU_COS        5
+#define NV_SASS_MUFU_SQRT       8
+
+/* LDC — load from constant bank c[bank][offset] (Maxwell/Pascal style) */
+#define NV_SASS_LDC_HI_BASE     0xef900000u
+
+/* TEX / TLD — texture fetch / texture load (binding index in instr) */
+#define NV_SASS_TEX_HI_BASE     0x86180000u
+#define NV_SASS_TLD_HI_BASE     0x86100000u
+
+/* FSET / ISET — compare producing predicate/register result (approx) */
+#define NV_SASS_FSET_HI_BASE    0x58080000u
+#define NV_SASS_ISET_HI_BASE    0x5b6c0000u
+
+/* IMNMX max bit */
+#define NV_SASS_MINMAX_MAX_BIT  (1u << 23)
+
 /* Special register indices (subset) */
 #define NV_SASS_SR_LANEID       0
 #define NV_SASS_SR_VIRTCFG      2
@@ -142,6 +178,18 @@ bool nv_sass_emit_lop3(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
 bool nv_sass_emit_s2r(struct nv_sass_buf *b, uint8_t rd, uint8_t sr);
 bool nv_sass_emit_ldg_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
 bool nv_sass_emit_stg_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data);
+
+bool nv_sass_emit_shf_l(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
+bool nv_sass_emit_shf_r(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb, bool arithmetic);
+bool nv_sass_emit_imnmx(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb, bool is_max, bool is_signed);
+bool nv_sass_emit_fmnmx(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb, bool is_max);
+bool nv_sass_emit_f2i(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_signed);
+bool nv_sass_emit_i2f(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_signed);
+bool nv_sass_emit_mufu(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t mufu_op);
+bool nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank, uint16_t offset_dwords);
+bool nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
+bool nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
+bool nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 
 /* Copy first min(count, dst_cap_dwords) into dst; returns dwords copied. */
 uint32_t nv_sass_buf_copy_out(const struct nv_sass_buf *b,
