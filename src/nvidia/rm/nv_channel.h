@@ -127,6 +127,13 @@ int nv_channel_ensure_submit_ready(struct nv_channel *ch);
 int nv_channel_ensure_engine_objects(struct nv_channel *ch);
 
 /**
+ * Ensure USERD / GPFIFO / push BOs are mapped into device VASpace (NVOS46).
+ * Channel alloc and GPFIFO entry addresses require real GPU VAs, not only RM
+ * phys offsets.  Called from ensure_submit_ready; safe to call repeatedly.
+ */
+int nv_channel_ensure_buffers_gpu_va(struct nv_channel *ch);
+
+/**
  * G1/G2 bring-up preflight: ensure_submit_ready + verify channel has USERD/GPFIFO/push
  * and is scheduled.  On failure sets *detail_out (optional) to a short errno-ish code:
  *  -EINVAL missing objects, -EAGAIN not scheduled, 0 ok (token/doorbell optional).

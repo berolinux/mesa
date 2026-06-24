@@ -46,3 +46,20 @@ if meson.can_run_host_binaries() or true
        suite : ['nvidia'],
        is_parallel : false)
 endif
+
+# Standalone HW smoke CLI (needs libdrm_nvidia at runtime; builds with idep_nvidia_rm)
+if dep_libdrm_nvidia.found()
+  nvidia_smoke_hw_cli = executable(
+    'nvidia_smoke_hw_cli',
+    files('tools/nvidia_smoke_hw_cli.c'),
+    include_directories : [
+      inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
+      include_directories('common'),
+      include_directories('rm'),
+    ],
+    c_args : [no_override_init_args],
+    dependencies : [idep_nvidia_rm, idep_mesautil, dep_libdrm_nvidia],
+    install : false,
+    build_by_default : false,
+  )
+endif

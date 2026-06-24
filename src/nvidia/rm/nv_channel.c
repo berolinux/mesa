@@ -375,6 +375,9 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       }
    }
 
+   /* Ensure VAS mappings for ring/push/userd (may refine gpu_addr after alloc) */
+   (void)nv_channel_ensure_buffers_gpu_va(ch);
+
    /* Engine objects under channel (copy/compute/3d) — best-effort before first methods */
    (void)nv_channel_ensure_engine_objects(ch);
 
@@ -673,6 +676,49 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
 }
 
 int
+nv_channel_ensure_buffers_gpu_va(struct nv_channel *ch)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+   return -ENOSYS;
+#else
+   int r = 0, one;
+
+   if (!ch || !ch->rm)
+      return -EINVAL;
+
+   (void)nv_rm_device_ensure_vaspace(ch->rm);
+
+   if (ch->userd_bo) {
+      one = nv_rm_bo_map_gpu_va(ch->userd_bo);
+      if (one == 0)
+         /* refresh CPU/GPU views if needed; userd pointer is CPU map */
+         ;
+      else if (!r)
+         r = one;
+   }
+   if (ch->gpfifo_bo) {
+      one = nv_rm_bo_map_gpu_va(ch->gpfifo_bo);
+      if (one == 0)
+         ch->gpfifo_gpu_addr = nv_rm_bo_gpu_offset(ch->gpfifo_bo);
+      else if (!r)
+         r = one;
+   }
+   if (ch->push_bo) {
+      one = nv_rm_bo_map_gpu_va(ch->push_bo);
+      if (one == 0)
+         ch->push_gpu_addr = nv_rm_bo_gpu_offset(ch->push_bo);
+      else if (!r)
+         r = one;
+   }
+   if (ch->notifier_bo)
+      (void)nv_rm_bo_map_gpu_va(ch->notifier_bo);
+
+   return r;
+#endif
+}
+
+int
 nv_channel_ensure_submit_ready(struct nv_channel *ch)
 {
 #if !defined(HAVE_LIBDRM_NVIDIA)
@@ -681,6 +727,9 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
 #else
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
+
+   /* GPU VAs for GPFIFO/push must be valid before kickoff (NVOS46 remap if needed) */
+   (void)nv_channel_ensure_buffers_gpu_va(ch);
 
    /* Engine objects (idempotent) — needed before CE/compute/3D methods on some RM builds */
    (void)nv_channel_ensure_engine_objects(ch);

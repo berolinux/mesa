@@ -43,11 +43,14 @@
  *   - g1_userd_gp_get/put vs g1_hput: ring consumption after failed G1
  *   - g1_svram/g1_bvram: sema/src-dst BO placement (VRAM vs sysmem)
  *   - Scratch sema prefers VRAM+CPU map; src/dst prefer sysmem for host verify
+ *   - Channel buffers remapped via NVOS46 (nv_channel_ensure_buffers_gpu_va)
  *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
  *   nv_smoke_hw_run_oneshot(rm, ch, slices, g2_shader, timeout_ns, ...)
+ *   nv_smoke_hw_run_standalone(drm_fd, gpu_index, slices, ...)  // no app needed
  *   nvrm_device_smoke_hw_run(device, slices, timeout_ns)  // vulkan/nvrm
+ *   tools/nvidia_smoke_hw_cli --slices 1   // first silicon gate CLI
  *
  * Host-only (no GPU): build/run nvidia_smoke_host or nv_smoke_selftest_host().
  * Compiler G2 store-imm path: nv_nir_compile_g2_store_imm_smoke() /
@@ -195,6 +198,16 @@ int nv_smoke_hw_run_oneshot(struct nv_rm_device *rm, struct nv_channel *ch,
                             uint32_t slices, struct nv_shader *g2_shader,
                             uint64_t timeout_ns, bool check_notifier,
                             struct nv_smoke_hw_result *result_out);
+
+/**
+ * Standalone bring-up: open RM (drm_fd, often -1 or /dev/dri/cardN fd), create
+ * a graphics GPFIFO channel, run slices, destroy.  No Gallium/Vulkan required.
+ * Returns 0 if all requested slices ok, negative on open/channel/slice failure.
+ * result_out optional.  Logs via nv_smoke_hw_log_result when verbose or fail.
+ */
+int nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
+                               uint64_t timeout_ns, bool check_notifier,
+                               struct nv_smoke_hw_result *result_out);
 
 #ifdef __cplusplus
 }

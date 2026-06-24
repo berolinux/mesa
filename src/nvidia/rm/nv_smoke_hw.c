@@ -551,3 +551,59 @@ nv_smoke_hw_run_oneshot(struct nv_rm_device *rm, struct nv_channel *ch,
    nv_smoke_hw_scratch_destroy(&sc);
    return run_r;
 }
+
+int
+nv_smoke_hw_run_standalone(int drm_fd, int gpu_index, uint32_t slices,
+                           uint64_t timeout_ns, bool check_notifier,
+                           struct nv_smoke_hw_result *result_out)
+{
+   struct nv_rm_device *rm = NULL;
+   struct nv_channel *ch = NULL;
+   struct nv_smoke_hw_result res;
+   int r, run_r = -ENODEV;
+
+   memset(&res, 0, sizeof(res));
+   res.g1_rc = 1;
+   res.g2_rc = 1;
+   res.g3_rc = 1;
+
+   if (!slices)
+      slices = nv_smoke_hw_env_slices();
+   if (!timeout_ns)
+      timeout_ns = NV_SMOKE_HW_DEFAULT_TIMEOUT_NS;
+
+   rm = nv_rm_device_open(drm_fd, gpu_index);
+   if (!rm) {
+      if (nv_smoke_hw_env_verbose())
+         fprintf(stderr,
+                 "nv_smoke_hw_run_standalone: nv_rm_device_open(fd=%d,gpu=%d) failed "
+                 "(need nvidia.ko + /dev/nvidia* / libdrm_nvidia)\n",
+                 drm_fd, gpu_index);
+      if (result_out)
+         *result_out = res;
+      return -ENODEV;
+   }
+
+   /* engine_type 0 => nv_channel_create defaults to GRAPHICS (0x1) */
+   ch = nv_channel_create(rm, 0, 0, 0);
+   if (!ch) {
+      if (nv_smoke_hw_env_verbose())
+         fprintf(stderr, "nv_smoke_hw_run_standalone: nv_channel_create failed\n");
+      nv_rm_device_close(rm);
+      if (result_out)
+         *result_out = res;
+      return -EIO;
+   }
+
+   run_r = nv_smoke_hw_run_oneshot(rm, ch, slices, NULL, timeout_ns,
+                                   check_notifier, &res);
+   if (result_out)
+      *result_out = res;
+   if (nv_smoke_hw_env_verbose() || run_r != 0)
+      nv_smoke_hw_log_result(&res, "nv_smoke_hw_standalone");
+
+   nv_channel_destroy(ch);
+   nv_rm_device_close(rm);
+   (void)r;
+   return run_r;
+}
