@@ -201,6 +201,53 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
                                   uint64_t wait_timeout_ns,
                                   bool check_notifier);
 
+/**
+ * G2 vertical slice (hardware path): compute SET_OBJECT + SPA/CWD init
+ * (optional) + invalidate + smoke QMD materialize + SEND_PCAS with QMD sema
+ * release0, then submit_wait_sema.
+ *
+ * qmd_host must be host-writable 256B at qmd_gpu_addr (scratch BO). program_gpu
+ * may be 0 for encode/submit plumbing tests (HW will fault if shader invalid).
+ * class_compute 0 uses ch->info->class_compute.
+ */
+int
+nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
+                                        uint32_t class_compute,
+                                        uint64_t program_gpu_addr,
+                                        uint32_t register_count,
+                                        uint8_t sass_version,
+                                        uint64_t qmd_gpu_addr,
+                                        void *qmd_host,
+                                        uint64_t sema_gpu_addr,
+                                        volatile uint32_t *sema_cpu,
+                                        uint32_t sema_payload,
+                                        bool sema_reset,
+                                        bool emit_init_state,
+                                        bool method_invalidate,
+                                        uint64_t wait_timeout_ns,
+                                        bool check_notifier);
+
+/**
+ * G2 with caller-filled nv_qmd_desc (e.g. store-imm smoke shader params).
+ * sema on QMD release0 via sema_gpu_addr/payload if non-zero.
+ */
+struct nv_qmd_desc; /* from nv_qmd.h — include before use in C files */
+
+int
+nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
+                                           uint32_t class_compute,
+                                           const struct nv_qmd_desc *desc,
+                                           uint64_t qmd_gpu_addr,
+                                           void *qmd_host,
+                                           uint64_t sema_gpu_addr,
+                                           volatile uint32_t *sema_cpu,
+                                           uint32_t sema_payload,
+                                           bool sema_reset,
+                                           bool emit_init_state,
+                                           bool method_invalidate,
+                                           uint64_t wait_timeout_ns,
+                                           bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

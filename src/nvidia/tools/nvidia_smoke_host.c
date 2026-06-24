@@ -16,14 +16,36 @@
 
 #include "nv_smoke_selftest.h"
 
+static int
+dump_dwords(const char *path, const uint32_t *dw, uint32_t n, int quiet)
+{
+   FILE *f;
+   if (!path || !dw || !n)
+      return 0;
+   f = fopen(path, "wb");
+   if (!f) {
+      perror(path);
+      return -1;
+   }
+   if (fwrite(dw, 4, n, f) != n) {
+      perror("fwrite");
+      fclose(f);
+      return -1;
+   }
+   fclose(f);
+   if (!quiet)
+      fprintf(stderr, "wrote %u dwords to %s\n", n, path);
+   return 0;
+}
+
 static void
 usage(const char *argv0)
 {
    fprintf(stderr,
-           "Usage: %s [--quiet] [--dump-g1 PATH] [--check-g1-golden]\n"
+           "Usage: %s [--quiet] [--dump-g1 PATH] [--dump-g2 PATH] "
+           "[--dump-qmd PATH] [--check-g1-golden] [--check-g2-golden]\n"
            "  Host-only NVIDIA vertical-slice selftest (no GPU).\n"
-           "  --dump-g1 PATH   write G1 CE sema push dwords as binary\n"
-           "  --check-g1-golden  run G1 twice and require byte-identical streams\n",
+           "  G1 = CE sema push; G2 = compute QMD/PCAS sema push.\n",
            argv0);
 }
 
@@ -31,10 +53,11 @@ int
 main(int argc, char **argv)
 {
    int quiet = 0;
-   int check_golden = 0;
-   const char *dump_g1 = NULL;
+   int check_g1 = 0, check_g2 = 0;
+   const char *dump_g1 = NULL, *dump_g2 = NULL, *dump_qmd = NULL;
    int i, r;
-   uint32_t push_a[128], push_b[128];
+   uint32_t push_a[320], push_b[320];
+   uint32_t qmd_a[NV_QMD_DWORDS], qmd_b[NV_QMD_DWORDS];
    uint32_t na = 0, nb = 0;
 
    for (i = 1; i < argc; i++) {
@@ -44,9 +67,15 @@ main(int argc, char **argv)
          usage(argv[0]);
          return 0;
       } else if (!strcmp(argv[i], "--check-g1-golden"))
-         check_golden = 1;
+         check_g1 = 1;
+      else if (!strcmp(argv[i], "--check-g2-golden"))
+         check_g2 = 1;
       else if (!strcmp(argv[i], "--dump-g1") && i + 1 < argc)
          dump_g1 = argv[++i];
+      else if (!strcmp(argv[i], "--dump-g2") && i + 1 < argc)
+         dump_g2 = argv[++i];
+      else if (!strcmp(argv[i], "--dump-qmd") && i + 1 < argc)
+         dump_qmd = argv[++i];
       else {
          usage(argv[0]);
          return 2;
@@ -63,13 +92,13 @@ main(int argc, char **argv)
    if (r != 0)
       return 1;
 
-   if (check_golden || dump_g1) {
+   if (check_g1 || dump_g1) {
       r = nv_smoke_selftest_g1_ce_sema_push(NULL, 0, push_a,
                                             (uint32_t)(sizeof(push_a) / 4),
                                             &na);
       if (r != 0) {
          if (!quiet)
-            fprintf(stderr, "g1 capture A: FAIL %d\n", r);
+            fprintf(stderr, "g1 capture: FAIL %d\n", r);
          return 1;
       }
       r = nv_smoke_selftest_g1_ce_sema_push(NULL, 0, push_b,
@@ -83,24 +112,8 @@ main(int argc, char **argv)
       }
       if (!quiet)
          fprintf(stderr, "g1 golden/determinism: PASS (%u dwords)\n", na);
-
-      if (dump_g1) {
-         FILE *f = fopen(dump_g1, "wb");
-         if (!f) {
-            perror(dump_g1);
-            return 1;
-         }
-         if (fwrite(push_a, 4, na, f) != na) {
-            perror("fwrite");
-            fclose(f);
-            return 1;
-         }
-         fclose(f);
-         if (!quiet)
-            fprintf(stderr, "wrote %u dwords to %s\n", na, dump_g1);
-      }
-
-      /* Self-golden: compare second emit against first as trace */
+      if (dump_g1 && dump_dwords(dump_g1, push_a, na, quiet))
+         return 1;
       r = nv_smoke_selftest_g1_ce_sema_push(push_a, na, push_b,
                                             (uint32_t)(sizeof(push_b) / 4),
                                             &nb);
@@ -111,6 +124,44 @@ main(int argc, char **argv)
       }
       if (!quiet)
          fprintf(stderr, "g1 trace_compare self-golden: PASS\n");
+   }
+
+   if (check_g2 || dump_g2 || dump_qmd) {
+      r = nv_smoke_selftest_g2_compute_sema_push(NULL, 0, push_a,
+                                                 (uint32_t)(sizeof(push_a) / 4),
+                                                 &na, qmd_a);
+      if (r != 0) {
+         if (!quiet)
+            fprintf(stderr, "g2 capture: FAIL %d\n", r);
+         return 1;
+      }
+      r = nv_smoke_selftest_g2_compute_sema_push(NULL, 0, push_b,
+                                                 (uint32_t)(sizeof(push_b) / 4),
+                                                 &nb, qmd_b);
+      if (r != 0 || na != nb || memcmp(push_a, push_b, (size_t)na * 4) != 0 ||
+          memcmp(qmd_a, qmd_b, NV_QMD_BYTES) != 0) {
+         if (!quiet)
+            fprintf(stderr, "g2 golden/determinism: FAIL r=%d na=%u nb=%u\n",
+                    r, na, nb);
+         return 1;
+      }
+      if (!quiet)
+         fprintf(stderr, "g2 golden/determinism: PASS (%u dwords, QMD %u B)\n",
+                 na, (unsigned)NV_QMD_BYTES);
+      if (dump_g2 && dump_dwords(dump_g2, push_a, na, quiet))
+         return 1;
+      if (dump_qmd && dump_dwords(dump_qmd, qmd_a, NV_QMD_DWORDS, quiet))
+         return 1;
+      r = nv_smoke_selftest_g2_compute_sema_push(push_a, na, push_b,
+                                                 (uint32_t)(sizeof(push_b) / 4),
+                                                 &nb, qmd_b);
+      if (r != 0) {
+         if (!quiet)
+            fprintf(stderr, "g2 trace_compare self-golden: FAIL %d\n", r);
+         return 1;
+      }
+      if (!quiet)
+         fprintf(stderr, "g2 trace_compare self-golden: PASS\n");
    }
 
    return 0;

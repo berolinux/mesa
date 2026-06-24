@@ -256,9 +256,111 @@ nv_smoke_selftest_g1_ce_sema_push(const uint32_t *trace_push,
    return 0;
 }
 
+/* G2 smoke defaults (match libdrm NVIDIA_SMOKE_G2_* / channel submit helpers) */
+#define NV_SMOKE_G2_PROG_GPU_DEFAULT   0x100000ull
+#define NV_SMOKE_G2_QMD_GPU_DEFAULT    0x400000ull
+#define NV_SMOKE_G2_SEMA_GPU_DEFAULT   0x300000ull
+#define NV_SMOKE_G2_SEMA_PAYLOAD_DEFAULT 0x42u
+#define NV_SMOKE_G2_REGS_DEFAULT       16u
+#define NV_SMOKE_G2_SASS_DEFAULT       0x86u
+
+/**
+ * G2 host slice: emit compute smoke dispatch (SET_OBJECT + invalidate +
+ * LOAD_INLINE_QMD + SEND_PCAS) into scratch pushbuffer; verify QMD sema
+ * release0 in materialized QMD and SEND_PCAS_A present in method stream.
+ * Optional trace_push compares full push (trace_dwords).
+ */
+static inline int
+nv_smoke_selftest_g2_compute_sema_push(const uint32_t *trace_push,
+                                       uint32_t trace_dwords,
+                                       uint32_t *push_out,
+                                       uint32_t push_cap_dwords,
+                                       uint32_t *push_dwords_out,
+                                       uint32_t *qmd_out)
+{
+   uint32_t buf_a[320], buf_b[320];
+   uint32_t *buf = push_out ? push_out : buf_a;
+   uint32_t cap = push_out ? push_cap_dwords : (uint32_t)(sizeof(buf_a) / 4);
+   uint32_t qmd_local[NV_QMD_DWORDS];
+   uint32_t *qmd = qmd_out ? qmd_out : qmd_local;
+   struct nv_push p;
+   struct nv_qmd_desc desc;
+   uint32_t n, i;
+   uint32_t sema_payload = NV_SMOKE_G2_SEMA_PAYLOAD_DEFAULT;
+   uint64_t sema_gpu = NV_SMOKE_G2_SEMA_GPU_DEFAULT;
+   uint64_t prog_gpu = NV_SMOKE_G2_PROG_GPU_DEFAULT;
+   uint64_t qmd_gpu = NV_SMOKE_G2_QMD_GPU_DEFAULT;
+   bool saw_pcas_a = false, saw_inline_qmd = false;
+   uint32_t diff = 0;
+   int r;
+
+   if (cap < 64)
+      return -200;
+
+   nv_qmd_desc_init_smoke(&desc, prog_gpu, NV_SMOKE_G2_REGS_DEFAULT,
+                          NV_SMOKE_G2_SASS_DEFAULT, sema_gpu, sema_payload);
+   nv_qmd_encode_full(&desc, qmd);
+   if (!nv_qmd_verify_sema_release0(qmd, sema_gpu, sema_payload))
+      return -201;
+
+   memset(buf, 0, (size_t)cap * 4);
+   nv_push_init(&p, buf, cap);
+   nv_compute_emit_init_state(&p, 0xc3c0 /* placeholder class; methods only */,
+                              0, 0);
+   nv_compute_emit_dispatch_with_sema(&p, &desc, qmd_gpu, NULL, 0,
+                                      sema_gpu, sema_payload, true);
+   n = nv_push_dw_count(&p);
+   if (n < 20 || n > cap)
+      return -202;
+   if (push_dwords_out)
+      *push_dwords_out = n;
+
+   for (i = 0; i + 1 < n; i++) {
+      uint32_t hdr = buf[i];
+      uint32_t data = buf[i + 1];
+      uint32_t method = (hdr & 0x1fff) << 2;
+      uint32_t subch = (hdr >> 13) & 7;
+      if ((hdr >> 29) != 0)
+         continue;
+      if (subch != NV_PUSH_SUBCH_COMPUTE)
+         continue;
+      if (method == NVC3C0_SEND_PCAS_A) {
+         if (data != (uint32_t)(qmd_gpu >> 8))
+            return -203;
+         saw_pcas_a = true;
+      } else if (method == NVC3C0_LOAD_INLINE_QMD_DATA(0)) {
+         if (data != qmd[0])
+            return -204;
+         saw_inline_qmd = true;
+      }
+   }
+   if (!saw_pcas_a)
+      return -205;
+   if (!saw_inline_qmd)
+      return -206;
+
+   /* Determinism */
+   memset(buf_b, 0, sizeof(buf_b));
+   nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
+   nv_compute_emit_init_state(&p, 0xc3c0, 0, 0);
+   nv_compute_emit_dispatch_with_sema(&p, &desc, qmd_gpu, NULL, 0,
+                                      sema_gpu, sema_payload, true);
+   if (nv_push_dw_count(&p) != n || memcmp(buf, buf_b, (size_t)n * 4) != 0)
+      return -207;
+
+   if (trace_push && trace_dwords) {
+      r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
+                                 &diff);
+      if (r == -3)
+         return 0;
+      return r == 0 ? 0 : -210 + r;
+   }
+   return 0;
+}
+
 /**
  * Run QMD encode determinism + sema enable bit + compute SPH EXIT validate +
- * G1 CE sema push shape.  Returns 0 on success; negative code = which check.
+ * G1/G2 push shape.  Returns 0 on success; negative code = which check.
  */
 static inline int
 nv_smoke_selftest_host(void)
@@ -272,6 +374,10 @@ nv_smoke_selftest_host(void)
    r = nv_smoke_selftest_g1_ce_sema_push(NULL, 0, NULL, 0, NULL);
    if (r != 0)
       return r; /* -100..-122 */
+
+   r = nv_smoke_selftest_g2_compute_sema_push(NULL, 0, NULL, 0, NULL, NULL);
+   if (r != 0)
+      return r; /* -200..-212 */
 
    r = nv_qmd_trace_golden_selftest(qmd_a, qmd_b);
    if (r != 0)
@@ -312,9 +418,10 @@ nv_smoke_selftest_host(void)
    if (!(sph.sph[0] & (1u << 11))) /* does_global_store bit */
       return -65;
 
-   /* Self-golden: G1 stream must match itself via trace_compare path */
+   /* Self-golden: G1/G2 streams must match themselves via trace_compare */
    {
       uint32_t g1a[128], g1b[128];
+      uint32_t g2a[320], g2b[320];
       uint32_t na = 0, nb = 0;
       r = nv_smoke_selftest_g1_ce_sema_push(NULL, 0, g1a,
                                             (uint32_t)(sizeof(g1a) / 4), &na);
@@ -323,9 +430,21 @@ nv_smoke_selftest_host(void)
       r = nv_smoke_selftest_g1_ce_sema_push(g1a, na, g1b,
                                             (uint32_t)(sizeof(g1b) / 4), &nb);
       if (r != 0)
-         return -140 + r; /* -141 size, -142 mismatch, etc. */
+         return -140 + r;
       if (na != nb)
          return -145;
+      r = nv_smoke_selftest_g2_compute_sema_push(NULL, 0, g2a,
+                                                 (uint32_t)(sizeof(g2a) / 4),
+                                                 &na, NULL);
+      if (r != 0)
+         return -150 + r;
+      r = nv_smoke_selftest_g2_compute_sema_push(g2a, na, g2b,
+                                                 (uint32_t)(sizeof(g2b) / 4),
+                                                 &nb, NULL);
+      if (r != 0)
+         return -160 + r;
+      if (na != nb)
+         return -165;
    }
 
    return 0;
@@ -355,6 +474,14 @@ nv_smoke_selftest_g1_against_trace(const uint32_t *trace_push,
       return 0;
    return nv_smoke_selftest_g1_ce_sema_push(trace_push, trace_dwords,
                                             NULL, 0, NULL);
+}
+
+static inline int
+nv_smoke_capture_g2_push(uint32_t *out, uint32_t out_cap_dwords,
+                         uint32_t *dwords_out, uint32_t *qmd_out)
+{
+   return nv_smoke_selftest_g2_compute_sema_push(NULL, 0, out, out_cap_dwords,
+                                                 dwords_out, qmd_out);
 }
 
 /* Non-inline entry for meson-linked libnvidia_common / tools */

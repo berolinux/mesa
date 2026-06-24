@@ -232,6 +232,27 @@ nv_qmd_set(uint32_t *qmd, unsigned hi, unsigned lo, uint64_t value)
    nv_qmd_mw_set(qmd, NV_QMD_DWORDS, hi, lo, value);
 }
 
+/** Read bits [hi:lo] inclusive from QMD (inverse of nv_qmd_mw_set). */
+static inline uint64_t
+nv_qmd_mw_get(const uint32_t *words, unsigned nwords, unsigned hi, unsigned lo)
+{
+   unsigned bit, w, b;
+   uint64_t value = 0;
+   for (bit = lo; bit <= hi; bit++) {
+      w = bit / 32;
+      b = bit % 32;
+      if (w < nwords && (words[w] & (1u << b)))
+         value |= (1ull << (bit - lo));
+   }
+   return value;
+}
+
+static inline uint64_t
+nv_qmd_get(const uint32_t *qmd, unsigned hi, unsigned lo)
+{
+   return nv_qmd_mw_get(qmd, NV_QMD_DWORDS, hi, lo);
+}
+
 /** Encode a QMD v02.02 descriptor into a 64-dword buffer. */
 static inline void
 nv_qmd_encode(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
@@ -914,36 +935,22 @@ static inline bool
 nv_qmd_verify_sema_release0(const uint32_t qmd[NV_QMD_DWORDS],
                             uint64_t expect_addr, uint32_t expect_payload)
 {
-   uint32_t lo, hi, payload;
+   uint32_t lo, hi, payload, en;
    uint64_t addr;
-   if (!qmd || !expect_addr)
+   if (!qmd || !expect_addr || !expect_payload)
       return false;
-   /* MW bits for enable0 at 138; address/payload via encoded dwords — use
-    * encode_full on a temp desc and memcmp key fields instead of bit scrape
-    * for portability across minor QMD field revisions. */
-   {
-      struct nv_qmd_desc d;
-      uint32_t ref[NV_QMD_DWORDS];
-      memset(&d, 0, sizeof(d));
-      d.program_addr = 0x1000; /* non-zero so encode is non-trivial */
-      d.grid_x = d.grid_y = d.grid_z = 1;
-      d.cta_x = d.cta_y = d.cta_z = 1;
-      d.register_count = 16;
-      d.barrier_count = 1;
-      d.sass_version = 0x50;
-      d.sema_release0_addr = expect_addr;
-      d.sema_release0_value = expect_payload;
-      nv_qmd_encode_full(&d, ref);
-      lo = ref[/* approximate: release0 lower often in mid QMD; compare whole */
-               0];
-      (void)lo;
-      (void)hi;
-      (void)payload;
-      (void)addr;
-      /* Full buffer compare of sema-bearing region: dwords 20..40 typically */
-      return memcmp(&qmd[16], &ref[16], 24 * sizeof(uint32_t)) == 0 ||
-             memcmp(qmd, ref, NV_QMD_BYTES) == 0;
-   }
+   en = nv_qmd_get(qmd, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0);
+   if (!en)
+      return false;
+   lo = nv_qmd_get(qmd, NV_QMD_F_RELEASE0_ADDRESS_LOWER);
+   hi = nv_qmd_get(qmd, NV_QMD_F_RELEASE0_ADDRESS_UPPER);
+   payload = nv_qmd_get(qmd, NV_QMD_F_RELEASE0_PAYLOAD);
+   addr = ((uint64_t)(hi & 0xff) << 32) | (uint64_t)lo;
+   if (addr != expect_addr)
+      return false;
+   if (payload != expect_payload)
+      return false;
+   return true;
 }
 
 /**

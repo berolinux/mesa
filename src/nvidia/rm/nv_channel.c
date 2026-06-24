@@ -6,6 +6,7 @@
 #include "nv_channel.h"
 #include "nv_copy_methods.h"
 #include "nv_push.h"
+#include "nv_qmd.h"
 #include "nv_rm.h"
 
 #include <errno.h>
@@ -610,4 +611,98 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
+                                           uint32_t class_compute,
+                                           const struct nv_qmd_desc *desc,
+                                           uint64_t qmd_gpu_addr,
+                                           void *qmd_host,
+                                           uint64_t sema_gpu_addr,
+                                           volatile uint32_t *sema_cpu,
+                                           uint32_t sema_payload,
+                                           bool sema_reset,
+                                           bool emit_init_state,
+                                           bool method_invalidate,
+                                           uint64_t wait_timeout_ns,
+                                           bool check_notifier)
+{
+   struct nv_push push;
+   struct nv_qmd_desc local;
+   uint32_t *map;
+   /* SET_OBJECT + SPA/CWD + invalidate + 64x LOAD_INLINE_QMD + PCAS ~ 200 dwords */
+   uint32_t need = 256;
+   uint32_t cc;
+
+   if (!ch || !desc || !qmd_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload && sema_gpu_addr)
+      sema_payload = 0x42u;
+
+   cc = class_compute;
+   if (!cc && ch->info)
+      cc = ch->info->class_compute;
+   if (!cc)
+      return -EINVAL;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   local = *desc;
+   if (sema_gpu_addr && sema_payload)
+      nv_qmd_desc_set_sema_release0(&local, sema_gpu_addr, sema_payload);
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   if (emit_init_state)
+      nv_compute_emit_init_state(&push, cc, 0 /* spa */, 0 /* cwd slots */);
+   else
+      nv_compute_set_object(&push, cc);
+
+   /* class_compute 0: object/subch already set above */
+   nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr, qmd_host,
+                                      0, sema_gpu_addr, sema_payload,
+                                      method_invalidate);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
+                                        uint32_t class_compute,
+                                        uint64_t program_gpu_addr,
+                                        uint32_t register_count,
+                                        uint8_t sass_version,
+                                        uint64_t qmd_gpu_addr,
+                                        void *qmd_host,
+                                        uint64_t sema_gpu_addr,
+                                        volatile uint32_t *sema_cpu,
+                                        uint32_t sema_payload,
+                                        bool sema_reset,
+                                        bool emit_init_state,
+                                        bool method_invalidate,
+                                        uint64_t wait_timeout_ns,
+                                        bool check_notifier)
+{
+   struct nv_qmd_desc desc;
+
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
+                          sass_version, sema_gpu_addr, sema_payload);
+   return nv_channel_g2_compute_dispatch_sema_submit(ch, class_compute, &desc,
+                                                     qmd_gpu_addr, qmd_host,
+                                                     sema_gpu_addr, sema_cpu,
+                                                     sema_payload, sema_reset,
+                                                     emit_init_state,
+                                                     method_invalidate,
+                                                     wait_timeout_ns,
+                                                     check_notifier);
 }
