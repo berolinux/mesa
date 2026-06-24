@@ -110,6 +110,39 @@ extern "C" {
 #define NV_SASS_FSET_HI_BASE    0x58080000u
 #define NV_SASS_ISET_HI_BASE    0x5b6c0000u
 
+/* ISETP — integer compare to predicate (Maxwell/Pascal approx) */
+#define NV_SASS_ISETP_HI_BASE   0x5b6c0000u
+#define NV_SASS_FSETP_HI_BASE   0x5bb00000u
+
+/* SELP — select predicated (Rd = cond ? Ra : Rb) */
+#define NV_SASS_SELP_HI_BASE    0x5c980000u
+
+/* SHFL — warp shuffle (idx/up/down/bfly modes in hi bits) */
+#define NV_SASS_SHFL_HI_BASE    0xef100000u
+#define NV_SASS_SHFL_MODE_IDX   0
+#define NV_SASS_SHFL_MODE_UP    1
+#define NV_SASS_SHFL_MODE_DOWN  2
+#define NV_SASS_SHFL_MODE_BFLY  3
+
+/* BAR.SYNC — CTA barrier (compute workgroup barrier) */
+#define NV_SASS_BAR_HI_BASE     0xf0a80000u
+
+/* ATOM / ATOMS — global/shared atomics (add/exch/cas approximations) */
+#define NV_SASS_ATOM_HI_BASE    0xed000000u
+#define NV_SASS_ATOM_OP_ADD     0
+#define NV_SASS_ATOM_OP_MIN     1
+#define NV_SASS_ATOM_OP_MAX     2
+#define NV_SASS_ATOM_OP_INC     3
+#define NV_SASS_ATOM_OP_DEC     4
+#define NV_SASS_ATOM_OP_AND     5
+#define NV_SASS_ATOM_OP_OR      6
+#define NV_SASS_ATOM_OP_XOR     7
+#define NV_SASS_ATOM_OP_EXCH    8
+#define NV_SASS_ATOM_OP_CAS     9
+
+/* MEMBAR — memory barrier */
+#define NV_SASS_MEMBAR_HI_BASE  0xef980000u
+
 /* IMNMX max bit */
 #define NV_SASS_MINMAX_MAX_BIT  (1u << 23)
 
@@ -190,6 +223,23 @@ bool nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank, uint16_t 
 bool nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
 bool nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
 bool nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
+
+/* Predicated select / compare / control / atomics / barriers */
+bool nv_sass_emit_selp(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb,
+                       uint8_t pred);
+bool nv_sass_emit_isetp(struct nv_sass_buf *b, uint8_t pred_dst, uint8_t ra,
+                        uint8_t rb, bool is_signed, bool is_eq);
+bool nv_sass_emit_fsetp(struct nv_sass_buf *b, uint8_t pred_dst, uint8_t ra,
+                        uint8_t rb, bool is_eq);
+bool nv_sass_emit_shfl(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
+                       uint8_t rb_idx, uint8_t mode);
+bool nv_sass_emit_bar_sync(struct nv_sass_buf *b, uint8_t barrier_id);
+bool nv_sass_emit_membar(struct nv_sass_buf *b);
+bool nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
+                       uint8_t rb_data, uint8_t atom_op);
+bool nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset);
+bool nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
+                           uint8_t pred, bool not_pred);
 
 /* Copy first min(count, dst_cap_dwords) into dst; returns dwords copied. */
 uint32_t nv_sass_buf_copy_out(const struct nv_sass_buf *b,

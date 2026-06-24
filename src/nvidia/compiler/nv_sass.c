@@ -308,6 +308,105 @@ nv_sass_emit_mufu(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t mufu_op
 }
 
 bool
+nv_sass_emit_selp(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb,
+                  uint8_t pred)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   /* SELP Rd, Ra, Rb, Pu — predicate in hi low bits (approx) */
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb),
+                           NV_SASS_SELP_HI_BASE | ((uint32_t)(pred & 7) << 8));
+}
+
+bool
+nv_sass_emit_isetp(struct nv_sass_buf *b, uint8_t pred_dst, uint8_t ra,
+                   uint8_t rb, bool is_signed, bool is_eq)
+{
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   uint32_t hi = NV_SASS_ISETP_HI_BASE;
+   if (!is_signed)
+      hi |= (1u << 10);
+   if (is_eq)
+      hi |= (1u << 14); /* EQ vs LT/LE etc; refined later */
+   return nv_sass_emit_raw(b,
+                           ((uint32_t)(pred_dst & 7) << 0) |
+                           ((uint32_t)ra << 8) | ((uint32_t)rb << 16),
+                           hi);
+}
+
+bool
+nv_sass_emit_fsetp(struct nv_sass_buf *b, uint8_t pred_dst, uint8_t ra,
+                   uint8_t rb, bool is_eq)
+{
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb);
+   uint32_t hi = NV_SASS_FSETP_HI_BASE;
+   if (is_eq)
+      hi |= (1u << 14);
+   return nv_sass_emit_raw(b,
+                           ((uint32_t)(pred_dst & 7) << 0) |
+                           ((uint32_t)ra << 8) | ((uint32_t)rb << 16),
+                           hi);
+}
+
+bool
+nv_sass_emit_shfl(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
+                  uint8_t rb_idx, uint8_t mode)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra);
+   nv_sass_note_reg(b, rb_idx);
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra, rb_idx),
+                           NV_SASS_SHFL_HI_BASE | ((uint32_t)(mode & 3) << 12));
+}
+
+bool
+nv_sass_emit_bar_sync(struct nv_sass_buf *b, uint8_t barrier_id)
+{
+   /* BAR.SYNC barrier_id — CTA-wide barrier for compute */
+   return nv_sass_emit_raw(b, (uint32_t)(barrier_id & 0x1f), NV_SASS_BAR_HI_BASE);
+}
+
+bool
+nv_sass_emit_membar(struct nv_sass_buf *b)
+{
+   return nv_sass_emit_raw(b, 0, NV_SASS_MEMBAR_HI_BASE);
+}
+
+bool
+nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
+                  uint8_t rb_data, uint8_t atom_op)
+{
+   nv_sass_note_reg(b, rd);
+   nv_sass_note_reg(b, ra_addr);
+   nv_sass_note_reg(b, rb_data);
+   b->has_global_store = true;
+   return nv_sass_emit_raw(b, pack_lo_rrr(rd, ra_addr, rb_data),
+                           NV_SASS_ATOM_HI_BASE | ((uint32_t)(atom_op & 0xf) << 9));
+}
+
+bool
+nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset)
+{
+   /* BRA offset — offset in instructions (approx; byte scale refined later) */
+   uint32_t imm = (uint32_t)rel_insn_offset & 0xffffffu;
+   return nv_sass_emit_raw(b, imm, NV_SASS_BRA_HI_BASE);
+}
+
+bool
+nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
+                      uint8_t pred, bool not_pred)
+{
+   uint32_t imm = (uint32_t)rel_insn_offset & 0xffffffu;
+   uint32_t hi = NV_SASS_BRA_HI_BASE | ((uint32_t)(pred & 7) << 8);
+   if (not_pred)
+      hi |= (1u << 12);
+   return nv_sass_emit_raw(b, imm, hi);
+}
+
+bool
 nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank,
                  uint16_t offset_dwords)
 {
