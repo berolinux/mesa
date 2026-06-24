@@ -399,14 +399,23 @@ nv_channel_destroy(struct nv_channel *ch)
 #if defined(HAVE_LIBDRM_NVIDIA)
    if (ch->rm) {
       uint32_t h_dev = nv_rm_device_device_handle(ch->rm);
-      /* Free engine objects before channel (parent = channel) */
-      if (ch->h_channel) {
-         if (ch->h_obj_copy)
-            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_copy);
-         if (ch->h_obj_compute)
-            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_compute);
-         if (ch->h_obj_3d)
-            nv_rm_free_object(ch->rm, ch->h_channel, ch->h_obj_3d);
+      /* Free engine objects before channel (use recorded alloc parent) */
+      if (ch->h_obj_copy) {
+         uint32_t hp = ch->h_obj_copy_parent ? ch->h_obj_copy_parent
+                                             : ch->h_channel;
+         if (hp)
+            nv_rm_free_object(ch->rm, hp, ch->h_obj_copy);
+      }
+      if (ch->h_obj_compute) {
+         uint32_t hp = ch->h_obj_compute_parent ? ch->h_obj_compute_parent
+                                                : ch->h_channel;
+         if (hp)
+            nv_rm_free_object(ch->rm, hp, ch->h_obj_compute);
+      }
+      if (ch->h_obj_3d) {
+         uint32_t hp = ch->h_obj_3d_parent ? ch->h_obj_3d_parent : ch->h_channel;
+         if (hp)
+            nv_rm_free_object(ch->rm, hp, ch->h_obj_3d);
       }
       if (ch->h_channel) {
          uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group : h_dev;
@@ -578,7 +587,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
             continue;
          if (nt < 8)
             tried[nt++] = cl;
-         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_copy_parent);
          if (r == 0 && h) {
             ch->h_obj_copy = h;
             ch->class_copy_bound = cl;
@@ -608,7 +617,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
             continue;
          if (nt < 8)
             tried[nt++] = cl;
-         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_compute_parent);
          if (r == 0 && h) {
             ch->h_obj_compute = h;
             ch->class_compute_bound = cl;
@@ -639,7 +648,7 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
             continue;
          if (nt < 8)
             tried[nt++] = cl;
-         r = nv_channel_try_alloc_engine(ch, cl, &h);
+         r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_3d_parent);
          if (r == 0 && h) {
             ch->h_obj_3d = h;
             ch->class_3d_bound = cl;
@@ -1186,7 +1195,8 @@ nv_channel_gpfifo_host_sema_submit(struct nv_channel *ch,
    /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
    nv_push_init(&push, map, need);
    nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-   nv_push_host_semaphore_release(&push, sema_gpu_addr, sema_payload);
+   /* WFI then sema: ensures prior segment methods complete before sema write */
+   nv_push_host_semaphore_release_wfi(&push, sema_gpu_addr, sema_payload, true);
    nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,

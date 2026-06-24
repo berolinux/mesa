@@ -41,6 +41,8 @@
  *   - nv_channel_submit_preflight() before G1 reports schedule/USERD/doorbell state
  *   - g1_host_sema_rc: NVC36F host sema only (kickoff works iff this succeeds)
  *   - g1_userd_gp_get/put vs g1_hput: ring consumption after failed G1
+ *   - g1_svram/g1_bvram: sema/src-dst BO placement (VRAM vs sysmem)
+ *   - Scratch sema prefers VRAM+CPU map; src/dst prefer sysmem for host verify
  *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
@@ -105,6 +107,11 @@ struct nv_smoke_hw_result {
    uint32_t g1_host_gpfifo_put; /* ch->gpfifo_put after G1 attempts */
    bool g1_had_doorbell;      /* work_submit_token + usermode map at G1 start */
    bool g1_was_scheduled;     /* channel scheduled at G1 start */
+   bool g1_sema_vram;         /* sema BO in VRAM (vs sysmem) */
+   bool g1_bufs_vram;         /* src/dst BOs in VRAM */
+   uint64_t g1_sema_gpu;
+   uint64_t g1_src_gpu;
+   uint64_t g1_dst_gpu;
    /* G2 phase detail */
    int g2_submit_rc;
    int g2_store_rc;    /* 0 ok, -EIO if sema ok but dst[0] != store_imm */
@@ -131,7 +138,7 @@ void nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res,
  */
 struct nv_smoke_hw_scratch {
    struct nv_rm_device *rm;
-   struct nv_rm_bo *sema_bo;
+   struct nv_rm_bo *sema_bo;  /* sema: prefer VRAM+CPU map, else sysmem */
    struct nv_rm_bo *src_bo;   /* G1 source */
    struct nv_rm_bo *dst_bo;   /* G1 dest */
    struct nv_rm_bo *qmd_bo;   /* G2 QMD */
@@ -147,6 +154,8 @@ struct nv_smoke_hw_scratch {
    uint64_t ct_gpu;
    uint32_t sema_payload;
    uint32_t g2_store_imm;   /* value written by G2 store-imm smoke (default 0xdeadbeef) */
+   bool sema_vram;
+   bool bufs_vram;          /* last successful src/dst placement (sysmem preferred) */
    bool owned; /* scratch alloc'd by create; destroy frees */
 };
 

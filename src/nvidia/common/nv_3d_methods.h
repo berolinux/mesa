@@ -1769,6 +1769,19 @@ nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                   NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
 }
 
+/**
+ * Host sema release with optional WFI first (orders prior PB methods on channel
+ * before sema; useful as G1 kickoff probe when methods may still be in flight).
+ */
+static inline void
+nv_push_host_semaphore_release_wfi(struct nv_push *p, uint64_t sema_gpu_addr,
+                                   uint32_t payload, bool with_wfi)
+{
+   if (with_wfi)
+      nv_push_method(p, NVC36F_WFI, 0);
+   nv_push_host_semaphore_release(p, sema_gpu_addr, payload);
+}
+
 /** 3D report semaphore acquire: stall until memory at sema_gpu_addr == payload. */
 static inline void
 nv_3d_report_semaphore_acquire(struct nv_push *p, uint64_t sema_gpu_addr,

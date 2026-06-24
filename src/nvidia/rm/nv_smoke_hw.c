@@ -69,6 +69,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d"
            " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_notif=0x%x/0x%x"
+           " g1_svram=%d g1_bvram=%d g1_sgpu=0x%llx g1_dgpu=0x%llx"
            " g1_gp_get=%u g1_gp_put=%u g1_hput=%u"
            " g2_pre=%d g2_eng_rc=%d g2_h_comp=0x%x g2_submit=%d g2_store=%d"
            " g2_host_sema=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
@@ -84,6 +85,9 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            (unsigned)res->g1_sema_observed, (unsigned)res->g1_fill_observed,
            (unsigned)res->g1_class_copy,
            (unsigned)res->g1_notifier_status, (unsigned)res->g1_notifier_info32,
+           res->g1_sema_vram ? 1 : 0, res->g1_bufs_vram ? 1 : 0,
+           (unsigned long long)res->g1_sema_gpu,
+           (unsigned long long)res->g1_dst_gpu,
            (unsigned)res->g1_userd_gp_get, (unsigned)res->g1_userd_gp_put,
            (unsigned)res->g1_host_gpfifo_put,
            res->g2_preflight_rc, res->g2_engine_alloc_rc,
@@ -127,12 +131,51 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
    }
 }
 
+/*
+ * Alloc scratch BO: try VRAM (GPU sema/DMA often prefers FB) then sysmem.
+ * Requires CPU map + GPU VA for host verify / sema poll.
+ */
+static struct nv_rm_bo *
+smoke_alloc_mapped_bo(struct nv_rm_device *rm, uint64_t size, uint64_t align,
+                      bool prefer_vram, bool *vram_out)
+{
+   struct nv_rm_bo_req req;
+   struct nv_rm_bo *bo = NULL;
+   int pass;
+
+   if (vram_out)
+      *vram_out = false;
+   if (!rm || !size)
+      return NULL;
+
+   (void)nv_rm_device_ensure_vaspace(rm);
+
+   for (pass = 0; pass < 2; pass++) {
+      bool vram = (pass == 0) ? prefer_vram : !prefer_vram;
+      memset(&req, 0, sizeof(req));
+      req.size = size;
+      req.alignment = align ? align : 256;
+      req.vram = vram;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      bo = nv_rm_bo_alloc(rm, &req);
+      if (bo) {
+         if (vram_out)
+            *vram_out = vram;
+         return bo;
+      }
+   }
+   return NULL;
+}
+
 int
 nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
                            struct nv_smoke_hw_scratch *out)
 {
    struct nv_rm_bo_req req;
    struct nv_smoke_hw_scratch sc;
+   bool sema_v = false, buf_v = false;
 
    if (!rm || !out)
       return -EINVAL;
@@ -143,27 +186,23 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
    sc.g2_store_imm = 0xdeadbeefu;
    sc.owned = true;
 
-   memset(&req, 0, sizeof(req));
-   req.size = 4096;
-   req.alignment = 256;
-   req.vram = false;
-   req.cpu_access = true;
-   req.map_gpu_va = true;
-
-   sc.sema_bo = nv_rm_bo_alloc(rm, &req);
+   /* Sema: prefer VRAM (CE/host sema writes target GPU VA; host polls CPU map) */
+   sc.sema_bo = smoke_alloc_mapped_bo(rm, 4096, 256, true, &sema_v);
    if (!sc.sema_bo)
       goto fail;
+   sc.sema_vram = sema_v;
    sc.sema_cpu = (volatile uint32_t *)nv_rm_bo_map(sc.sema_bo);
    sc.sema_gpu = nv_rm_bo_gpu_offset(sc.sema_bo);
    if (!sc.sema_cpu || !sc.sema_gpu)
       goto fail;
    sc.sema_cpu[0] = 0;
 
-   req.size = 4096;
-   sc.src_bo = nv_rm_bo_alloc(rm, &req);
-   sc.dst_bo = nv_rm_bo_alloc(rm, &req);
+   /* G1 src/dst: prefer sysmem for easy CPU verify; if only VRAM works, ok */
+   sc.src_bo = smoke_alloc_mapped_bo(rm, 4096, 256, false, &buf_v);
+   sc.dst_bo = smoke_alloc_mapped_bo(rm, 4096, 256, false, &buf_v);
    if (!sc.src_bo || !sc.dst_bo)
       goto fail;
+   sc.bufs_vram = buf_v;
    sc.src_cpu = nv_rm_bo_map(sc.src_bo);
    sc.dst_cpu = nv_rm_bo_map(sc.dst_bo);
    sc.src_gpu = nv_rm_bo_gpu_offset(sc.src_bo);
@@ -173,8 +212,7 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
    memset(sc.src_cpu, 0xa5, 256);
    memset(sc.dst_cpu, 0, 256);
 
-   req.size = 4096;
-   sc.qmd_bo = nv_rm_bo_alloc(rm, &req);
+   sc.qmd_bo = smoke_alloc_mapped_bo(rm, 4096, 256, false, NULL);
    if (!sc.qmd_bo)
       goto fail;
    sc.qmd_cpu = nv_rm_bo_map(sc.qmd_bo);
@@ -183,8 +221,18 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       goto fail;
    memset(sc.qmd_cpu, 0, 256);
 
+   memset(&req, 0, sizeof(req));
    req.size = 64 * 64 * 4; /* 64x64 A8B8G8R8 pitch */
+   req.alignment = 256;
+   req.vram = false;
+   req.cpu_access = true;
+   req.no_scanout = true;
+   req.map_gpu_va = true;
    sc.ct_bo = nv_rm_bo_alloc(rm, &req);
+   if (!sc.ct_bo) {
+      req.vram = true;
+      sc.ct_bo = nv_rm_bo_alloc(rm, &req);
+   }
    if (sc.ct_bo) {
       sc.ct_gpu = nv_rm_bo_gpu_offset(sc.ct_bo);
       /* CT optional; G3 clear sema works without mapped CT for encode path */
@@ -266,6 +314,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;
+      (void)nv_channel_ensure_engine_objects(ch);
       res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
       res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
       res.g1_was_scheduled = ch->scheduled;
@@ -274,9 +323,11 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.g1_h_obj_copy = ch->h_obj_copy;
       res.g1_notifier_status = 0xffff;
       res.g1_had_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
-      (void)nv_channel_ensure_engine_objects(ch);
-      res.g1_engine_alloc_rc = ch->engine_alloc_rc;
-      res.g1_h_obj_copy = ch->h_obj_copy;
+      res.g1_sema_vram = sc->sema_vram;
+      res.g1_bufs_vram = sc->bufs_vram;
+      res.g1_sema_gpu = sc->sema_gpu;
+      res.g1_src_gpu = sc->src_gpu;
+      res.g1_dst_gpu = sc->dst_gpu;
 
       if (res.g1_preflight_rc != 0 && res.g1_preflight_rc != -EAGAIN) {
          /* Hard failure: missing channel objects — skip submit noise */
