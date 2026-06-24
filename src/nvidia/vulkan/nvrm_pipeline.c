@@ -2802,13 +2802,15 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    desc->sm_global_caching = true;
    desc->invalidate_caches = !cmd->compute_init_done;
 
-   /* Optional QMD sema release for queue submit_fence chaining (if cmd has
-    * scratch sema from prior event/query work; 0 leaves sema disabled). */
+   /* QMD sema release0 on submit_fence: alloc seq so CPU/queue wait sees GEQ */
    if (cmd->device && cmd->device->queue &&
        cmd->device->queue->submit_fence &&
        cmd->device->queue->submit_fence->sema_gpu_addr) {
-      desc->sema_release0_addr = cmd->device->queue->submit_fence->sema_gpu_addr;
-      desc->sema_release0_value = cmd->device->queue->submit_seq + 1;
+      struct nv_fence *sf = cmd->device->queue->submit_fence;
+      uint32_t payload = nv_fence_alloc_seq(sf);
+      desc->sema_release0_addr = sf->sema_gpu_addr;
+      desc->sema_release0_value = payload;
+      cmd->device->queue->submit_seq = payload;
    }
 
    if (cs && cs->const_gpu_addr && cs->const_size) {
@@ -2861,9 +2863,21 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
       qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
    }
 
-   /* Materialize QMD into scratch BO (host mirror) + inline load + SEND_PCAS */
-   nv_compute_emit_dispatch_materialized(&cmd->push, &desc, qmd_addr,
-                                         qmd_host, class_compute);
+   /* First compute in cmd buffer: SPA/CWD + method invalidates */
+   if (!cmd->compute_init_done) {
+      uint8_t spa = desc.sass_version ? desc.sass_version : 0x50;
+      const struct nv_device_info *info = cmd->device ? cmd->device->info : NULL;
+      if (info && info->sm_version)
+         spa = (uint8_t)(info->sm_version & 0xff);
+      nv_compute_emit_init_state(&cmd->push, class_compute, spa, 0);
+   }
+
+   /* Materialize QMD (+ sema sideband from desc) + optional method inv + PCAS */
+   nv_compute_emit_dispatch_with_sema(&cmd->push, &desc, qmd_addr, qmd_host,
+                                      class_compute,
+                                      desc.sema_release0_addr,
+                                      desc.sema_release0_value,
+                                      !cmd->compute_init_done);
    if (qmd_host && cmd->qmd_bo)
       nv_rm_bo_unmap(cmd->qmd_bo);
 

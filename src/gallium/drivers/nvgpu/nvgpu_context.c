@@ -1603,6 +1603,15 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    if (cs && cs->nvsh && cs->nvsh->local_mem_size)
       desc.local_mem_low = cs->nvsh->local_mem_size;
 
+   /* QMD sema release so flush/wait can poll fence without only GPGet */
+   if (!ctx->fence && ctx->screen && ctx->screen->rm)
+      ctx->fence = nv_fence_create(ctx->screen->rm);
+   if (ctx->fence && ctx->fence->sema_gpu_addr) {
+      uint32_t payload = nv_fence_alloc_seq(ctx->fence);
+      nv_qmd_desc_set_sema_release0(&desc, ctx->fence->sema_gpu_addr, payload);
+      ctx->last_fence_seq = payload;
+   }
+
    /* Dedicated QMD BO (host-mapped) for materialize + CE indirect patch */
    if (!ctx->qmd_bo && ctx->screen && ctx->screen->rm) {
       struct nv_rm_bo_req req;
@@ -1654,11 +1663,19 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       }
    }
 
+   /* SPA/CWD once per context compute init */
+   if (!ctx->lmem_programmed || !ctx->compute_init_done) {
+      nv_compute_emit_init_state(&push, class_compute, sass_ver, 0);
+      ctx->compute_init_done = true;
+   }
+
    if (indirect_gpu_only && indirect_gpu) {
-      /* Path B: materialize placeholder QMD, CE-patch grid from indirect GPU addr */
+      /* Path B: materialize placeholder QMD (keep sema), CE-patch grid, PCAS */
       uint64_t qmd_addr = 0;
       void *qmd_host = ctx->qmd_map;
-      nv_qmd_prepare_indirect_placeholder(qmd_tmp, &desc, 0, 0);
+      uint64_t sema_a = desc.sema_release0_addr;
+      uint32_t sema_v = desc.sema_release0_value;
+      nv_qmd_prepare_indirect_placeholder(qmd_tmp, &desc, sema_a, sema_v);
       if (ctx->qmd_bo)
          qmd_addr = nv_rm_bo_gpu_offset(ctx->qmd_bo);
       if (qmd_host)
@@ -1672,16 +1689,23 @@ nvgpu_launch_grid(struct pipe_context *pctx,
             nv_compute_set_object(&push, class_compute);
          else
             nv_push_set_subch(&push, NV_PUSH_SUBCH_COMPUTE);
+         nv_compute_emit_invalidate_caches(&push);
          nv_compute_emit_inline_qmd_launch(&push, qmd_addr, qmd_tmp, true);
       } else {
-         nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+         nv_compute_emit_dispatch_with_sema(&push, &desc, 0, NULL,
+                                            class_compute, sema_a, sema_v,
+                                            true);
       }
    } else if (ctx->qmd_bo && ctx->qmd_map) {
       uint64_t qmd_addr = nv_rm_bo_gpu_offset(ctx->qmd_bo);
-      nv_compute_emit_dispatch_materialized(&push, &desc, qmd_addr,
-                                            ctx->qmd_map, class_compute);
+      nv_compute_emit_dispatch_with_sema(&push, &desc, qmd_addr, ctx->qmd_map,
+                                         class_compute,
+                                         desc.sema_release0_addr,
+                                         desc.sema_release0_value, true);
    } else {
-      nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+      nv_compute_emit_dispatch_with_sema(&push, &desc, 0, NULL, class_compute,
+                                         desc.sema_release0_addr,
+                                         desc.sema_release0_value, true);
    }
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);

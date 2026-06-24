@@ -509,22 +509,15 @@ nv_channel_submit_wait_sema(struct nv_channel *ch,
    if (r)
       return r;
 
-   if (sema_cpu && sema_payload) {
-      r = nv_channel_wait_sema_cpu(sema_cpu, sema_payload, wait_timeout_ns);
-      if (r)
-         return r;
-   } else if (wait_timeout_ns) {
-      r = nv_channel_wait_idle(ch, wait_timeout_ns);
-      if (r)
-         return r;
-   }
-
-   if (check_notifier) {
-      r = nv_channel_notifier_status(ch, NULL, NULL);
-      if (r == -EAGAIN)
-         return 0;
-      if (r)
-         return r;
-   }
-   return 0;
+#if defined(HAVE_LIBDRM_NVIDIA)
+   r = nvidia_submit_wait_complete(ch->userd, ch->gpfifo_put,
+                                   sema_cpu, sema_payload,
+                                   check_notifier ? ch->error_notifier : NULL,
+                                   wait_timeout_ns);
+   return r;
+#else
+   (void)sema_cpu; (void)sema_payload; (void)wait_timeout_ns;
+   (void)check_notifier;
+   return -ENOSYS;
+#endif
 }

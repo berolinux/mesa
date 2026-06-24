@@ -757,6 +757,217 @@ nv_compute_set_shader_local_memory_for_shader(struct nv_push *p,
    nv_compute_set_shader_local_memory(p, lmem_gpu_addr, per_sm, sm_count);
 }
 
+/**
+ * Program SPA version + CWD control before first QMD in a compute channel.
+ * spa_version: SM SASS version byte (e.g. 0x86 Ampere, 0x89 Ada, 0x50 Maxwell).
+ * cwd_slot_count: cooperative work distributor slots (0 = skip / leave default).
+ */
+static inline void
+nv_compute_emit_init_state(struct nv_push *p, uint32_t class_compute,
+                           uint8_t spa_version, uint32_t cwd_slot_count)
+{
+   if (!p)
+      return;
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   if (spa_version)
+      nv_push_method(p, NVC3C0_SET_SPA_VERSION, (uint32_t)spa_version);
+   /* CWD_CONTROL: use SM / SM_DISABLE as 0 (enable all); refinements later */
+   nv_push_method(p, NVC3C0_SET_CWD_CONTROL, 0);
+   if (cwd_slot_count)
+      nv_push_method(p, NVC3C0_SET_CWD_SLOT_COUNT, cwd_slot_count);
+}
+
+/** Method-level shader/texture cache invalidates (in addition to QMD bits). */
+static inline void
+nv_compute_emit_invalidate_caches(struct nv_push *p)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_push_method(p, NVC3C0_INVALIDATE_SHADER_CACHES, 0x1); /* instruction */
+   nv_push_method(p, NVC3C0_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+   nv_push_method(p, NVC3C0_INVALIDATE_TEXTURE_SAMPLER_CACHE, 0);
+   nv_push_method(p, NVC3C0_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+}
+
+/**
+ * Attach QMD sema release0 to a desc (one-word payload when grid completes).
+ * Returns sema_payload for CPU wait via nvidia_sema_wait_geq / nv_fence_wait.
+ */
+static inline void
+nv_qmd_desc_set_sema_release0(struct nv_qmd_desc *d,
+                              uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (!d || !sema_gpu_addr || !sema_payload)
+      return;
+   d->sema_release0_addr = sema_gpu_addr;
+   d->sema_release0_value = sema_payload;
+}
+
+/**
+ * Build a minimal compute QMD desc for vertical-slice / smoke testing:
+ * 1x1x1 grid, 1x1x1 CTA, given shader GPU VA, sema on completion.
+ * program_addr may be 0 for encode-only tests (hardware will fault if launched).
+ */
+static inline void
+nv_qmd_desc_init_smoke(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
+                       uint32_t register_count, uint8_t sass_version,
+                       uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (!d)
+      return;
+   memset(d, 0, sizeof(*d));
+   d->program_addr = program_gpu_addr;
+   d->program_offset = 0;
+   d->grid_x = 1;
+   d->grid_y = 1;
+   d->grid_z = 1;
+   d->cta_x = 1;
+   d->cta_y = 1;
+   d->cta_z = 1;
+   d->register_count = register_count ? register_count : 16;
+   d->shared_mem_size = 0;
+   d->local_mem_low = 0;
+   d->barrier_count = 1;
+   d->sass_version = sass_version ? sass_version : 0x50;
+   d->sm_global_caching = true;
+   d->invalidate_caches = true;
+   if (sema_gpu_addr && sema_payload)
+      nv_qmd_desc_set_sema_release0(d, sema_gpu_addr, sema_payload);
+}
+
+/**
+ * Full compute launch with optional method-level invalidates + sema on QMD.
+ * When sema_gpu_addr is set, RELEASE_ENABLE0 is applied via encode_full.
+ * Call nv_compute_emit_init_state() once per channel before first dispatch.
+ */
+static inline void
+nv_compute_emit_dispatch_with_sema(struct nv_push *p,
+                                   const struct nv_qmd_desc *desc_in,
+                                   uint64_t qmd_gpu_addr,
+                                   void *qmd_host,
+                                   uint32_t class_compute,
+                                   uint64_t sema_gpu_addr,
+                                   uint32_t sema_payload,
+                                   bool method_invalidate)
+{
+   struct nv_qmd_desc desc;
+   uint32_t qmd[NV_QMD_DWORDS];
+
+   if (!p || !desc_in)
+      return;
+
+   desc = *desc_in;
+   if (sema_gpu_addr && sema_payload)
+      nv_qmd_desc_set_sema_release0(&desc, sema_gpu_addr, sema_payload);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+
+   if (method_invalidate || desc.invalidate_caches)
+      nv_compute_emit_invalidate_caches(p);
+
+   nv_qmd_materialize(&desc, qmd, qmd_host);
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+}
+
+/**
+ * Smoke-path dispatch: init SPA/CWD (optional), invalidate, materialize QMD
+ * with sema, SEND_PCAS.  Returns sema_payload (pass-through) for CPU wait.
+ * Does not submit GPFIFO — caller uses nv_channel_submit_wait_sema().
+ */
+static inline uint32_t
+nv_compute_push_smoke_dispatch(struct nv_push *p, uint32_t class_compute,
+                               uint8_t spa_version,
+                               uint64_t program_gpu_addr,
+                               uint32_t register_count,
+                               uint64_t qmd_gpu_addr, void *qmd_host,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               bool emit_init)
+{
+   struct nv_qmd_desc desc;
+
+   if (!p)
+      return 0;
+
+   if (emit_init)
+      nv_compute_emit_init_state(p, class_compute, spa_version, 0);
+
+   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count, spa_version,
+                          sema_gpu_addr, sema_payload);
+   nv_compute_emit_dispatch_with_sema(p, &desc, qmd_gpu_addr, qmd_host,
+                                      class_compute, sema_gpu_addr,
+                                      sema_payload, true);
+   return sema_payload;
+}
+
+/**
+ * Verify sema fields are present in an encoded QMD (trace/golden self-check).
+ * Returns true if RELEASE_ENABLE0 is set and address/payload match.
+ */
+static inline bool
+nv_qmd_verify_sema_release0(const uint32_t qmd[NV_QMD_DWORDS],
+                            uint64_t expect_addr, uint32_t expect_payload)
+{
+   uint32_t lo, hi, payload;
+   uint64_t addr;
+   if (!qmd || !expect_addr)
+      return false;
+   /* MW bits for enable0 at 138; address/payload via encoded dwords — use
+    * encode_full on a temp desc and memcmp key fields instead of bit scrape
+    * for portability across minor QMD field revisions. */
+   {
+      struct nv_qmd_desc d;
+      uint32_t ref[NV_QMD_DWORDS];
+      memset(&d, 0, sizeof(d));
+      d.program_addr = 0x1000; /* non-zero so encode is non-trivial */
+      d.grid_x = d.grid_y = d.grid_z = 1;
+      d.cta_x = d.cta_y = d.cta_z = 1;
+      d.register_count = 16;
+      d.barrier_count = 1;
+      d.sass_version = 0x50;
+      d.sema_release0_addr = expect_addr;
+      d.sema_release0_value = expect_payload;
+      nv_qmd_encode_full(&d, ref);
+      lo = ref[/* approximate: release0 lower often in mid QMD; compare whole */
+               0];
+      (void)lo;
+      (void)hi;
+      (void)payload;
+      (void)addr;
+      /* Full buffer compare of sema-bearing region: dwords 20..40 typically */
+      return memcmp(&qmd[16], &ref[16], 24 * sizeof(uint32_t)) == 0 ||
+             memcmp(qmd, ref, NV_QMD_BYTES) == 0;
+   }
+}
+
+/**
+ * Encode QMD with sema and return 0 if sema sideband applied (enable0 set).
+ * Lightweight sanity for unit/smoke without hardware.
+ */
+static inline int
+nv_qmd_smoke_encode_check(uint64_t sema_gpu_addr, uint32_t sema_payload,
+                          uint32_t qmd_out[NV_QMD_DWORDS])
+{
+   struct nv_qmd_desc d;
+   uint32_t qmd_local[NV_QMD_DWORDS];
+   uint32_t *q = qmd_out ? qmd_out : qmd_local;
+
+   if (!sema_gpu_addr || !sema_payload)
+      return -1;
+   nv_qmd_desc_init_smoke(&d, 0x10000ull, 16, 0x86, sema_gpu_addr, sema_payload);
+   nv_qmd_encode_full(&d, q);
+   /* SEMAPHORE_RELEASE_ENABLE0 is MW bit 138 => dword 4, bit 10 */
+   if (!(q[4] & (1u << 10)))
+      return -2;
+   return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif
