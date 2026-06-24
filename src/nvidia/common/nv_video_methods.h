@@ -1185,6 +1185,89 @@ nv_h264_pic_setup_from_annexb(const uint8_t *buf, uint32_t buf_size,
    return n;
 }
 
+
+/**
+ * Skip HEVC profile_tier_level() RBSP syntax (H.265 7.3.3).
+ * max_sub_layers_minus1 controls sub-layer PTL arrays.
+ * Returns 0 on success (best-effort; stops if RBSP runs short).
+ */
+static inline int
+nv_hevc_rbsp_skip_profile_tier_level(struct nv_rbsp_reader *r,
+                                     uint32_t max_sub_layers_minus1)
+{
+   uint32_t i, j;
+   uint8_t sub_layer_profile_present_flag[8];
+   uint8_t sub_layer_level_present_flag[8];
+   if (!r)
+      return -1;
+   /* general_profile_space(2) tier_flag(1) profile_idc(5) */
+   (void)nv_rbsp_u(r, 2);
+   (void)nv_rbsp_u(r, 1);
+   (void)nv_rbsp_u(r, 5);
+   /* general_profile_compatibility_flag[32] */
+   (void)nv_rbsp_u(r, 32);
+   /* progressive/interlaced/non_packed/frame_only source flags */
+   (void)nv_rbsp_u(r, 1);
+   (void)nv_rbsp_u(r, 1);
+   (void)nv_rbsp_u(r, 1);
+   (void)nv_rbsp_u(r, 1);
+   /* general_reserved_zero_44bits */
+   (void)nv_rbsp_u(r, 44);
+   (void)nv_rbsp_u(r, 8); /* general_level_idc */
+   for (i = 0; i < max_sub_layers_minus1 && i < 8; i++) {
+      sub_layer_profile_present_flag[i] = (uint8_t)nv_rbsp_u(r, 1);
+      sub_layer_level_present_flag[i] = (uint8_t)nv_rbsp_u(r, 1);
+   }
+   if (max_sub_layers_minus1 > 0) {
+      for (i = max_sub_layers_minus1; i < 8; i++)
+         (void)nv_rbsp_u(r, 2); /* reserved_zero_2bits */
+   }
+   for (i = 0; i < max_sub_layers_minus1 && i < 8; i++) {
+      if (sub_layer_profile_present_flag[i]) {
+         (void)nv_rbsp_u(r, 2);
+         (void)nv_rbsp_u(r, 1);
+         (void)nv_rbsp_u(r, 5);
+         (void)nv_rbsp_u(r, 32);
+         (void)nv_rbsp_u(r, 1);
+         (void)nv_rbsp_u(r, 1);
+         (void)nv_rbsp_u(r, 1);
+         (void)nv_rbsp_u(r, 1);
+         (void)nv_rbsp_u(r, 44);
+      }
+      if (sub_layer_level_present_flag[i])
+         (void)nv_rbsp_u(r, 8);
+   }
+   (void)j;
+   return 0;
+}
+
+/**
+ * Skip HEVC scaling_list_data() (7.3.4) when scaling_list_enabled && present.
+ * Best-effort: reads scaling list present flags and SE deltas.
+ */
+static inline void
+nv_hevc_rbsp_skip_scaling_list_data(struct nv_rbsp_reader *r)
+{
+   unsigned sizeId, matrixId;
+   if (!r)
+      return;
+   for (sizeId = 0; sizeId < 4; sizeId++) {
+      unsigned max_mid = (sizeId == 3) ? 2u : 6u;
+      for (matrixId = 0; matrixId < max_mid; matrixId++) {
+         if (!nv_rbsp_u(r, 1)) { /* scaling_list_pred_mode_flag == 0 => pred */
+            (void)nv_rbsp_ue(r); /* scaling_list_pred_matrix_id_delta */
+         } else {
+            unsigned coef_num = (sizeId == 0) ? 16u : 64u;
+            unsigned k;
+            if (sizeId > 1)
+               (void)nv_rbsp_se(r); /* scaling_list_dc_coef_minus8 */
+            for (k = 0; k < coef_num; k++)
+               (void)nv_rbsp_se(r); /* scaling_list_delta_coef */
+         }
+      }
+   }
+}
+
 /**
  * HEVC SPS subset: pic size, chroma, bit depths, coding/transform block sizes.
  * Skips scaling lists / ST RPS / VUI. Returns 0 on success.
@@ -1205,22 +1288,17 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
    uint32_t max_transform_hierarchy_depth_intra;
    if (!nal || nal_size < 4 || !ps)
       return -1;
+   uint32_t sps_max_sub_layers_minus1 = 0;
+   uint32_t log2_max_pic_order_cnt_lsb_minus4 = 0;
+   uint32_t amp_enabled_flag = 0, sao_enabled = 0, pcm_enabled = 0;
+   uint32_t pcm_loop_filter_disabled = 0, temporal_mvp = 0, strong_intra = 0;
+   uint32_t num_short_term_ref_pic_sets = 0, num_long_term_ref_pics_sps = 0;
    /* HEVC NAL header is 2 bytes */
    nv_rbsp_init(&r, nal + 2, nal_size > 2 ? nal_size - 2 : 0);
    (void)nv_rbsp_u(&r, 4); /* sps_video_parameter_set_id */
-   (void)nv_rbsp_u(&r, 3); /* sps_max_sub_layers_minus1 */
+   sps_max_sub_layers_minus1 = nv_rbsp_u(&r, 3);
    (void)nv_rbsp_u(&r, 1); /* sps_temporal_id_nesting_flag */
-   /* profile_tier_level: 2+1+5 + 32 + 1 + 1 + 1 + 1 + 44 + 8 = skip conservatively */
-   (void)nv_rbsp_u(&r, 2);
-   (void)nv_rbsp_u(&r, 1);
-   (void)nv_rbsp_u(&r, 5);
-   (void)nv_rbsp_u(&r, 32);
-   (void)nv_rbsp_u(&r, 1);
-   (void)nv_rbsp_u(&r, 1);
-   (void)nv_rbsp_u(&r, 1);
-   (void)nv_rbsp_u(&r, 1);
-   (void)nv_rbsp_u(&r, 44);
-   (void)nv_rbsp_u(&r, 8); /* general_level_idc */
+   nv_hevc_rbsp_skip_profile_tier_level(&r, sps_max_sub_layers_minus1);
    (void)nv_rbsp_ue(&r); /* sps_seq_parameter_set_id */
    chroma_format_idc = nv_rbsp_ue(&r);
    if (chroma_format_idc == 3)
@@ -1235,14 +1313,18 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
    }
    bit_depth_luma_minus8 = nv_rbsp_ue(&r);
    bit_depth_chroma_minus8 = nv_rbsp_ue(&r);
-   (void)nv_rbsp_ue(&r); /* log2_max_pic_order_cnt_lsb_minus4 */
+   log2_max_pic_order_cnt_lsb_minus4 = nv_rbsp_ue(&r);
    if (nv_rbsp_u(&r, 1)) { /* sps_sub_layer_ordering_info_present_flag */
       unsigned i;
-      for (i = 0; i < 1; i++) {
-         (void)nv_rbsp_ue(&r);
-         (void)nv_rbsp_ue(&r);
-         (void)nv_rbsp_ue(&r);
+      for (i = 0; i <= sps_max_sub_layers_minus1 && i < 8; i++) {
+         (void)nv_rbsp_ue(&r); /* max_dec_pic_buffering_minus1 */
+         (void)nv_rbsp_ue(&r); /* max_num_reorder_pics */
+         (void)nv_rbsp_ue(&r); /* max_latency_increase_plus1 */
       }
+   } else {
+      (void)nv_rbsp_ue(&r);
+      (void)nv_rbsp_ue(&r);
+      (void)nv_rbsp_ue(&r);
    }
    log2_min_luma_coding_block_size_minus3 = nv_rbsp_ue(&r);
    log2_diff_max_min_luma_coding_block_size = nv_rbsp_ue(&r);
@@ -1250,6 +1332,34 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
    log2_diff_max_min_transform_block_size = nv_rbsp_ue(&r);
    max_transform_hierarchy_depth_inter = nv_rbsp_ue(&r);
    max_transform_hierarchy_depth_intra = nv_rbsp_ue(&r);
+   if (nv_rbsp_u(&r, 1)) { /* scaling_list_enabled_flag */
+      if (nv_rbsp_u(&r, 1)) /* sps_scaling_list_data_present_flag */
+         nv_hevc_rbsp_skip_scaling_list_data(&r);
+   }
+   amp_enabled_flag = nv_rbsp_u(&r, 1);
+   sao_enabled = nv_rbsp_u(&r, 1);
+   pcm_enabled = nv_rbsp_u(&r, 1);
+   if (pcm_enabled) {
+      (void)nv_rbsp_u(&r, 4); /* pcm_sample_bit_depth_luma_minus1 */
+      (void)nv_rbsp_u(&r, 4);
+      (void)nv_rbsp_ue(&r); /* log2_min_pcm_luma_coding_block_size_minus3 */
+      (void)nv_rbsp_ue(&r); /* log2_diff_max_min_pcm_luma_coding_block_size */
+      pcm_loop_filter_disabled = nv_rbsp_u(&r, 1);
+   }
+   num_short_term_ref_pic_sets = nv_rbsp_ue(&r);
+   /* Skip short_term_ref_pic_set structures (complex; host may supply via pipe_desc) */
+   if (nv_rbsp_u(&r, 1)) { /* long_term_ref_pics_present_flag */
+      num_long_term_ref_pics_sps = nv_rbsp_ue(&r);
+      {
+         unsigned i;
+         for (i = 0; i < num_long_term_ref_pics_sps && i < 32; i++) {
+            (void)nv_rbsp_u(&r, log2_max_pic_order_cnt_lsb_minus4 + 4);
+            (void)nv_rbsp_u(&r, 1); /* used_by_curr_pic_lt_sps_flag */
+         }
+      }
+   }
+   temporal_mvp = nv_rbsp_u(&r, 1);
+   strong_intra = nv_rbsp_u(&r, 1);
    nv_nvdec_hevc_apply_sps_pps(ps, pic_width, pic_height, chroma_format_idc,
       bit_depth_luma_minus8, bit_depth_chroma_minus8,
       log2_min_luma_coding_block_size_minus3,
@@ -1258,9 +1368,10 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
       log2_diff_max_min_transform_block_size,
       max_transform_hierarchy_depth_intra,
       max_transform_hierarchy_depth_inter,
-      /* amp, sao, pcm, pcm_lf, strong_intra, temporal_mvp, log2_poc, num_strps,
-       * num_ltr, l0, l1, init_qp, dependent_slice, sign_data_hiding */
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      amp_enabled_flag, sao_enabled, pcm_enabled, pcm_loop_filter_disabled,
+      strong_intra, temporal_mvp, log2_max_pic_order_cnt_lsb_minus4,
+      num_short_term_ref_pic_sets, num_long_term_ref_pics_sps,
+      0, 0, 0, 0, 0); /* l0/l1/init_qp/dependent_slice/sign_hiding from PPS */
    return 0;
 }
 
