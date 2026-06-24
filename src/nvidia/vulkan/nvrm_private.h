@@ -124,6 +124,9 @@ struct nvrm_cmd_buffer {
    struct nv_rm_bo *push_bo;
    struct nv_rm_bo *qmd_bo;   /* scratch for inline QMD GPU address field */
    struct nv_rm_bo *lmem_bo;  /* compute global LMEM backing (spill/scratch) */
+   struct nv_rm_bo *push_const_bo; /* GPU CB for VkCmdPushConstants upload */
+   void *push_const_map;      /* CPU map of push_const_bo (optional mirror) */
+   uint32_t push_const_bo_size;
    uint32_t lmem_bo_size;     /* allocated size of lmem_bo */
    uint32_t lmem_local_req;   /* max per-thread local (from bound compute shader) */
    bool lmem_programmed;      /* SET_SHADER_LOCAL_MEMORY* already emitted */

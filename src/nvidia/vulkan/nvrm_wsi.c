@@ -69,6 +69,8 @@ nvrm_QueuePresent2(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
 {
    VK_FROM_HANDLE(nvrm_queue, queue, _queue);
    struct nvrm_device *device;
+   VkResult result;
+   uint32_t i;
 
    if (!queue || !pPresentInfo)
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -77,11 +79,29 @@ nvrm_QueuePresent2(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
    if (!device || !device->physical || !device->physical->vk.wsi_device)
       return VK_ERROR_SURFACE_LOST_KHR;
 
-   /* Ensure prior submits are flushed before present (semaphore waits are
-    * handled by common WSI / application; we only need channel progress). */
+   /* Ensure prior graphics/compute work has been submitted on the GPFIFO
+    * channel before handing buffers to the display/WSI path.  Wait semaphores
+    * in pPresentInfo are processed by wsi_common_queue_present; we only need
+    * to guarantee our own push has reached the kernel. */
    if (queue->channel_ready && queue->channel)
       nv_channel_kickoff(queue->channel);
 
-   return wsi_common_queue_present(device->physical->vk.wsi_device,
-                                   &queue->vk, pPresentInfo);
+   result = wsi_common_queue_present(device->physical->vk.wsi_device,
+                                     &queue->vk, pPresentInfo);
+
+   /* Propagate per-swapchain results if the app requested them */
+   if (pPresentInfo->pResults) {
+      for (i = 0; i < pPresentInfo->swapchainCount; i++) {
+         if (pPresentInfo->pResults[i] == VK_SUCCESS ||
+             pPresentInfo->pResults[i] == VK_NOT_READY)
+            pPresentInfo->pResults[i] = result;
+      }
+   }
+
+   /* Kick again after present so any post-present sema releases on our channel
+    * progress; harmless if channel is idle. */
+   if (queue->channel_ready && queue->channel)
+      nv_channel_kickoff(queue->channel);
+
+   return result;
 }

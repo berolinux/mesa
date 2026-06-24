@@ -1318,6 +1318,35 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
    cmd->bound_gfx_pipeline = pipe;
 }
 
+/* Upload dirty push constants into GPU CB and bind to VS/FS slot 0. */
+static void
+nvrm_cmd_emit_push_constants(struct nvrm_cmd_buffer *cmd)
+{
+   uint64_t addr;
+   uint32_t n_dw;
+   if (!cmd || !cmd->push_map)
+      return;
+   if (!cmd->push_const_dirty && !cmd->push_const_dwords)
+      return;
+   if (!cmd->push_const_bo)
+      return;
+   addr = nv_rm_bo_gpu_offset(cmd->push_const_bo);
+   if (!addr)
+      return;
+   n_dw = cmd->push_const_dwords ? cmd->push_const_dwords : 1;
+   if (n_dw > NVRM_MAX_PUSH_CONST_DWORDS)
+      n_dw = NVRM_MAX_PUSH_CONST_DWORDS;
+   /* Keep CPU mirror in sync for debugging / host-side reads */
+   if (cmd->push_const_map)
+      memcpy(cmd->push_const_map, cmd->push_const, n_dw * 4u);
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_3d_upload_and_bind_push_constants(&cmd->push, addr,
+                                        cmd->push_const_bo_size ?
+                                        cmd->push_const_bo_size : 256u,
+                                        0, cmd->push_const, n_dw);
+   cmd->push_const_dirty = false;
+}
+
 /* Emit all currently bound descriptor sets (UBOs + tex pools). */
 static void
 nvrm_cmd_emit_bound_descriptors(struct nvrm_cmd_buffer *cmd,
@@ -1328,6 +1357,8 @@ nvrm_cmd_emit_bound_descriptors(struct nvrm_cmd_buffer *cmd,
    if (!cmd->push_map)
       return;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   /* Push constants first so descriptor CBs don't clobber the selector */
+   nvrm_cmd_emit_push_constants(cmd);
    for (i = 0; i < cmd->bound_set_count && i < NVRM_MAX_DESC_SETS; i++) {
       struct nvrm_descriptor_set *set = cmd->bound_sets[i];
       if (!set)
@@ -1529,6 +1560,7 @@ nvrm_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount,
       topo = cmd->bound_gfx_pipeline->topology_nv;
    }
    nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   nvrm_cmd_emit_push_constants(cmd);
    if (!instanceCount)
       instanceCount = 1;
    nv_3d_emit_draw_vertex_array_instanced(&cmd->push, topo, firstVertex,
@@ -1555,6 +1587,7 @@ nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                              cmd->index_type_size);
    }
    nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   nvrm_cmd_emit_push_constants(cmd);
    if (!instanceCount)
       instanceCount = 1;
    nv_3d_emit_draw_index_buffer_instanced(&cmd->push, topo, firstIndex,
@@ -1562,7 +1595,39 @@ nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                                           instanceCount, firstInstance);
 }
 
-/* Indirect draws: host-side minimal path records direct draw when buffer mapped. */
+/*
+ * Indirect draws (VkDrawIndirectCommand / VkDrawIndexedIndirectCommand).
+ *
+ * Path A: indirect BO is host-mappable — read each command at record time and
+ * emit normal instanced draws (correct and matches compute indirect path A).
+ *
+ * Path B: GPU-only BO — emit a single draw with conservative defaults; a full
+ * GPU indirect path would need a 3D class indirect method or a CE-patched
+ * method stream.  We still honour drawCount by emitting drawCount draws with
+ * the same fallback params so the command stream length is representative.
+ */
+static const uint32_t *
+nvrm_try_map_indirect_u32(struct nvrm_buffer *buf, VkDeviceSize offset,
+                          uint32_t need_bytes, void **unmap_cookie)
+{
+   void *map;
+   *unmap_cookie = NULL;
+   if (!buf || !buf->bo)
+      return NULL;
+   map = nv_rm_bo_map(buf->bo);
+   if (!map)
+      return NULL;
+   *unmap_cookie = buf->bo;
+   return (const uint32_t *)((const uint8_t *)map + offset);
+}
+
+static void
+nvrm_unmap_indirect(void *unmap_cookie)
+{
+   if (unmap_cookie)
+      nv_rm_bo_unmap((struct nv_rm_bo *)unmap_cookie);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
                      VkDeviceSize offset, uint32_t drawCount, uint32_t stride)
@@ -1570,22 +1635,39 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
    uint32_t d;
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
+   uint32_t rec_stride = stride ? stride : NV_VK_DRAW_INDIRECT_STRIDE_DEFAULT;
+   void *unmap = NULL;
+   const uint32_t *base = NULL;
+
    if (!cmd->push_map || !buf || !drawCount)
       return;
-   /* Without GPU indirect class methods fully wired, expand to direct draws
-    * when the indirect buffer is CPU-visible; otherwise emit a single zero draw. */
-   (void)stride;
-   (void)offset;
-   if (cmd->bound_gfx_pipeline)
+   if (cmd->bound_gfx_pipeline) {
       nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
-   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   for (d = 0; d < drawCount; d++) {
-      /* Placeholder: one degenerate draw per indirect slot until GPU indirect */
-      nv_3d_emit_draw_vertex_array_instanced(&cmd->push,
-         cmd->bound_gfx_pipeline ? cmd->bound_gfx_pipeline->topology_nv
-                                 : NVC597_TOPOLOGY_TRIANGLES,
-         0, 0, 1, 0);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
    }
+   nvrm_cmd_emit_push_constants(cmd);
+   nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+   base = nvrm_try_map_indirect_u32(buf, offset,
+                                    rec_stride * drawCount, &unmap);
+   for (d = 0; d < drawCount; d++) {
+      uint32_t vertex_count = 0, instance_count = 1;
+      uint32_t first_vertex = 0, first_instance = 0;
+      if (base) {
+         const uint32_t *rec = (const uint32_t *)((const uint8_t *)base +
+                                                  (size_t)d * rec_stride);
+         /* VkDrawIndirectCommand: vertexCount, instanceCount, firstVertex, firstInstance */
+         vertex_count = rec[0];
+         instance_count = rec[1] ? rec[1] : 1;
+         first_vertex = rec[2];
+         first_instance = rec[3];
+      }
+      nv_3d_emit_draw_vertex_array_instanced(&cmd->push, topo, first_vertex,
+                                             vertex_count, instance_count,
+                                             first_instance);
+   }
+   nvrm_unmap_indirect(unmap);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1594,18 +1676,49 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
                             uint32_t stride)
 {
    VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
-   (void)buffer;
-   (void)offset;
-   (void)stride;
+   VK_FROM_HANDLE(nvrm_buffer, buf, buffer);
+   uint32_t d;
+   uint32_t topo = NVC597_TOPOLOGY_TRIANGLES;
+   uint32_t rec_stride = stride ? stride : NV_VK_DRAWINDEXED_INDIRECT_STRIDE_DEFAULT;
+   void *unmap = NULL;
+   const uint32_t *base = NULL;
+
    if (!cmd->push_map || !drawCount)
       return;
-   if (cmd->bound_gfx_pipeline)
+   if (cmd->bound_gfx_pipeline) {
       nvrm_cmd_emit_pipeline_state(cmd, cmd->bound_gfx_pipeline);
+      topo = cmd->bound_gfx_pipeline->topology_nv;
+   }
+   if (cmd->index_valid) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_set_index_buffer(&cmd->push, cmd->index_addr, cmd->index_size,
+                             cmd->index_type_size);
+   }
+   nvrm_cmd_emit_push_constants(cmd);
    nvrm_cmd_emit_bound_descriptors(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
-   nv_3d_emit_draw_index_buffer_instanced(&cmd->push,
-      cmd->bound_gfx_pipeline ? cmd->bound_gfx_pipeline->topology_nv
-                              : NVC597_TOPOLOGY_TRIANGLES,
-      0, 0, 0, 1, 0);
+
+   if (buf)
+      base = nvrm_try_map_indirect_u32(buf, offset,
+                                       rec_stride * drawCount, &unmap);
+   for (d = 0; d < drawCount; d++) {
+      uint32_t index_count = 0, instance_count = 1;
+      uint32_t first_index = 0, first_instance = 0;
+      int32_t vertex_offset = 0;
+      if (base) {
+         const uint32_t *rec = (const uint32_t *)((const uint8_t *)base +
+                                                  (size_t)d * rec_stride);
+         /* VkDrawIndexedIndirectCommand */
+         index_count = rec[0];
+         instance_count = rec[1] ? rec[1] : 1;
+         first_index = rec[2];
+         vertex_offset = (int32_t)rec[3];
+         first_instance = rec[4];
+      }
+      nv_3d_emit_draw_index_buffer_instanced(&cmd->push, topo, first_index,
+                                             index_count, vertex_offset,
+                                             instance_count, first_instance);
+   }
+   nvrm_unmap_indirect(unmap);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -1689,12 +1802,10 @@ nvrm_CmdPushConstants(VkCommandBuffer commandBuffer, VkPipelineLayout layout,
    if (cmd->push_const_dwords > NVRM_MAX_PUSH_CONST_DWORDS)
       cmd->push_const_dwords = NVRM_MAX_PUSH_CONST_DWORDS;
    cmd->push_const_dirty = true;
-   /* Upload via constant buffer selector on bind group 0 slot 0 (push bank) */
-   if (cmd->push_map && cmd->push_bo) {
-      /* Push constants are CPU-side until a dedicated BO exists; bind a
-       * zero-sized selector so subsequent draws re-emit descriptors only. */
-      (void)cmd->push_const_dirty;
-   }
+   /* Eager upload so subsequent draws/dispatches see constants without
+    * requiring another descriptor bind. */
+   if (cmd->push_map)
+      nvrm_cmd_emit_push_constants(cmd);
 }
 
 static VKAPI_ATTR void VKAPI_CALL

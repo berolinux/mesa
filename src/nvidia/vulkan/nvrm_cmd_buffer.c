@@ -16,6 +16,8 @@
 #define NVRM_QMD_SCRATCH_SIZE  4096  /* 256B QMD + padding, 256B aligned */
 /* Fallback LMEM BO when device SM count unknown (covers ~2 SMs at min granule) */
 #define NVRM_LMEM_SCRATCH_SIZE (2 * NV_LMEM_MIN_PER_SM_BYTES)
+/* Push constants CB: 256B min selector size; hold 64 dwords = 256B exactly */
+#define NVRM_PUSH_CONST_BO_SIZE  256
 
 VKAPI_ATTR VkResult VKAPI_CALL
 nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
@@ -87,6 +89,23 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       cmd->lmem_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
       if (cmd->lmem_bo)
          cmd->lmem_bo_size = (uint32_t)lmem_need;
+   }
+   /* Push-constants CB: CPU-writable + GPU-mapped for LOAD_CONSTANT_BUFFER */
+   if (!cmd->push_const_bo && cmd->device && cmd->device->rm) {
+      memset(&req, 0, sizeof(req));
+      req.size = NVRM_PUSH_CONST_BO_SIZE;
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      cmd->push_const_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+      if (cmd->push_const_bo) {
+         cmd->push_const_bo_size = NVRM_PUSH_CONST_BO_SIZE;
+         cmd->push_const_map = nv_rm_bo_map(cmd->push_const_bo);
+         if (cmd->push_const_map)
+            memset(cmd->push_const_map, 0, NVRM_PUSH_CONST_BO_SIZE);
+      }
    }
    cmd->push_dw_used = 0;
    cmd->compute_init_done = false;
