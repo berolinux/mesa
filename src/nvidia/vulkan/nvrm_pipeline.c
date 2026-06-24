@@ -11,6 +11,7 @@
 #include "nv_shader.h"
 #include "nv_nir.h"
 #include "nv_fence.h"
+#include "nv_tex.h"
 
 #include "vk_graphics_state.h"
 #include "vk_pipeline.h"
@@ -52,13 +53,30 @@ struct nvrm_descriptor_pool {
 struct nvrm_descriptor_set {
    struct vk_object_base base;
    struct nvrm_descriptor_set_layout *layout;
-   /* Buffer/image writes recorded later; for now only layout ref */
+   struct nvrm_device *device;
    struct {
       struct nv_rm_bo *bo;
       uint64_t offset;
       uint64_t range;
    } ubo[16];
    uint32_t ubo_count;
+   /* Combined image/sampler bindings: pool slot for TEX header index */
+   struct {
+      int tex_slot;          /* index in device tex pool; -1 if unset */
+      struct nvrm_image_view *view;
+      VkFormat format;
+      uint32_t width, height, pitch;
+      uint64_t gpu_addr;
+      bool has_sampler;
+      uint8_t addr_u, addr_v, mag_filt, min_filt;
+   } img[16];
+   uint32_t img_count;
+   struct {
+      struct nv_rm_bo *bo;
+      uint64_t offset;
+      uint64_t range;
+   } ssbo[16];
+   uint32_t ssbo_count;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(nvrm_pipeline_layout, base, VkPipelineLayout,
@@ -547,6 +565,7 @@ nvrm_AllocateDescriptorSets(VkDevice _device,
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       vk_object_base_init(&device->vk, &set->base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
       set->layout = layout;
+      set->device = device;
       if (pool)
          pool->allocated++;
       pDescriptorSets[i] = nvrm_descriptor_set_to_handle(set);
@@ -572,6 +591,126 @@ nvrm_FreeDescriptorSets(VkDevice _device, VkDescriptorPool descriptorPool,
    return VK_SUCCESS;
 }
 
+
+/* ---------- texture descriptor helpers (clc597tex pitch headers) ---------- */
+
+static void
+nvrm_vk_format_to_tex(VkFormat fmt, uint8_t *comp, uint8_t *dt)
+{
+   uint8_t c = NV_TEX_COMP_A8B8G8R8;
+   uint8_t d = NV_TEX_DT_UNORM;
+   switch (fmt) {
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      c = NV_TEX_COMP_A8B8G8R8; d = NV_TEX_DT_UNORM; break;
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+      c = NV_TEX_COMP_A8B8G8R8; d = NV_TEX_DT_UNORM; break;
+   case VK_FORMAT_R32_SFLOAT:
+      c = NV_TEX_COMP_R32; d = NV_TEX_DT_FLOAT; break;
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+      c = NV_TEX_COMP_R16G16B16A16; d = NV_TEX_DT_FLOAT; break;
+   case VK_FORMAT_R32G32B32A32_SFLOAT:
+      c = NV_TEX_COMP_R32G32B32A32; d = NV_TEX_DT_FLOAT; break;
+   case VK_FORMAT_R8_UNORM:
+      c = NV_TEX_COMP_R8; d = NV_TEX_DT_UNORM; break;
+   case VK_FORMAT_R8G8_UNORM:
+      c = NV_TEX_COMP_G8R8; d = NV_TEX_DT_UNORM; break;
+   case VK_FORMAT_D24_UNORM_S8_UINT:
+      c = NV_TEX_COMP_Z24S8; d = NV_TEX_DT_UINT; break;
+   case VK_FORMAT_D32_SFLOAT:
+      c = NV_TEX_COMP_ZF32; d = NV_TEX_DT_FLOAT; break;
+   case VK_FORMAT_D16_UNORM:
+      c = NV_TEX_COMP_Z16; d = NV_TEX_DT_UNORM; break;
+   default:
+      break;
+   }
+   if (comp) *comp = c;
+   if (dt) *dt = d;
+}
+
+static uint8_t
+nvrm_vk_addr_mode(VkSamplerAddressMode m)
+{
+   switch (m) {
+   case VK_SAMPLER_ADDRESS_MODE_REPEAT: return NV_TEX_SAMP_ADDR_WRAP;
+   case VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT: return NV_TEX_SAMP_ADDR_MIRROR;
+   case VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE: return NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   case VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER: return NV_TEX_SAMP_ADDR_BORDER;
+   case VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE: return NV_TEX_SAMP_ADDR_MIRROR;
+   default: return NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   }
+}
+
+static uint8_t
+nvrm_vk_filt(VkFilter f)
+{
+   return (f == VK_FILTER_NEAREST) ? NV_TEX_SAMP_FILT_NEAREST
+                                   : NV_TEX_SAMP_FILT_LINEAR;
+}
+
+/* Lazy per-device texture header pool stored via first descriptor set's device */
+static struct nv_tex_pool *
+nvrm_device_ensure_tex_pool(struct nvrm_device *dev)
+{
+   if (!dev)
+      return NULL;
+   if (!dev->tex_pool)
+      dev->tex_pool = nv_tex_pool_create(dev->rm, 256);
+   return dev->tex_pool;
+}
+
+static int
+nvrm_write_combined_image_sampler(struct nvrm_device *dev,
+                                  struct nvrm_image_view *view,
+                                  const VkSamplerCreateInfo *sci_fallback,
+                                  VkSampler vk_samp,
+                                  struct nv_tex_entry *out_entry)
+{
+   struct nv_tex_desc desc;
+   struct nvrm_image *img;
+   uint32_t w, h, pitch;
+   uint8_t comp, dt;
+   (void)vk_samp;
+   (void)sci_fallback;
+
+   if (!dev || !view || !view->image || !out_entry)
+      return -1;
+   img = view->image;
+   memset(&desc, 0, sizeof(desc));
+   w = img->vk.extent.width ? img->vk.extent.width : 1;
+   h = img->vk.extent.height ? img->vk.extent.height : 1;
+   pitch = w * 4; /* assume RGBA8 pitch for unknown layouts; refine via image info */
+   if (img->vk.extent.width)
+      pitch = (uint32_t)((img->vk.extent.width * 4 + 31) & ~31u);
+   nvrm_vk_format_to_tex(view->format ? view->format : img->vk.format, &comp, &dt);
+   desc.gpu_addr = img->gpu_offset ? img->gpu_offset :
+                   (img->bo ? nv_rm_bo_gpu_offset(img->bo) : 0);
+   desc.width = w;
+   desc.height = h;
+   desc.pitch = pitch;
+   desc.components = comp;
+   desc.data_type = dt;
+   desc.src_x = NV_TEX_SRC_R;
+   desc.src_y = NV_TEX_SRC_G;
+   desc.src_z = NV_TEX_SRC_B;
+   desc.src_w = NV_TEX_SRC_A;
+   desc.texture_type = NV_TEX_TEXTURE_TYPE_2D;
+   desc.normalized_coords = true;
+   if (view->format == VK_FORMAT_R8G8B8A8_SRGB ||
+       view->format == VK_FORMAT_B8G8R8A8_SRGB)
+      desc.s_r_g_b_conversion = true;
+   desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
+   desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
+   desc.mip_filt = NV_TEX_SAMP_FILT_NEAREST;
+   nv_tex_encode_pitch_2d(&desc, out_entry);
+   return 0;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_UpdateDescriptorSets(VkDevice _device,
                           uint32_t descriptorWriteCount,
@@ -579,8 +718,8 @@ nvrm_UpdateDescriptorSets(VkDevice _device,
                           uint32_t descriptorCopyCount,
                           const VkCopyDescriptorSet *pDescriptorCopies)
 {
+   VK_FROM_HANDLE(nvrm_device, device, _device);
    uint32_t i;
-   (void)_device;
    (void)descriptorCopyCount;
    (void)pDescriptorCopies;
 
@@ -598,6 +737,45 @@ nvrm_UpdateDescriptorSets(VkDevice _device,
             set->ubo[set->ubo_count].offset = w->pBufferInfo[j].offset;
             set->ubo[set->ubo_count].range = w->pBufferInfo[j].range;
             set->ubo_count++;
+         }
+      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC) {
+         uint32_t j;
+         for (j = 0; j < w->descriptorCount && set->ssbo_count < 16; j++) {
+            VK_FROM_HANDLE(nvrm_buffer, buf, w->pBufferInfo[j].buffer);
+            set->ssbo[set->ssbo_count].bo = buf ? buf->bo : NULL;
+            set->ssbo[set->ssbo_count].offset = w->pBufferInfo[j].offset;
+            set->ssbo[set->ssbo_count].range = w->pBufferInfo[j].range;
+            set->ssbo_count++;
+         }
+      } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                 w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+         uint32_t j;
+         struct nv_tex_pool *pool = nvrm_device_ensure_tex_pool(device);
+         for (j = 0; j < w->descriptorCount && set->img_count < 16; j++) {
+            VK_FROM_HANDLE(nvrm_image_view, view, w->pImageInfo[j].imageView);
+            struct nv_tex_entry entry;
+            int slot = -1;
+            if (view && pool &&
+                nvrm_write_combined_image_sampler(device, view, NULL,
+                                                  w->pImageInfo[j].sampler,
+                                                  &entry) == 0) {
+               slot = nv_tex_pool_set_entry(pool, -1, &entry);
+            }
+            set->img[set->img_count].tex_slot = slot;
+            set->img[set->img_count].view = view;
+            set->img[set->img_count].format = view ? view->format : VK_FORMAT_UNDEFINED;
+            if (view && view->image) {
+               set->img[set->img_count].width = view->image->vk.extent.width;
+               set->img[set->img_count].height = view->image->vk.extent.height;
+               set->img[set->img_count].gpu_addr =
+                  view->image->gpu_offset ? view->image->gpu_offset :
+                  (view->image->bo ? nv_rm_bo_gpu_offset(view->image->bo) : 0);
+            }
+            set->img[set->img_count].has_sampler =
+               (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+            set->img_count++;
          }
       }
    }
@@ -1048,6 +1226,10 @@ nvrm_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
             /* firstSet+i as bind group approximation; slot u */
             nv_3d_bind_group_constant_buffer(&cmd->push, firstSet + i, u, true);
          }
+      }
+      /* Bind texture header/sampler pools when set has image descriptors */
+      if (set->img_count > 0 && cmd->device && cmd->device->tex_pool) {
+         nv_tex_pool_emit_bind(&cmd->push, cmd->device->tex_pool);
       }
    }
 }

@@ -5,6 +5,7 @@
 
 #include "nvrm_private.h"
 #include "nvrm_wsi.h"
+#include "nv_tex.h"
 
 #include "vk_common_entrypoints.h"
 #include "vk_util.h"
@@ -282,7 +283,11 @@ nvrm_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (!device)
       return;
    if (device->queue) {
-      nvrm_queue_finish(device->queue);
+      if (device->tex_pool) {
+      nv_tex_pool_destroy(device->tex_pool);
+      device->tex_pool = NULL;
+   }
+   nvrm_queue_finish(device->queue);
       vk_free(&device->vk.alloc, device->queue);
    }
    vk_device_finish(&device->vk);

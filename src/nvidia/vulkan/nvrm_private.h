@@ -56,6 +56,7 @@ struct nvrm_device {
    struct nv_rm_device *rm;
    const struct nv_device_info *info;
    struct nvrm_queue *queue;
+   struct nv_tex_pool *tex_pool; /* sampler+header pool for descriptors */
 };
 
 struct nvrm_queue {
