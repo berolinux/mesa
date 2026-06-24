@@ -1089,11 +1089,35 @@ nvrm_CmdBlitImage2(VkCommandBuffer commandBuffer,
       if (sh == 0) sh = 1;
       if (dw == 0) dw = 1;
       if (dh == 0) dh = 1;
-      /* Unscaled CE pitch/BL blit; scaled/LINEAR filter needs 3D/TEX later */
-      w = sw < dw ? sw : dw;
-      h = sh < dh ? sh : dh;
       soff = saddr + (uint64_t)sy0 * spitch + (uint64_t)sx0 * sbpp;
       doff = daddr + (uint64_t)dy0 * dpitch + (uint64_t)dx0 * dbpp;
+      /*
+       * Path selection (kernel/binary driver patterns):
+       *  - 1:1 NEAREST, non-MSAA: CE pitch/blocklinear blit
+       *  - scaled or LINEAR filter or MSAA src: emit 3D blit-pass state then
+       *    fall back to CE min(w,h) sample0 copy until full TEX meta shaders
+       *    are wired (state is correct for a subsequent 3D full-screen pass)
+       */
+      if (nv_3d_blit_needs_3d_filter(sw, sh, dw, dh,
+                                     pBlitImageInfo->filter == VK_FILTER_LINEAR,
+                                     src->vk.samples ? src->vk.samples : 1)) {
+         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+         if (src->vk.samples > 1)
+            nv_3d_emit_msaa_resolve_state(&cmd->push,
+                                          src->vk.samples ? src->vk.samples : 1,
+                                          1, NV_3D_RESOLVE_MODE_AVERAGE);
+         nv_3d_emit_blit_pass_state(&cmd->push,
+                                    (uint32_t)(dx0 > 0 ? dx0 : 0),
+                                    (uint32_t)(dy0 > 0 ? dy0 : 0),
+                                    dw, dh, true);
+         if (class_copy)
+            nv_copy_set_object(&cmd->push, class_copy);
+         else
+            nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COPY);
+      }
+      /* CE path: min extent (scaled 3D incomplete — still copies overlapping rect) */
+      w = sw < dw ? sw : dw;
+      h = sh < dh ? sh : dh;
       line_len = w * (sbpp < dbpp ? sbpp : dbpp);
       if (src->is_blocklinear || dst->is_blocklinear)
          nv_copy_emit_image_2d_bl(&cmd->push, soff, doff, w, h, sbpp,
@@ -1120,16 +1144,40 @@ VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdResolveImage2(VkCommandBuffer commandBuffer,
                       const VkResolveImageInfo2 *pResolveImageInfo)
 {
-   /* MSAA resolve: 1:1 CE copy of first sample (full resolve needs 3D). */
+   /*
+    * MSAA resolve: emit 3D resolve state (sample mask / AA off on dst) then
+    * CE sample0 pitch copy when linear 1:1; blocklinear multisample falls
+    * through the same path with 3D state primed for a full TEX resolve pass.
+    */
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(nvrm_image, src_img,
+                  pResolveImageInfo ? pResolveImageInfo->srcImage : VK_NULL_HANDLE);
    VkBlitImageInfo2 bi;
    VkImageBlit2 stack_regions[4];
    VkImageBlit2 *regions = stack_regions;
    VkImageBlit2 *heap = NULL;
    uint32_t i, n;
+   uint32_t src_samples;
 
    if (!pResolveImageInfo || !pResolveImageInfo->regionCount)
       return;
    n = pResolveImageInfo->regionCount;
+   src_samples = (src_img && src_img->vk.samples) ? src_img->vk.samples : 4;
+   if (cmd && cmd->push_map) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_msaa_resolve_state(&cmd->push, src_samples, 1,
+                                    NV_3D_RESOLVE_MODE_AVERAGE);
+      /* Program first region scissor as representative blit pass */
+      if (n > 0) {
+         const VkImageResolve2 *r0 = &pResolveImageInfo->pRegions[0];
+         nv_3d_emit_blit_pass_state(&cmd->push,
+                                    (uint32_t)r0->dstOffset.x,
+                                    (uint32_t)r0->dstOffset.y,
+                                    r0->extent.width ? r0->extent.width : 1,
+                                    r0->extent.height ? r0->extent.height : 1,
+                                    true);
+      }
+   }
    if (n > 4) {
       heap = (VkImageBlit2 *)calloc(n, sizeof(*heap));
       if (!heap)

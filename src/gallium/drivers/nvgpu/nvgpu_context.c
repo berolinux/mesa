@@ -1361,18 +1361,71 @@ nvgpu_delete_sampler_state(struct pipe_context *pctx, void *state)
 }
 
 
-/* ---- blit: prefer HW copy; otherwise util_blitter if available ---- */
+/* ---- blit: prefer HW copy; MSAA resolve / filtered via 3D state + blitter ---- */
+
+static void
+nvgpu_emit_resolve_or_blit_3d_state(struct nvgpu_context *ctx,
+                                    const struct pipe_blit_info *info)
+{
+   struct nv_push push;
+   uint32_t src_samples, dx, dy, dw, dh;
+   bool msaa_src, needs_3d;
+
+   if (!ctx || !info)
+      return;
+   src_samples = info->src.resource->nr_samples
+      ? info->src.resource->nr_samples : 1;
+   msaa_src = src_samples > 1;
+   needs_3d = nv_3d_blit_needs_3d_filter(
+      (uint32_t)info->src.box.width, (uint32_t)info->src.box.height,
+      (uint32_t)info->dst.box.width, (uint32_t)info->dst.box.height,
+      info->filter == PIPE_TEX_FILTER_LINEAR, src_samples);
+   if (!needs_3d && !msaa_src)
+      return;
+
+   if (!nvgpu_push_start(ctx, &push, 64))
+      return;
+   nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+   if (msaa_src)
+      nv_3d_emit_msaa_resolve_state(&push, src_samples, 1,
+                                    NV_3D_RESOLVE_MODE_AVERAGE);
+   dx = (uint32_t)(info->dst.box.x > 0 ? info->dst.box.x : 0);
+   dy = (uint32_t)(info->dst.box.y > 0 ? info->dst.box.y : 0);
+   dw = (uint32_t)(info->dst.box.width > 0 ? info->dst.box.width : 1);
+   dh = (uint32_t)(info->dst.box.height > 0 ? info->dst.box.height : 1);
+   nv_3d_emit_blit_pass_state(&push, dx, dy, dw, dh, true);
+   nvgpu_push_finish(ctx, &push, false);
+}
 
 static void
 nvgpu_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    struct pipe_box box;
+   uint32_t src_samples;
+   bool msaa_resolve;
 
    if (!info || !info->src.resource || !info->dst.resource)
       return;
 
-   /* Nearest, same-format, no scaling: use CE path via resource_copy_region */
+   src_samples = info->src.resource->nr_samples
+      ? info->src.resource->nr_samples : 1;
+   msaa_resolve = src_samples > 1 &&
+      (info->dst.resource->nr_samples <= 1) &&
+      info->src.box.width == info->dst.box.width &&
+      info->src.box.height == info->dst.box.height;
+
+   /* Emit 3D resolve/blit pass state before CE or software blitter */
+   if (msaa_resolve ||
+       nv_3d_blit_needs_3d_filter((uint32_t)info->src.box.width,
+                                  (uint32_t)info->src.box.height,
+                                  (uint32_t)info->dst.box.width,
+                                  (uint32_t)info->dst.box.height,
+                                  info->filter == PIPE_TEX_FILTER_LINEAR,
+                                  src_samples))
+      nvgpu_emit_resolve_or_blit_3d_state(ctx, info);
+
+   /* Nearest, same-format, no scaling (incl. MSAA sample0 interim): CE path */
    if (info->src.resource->format == info->dst.resource->format &&
        info->filter == PIPE_TEX_FILTER_NEAREST &&
        info->src.box.width == info->dst.box.width &&

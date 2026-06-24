@@ -310,6 +310,35 @@ nv_sass_buf_copy_out(const struct nv_sass_buf *b,
    return n;
 }
 
+int
+nv_sass_buf_validate(const struct nv_sass_buf *b, uint32_t max_insn_dwords)
+{
+   uint32_t hi;
+   if (!b || !b->dwords || b->count < NV_SASS_DWORDS_PER_INSN)
+      return -1;
+   if (b->count & 1u)
+      return -2; /* must be pairs of lo/hi */
+   if (max_insn_dwords && b->count > max_insn_dwords)
+      return -5;
+   if (b->max_reg > 255)
+      return -4;
+   /* Last instruction should be EXIT class (or NOP/EXIT family) */
+   hi = b->dwords[b->count - 1];
+   if (!nv_sass_hi_is_exit_class(hi)) {
+      /* Allow if any trailing insn is EXIT class within last 4 insns */
+      uint32_t i, found = 0;
+      for (i = 1; i <= b->count && i <= 8; i += 2) {
+         if (nv_sass_hi_is_exit_class(b->dwords[b->count - i])) {
+            found = 1;
+            break;
+         }
+      }
+      if (!found)
+         return -3;
+   }
+   return 0;
+}
+
 
 bool
 nv_sass_emit_shf_l(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb)

@@ -2114,6 +2114,120 @@ nv_3d_emit_blend_zsa_raster(struct nv_push *p,
 
 
 /**
+ * MSAA resolve / multisample-to-single-sample setup for NVC597.
+ *
+ * Full hardware resolve normally uses a 3D full-screen pass with a resolve
+ * shader, or SET_ANTI_ALIAS with dst at 1x and src multisampled bound as CT.
+ * Here we emit the method state used by the proprietary path before a
+ * single-sample draw or CE pitch-copy of sample 0 (when sample_count==1 on dst).
+ *
+ * src_samples: multisample count of the resolve source (2/4/8/16)
+ * dst_samples: usually 1 for resolve destination
+ * resolve_mode: 0 = average (default colour resolve), 1 = min, 2 = max, 3 = sample0 only
+ */
+#define NV_3D_RESOLVE_MODE_AVERAGE   0
+#define NV_3D_RESOLVE_MODE_MIN       1
+#define NV_3D_RESOLVE_MODE_MAX       2
+#define NV_3D_RESOLVE_MODE_SAMPLE0   3
+
+static inline void
+nv_3d_emit_msaa_resolve_state(struct nv_push *p, uint32_t src_samples,
+                              uint32_t dst_samples, uint32_t resolve_mode)
+{
+   uint32_t src_log2 = 0, dst_log2 = 0;
+   if (!p)
+      return;
+   if (src_samples >= 16) src_log2 = 4;
+   else if (src_samples >= 8) src_log2 = 3;
+   else if (src_samples >= 4) src_log2 = 2;
+   else if (src_samples >= 2) src_log2 = 1;
+   if (dst_samples >= 16) dst_log2 = 4;
+   else if (dst_samples >= 8) dst_log2 = 3;
+   else if (dst_samples >= 4) dst_log2 = 2;
+   else if (dst_samples >= 2) dst_log2 = 1;
+
+   /* Destination is single-sample for typical resolve; source AA disabled on CT. */
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_ENABLE, dst_samples > 1 ? 1 : 0);
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_SAMPLES, dst_log2);
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL, 0);
+   /* Sample mask all-on for resolve sampling */
+   nv_3d_emit_sample_mask(p, 0xffffu);
+   (void)src_log2;
+   (void)resolve_mode; /* mode selects shader/CE path at higher level */
+}
+
+/**
+ * Indicate whether a blit/resolve pair needs filtered 3D (scaled or LINEAR)
+ * versus a pure CE pitch/blocklinear copy (1:1 NEAREST, same bpp).
+ */
+static inline bool
+nv_3d_blit_needs_3d_filter(uint32_t src_w, uint32_t src_h,
+                           uint32_t dst_w, uint32_t dst_h,
+                           bool linear_filter, uint32_t src_samples)
+{
+   if (linear_filter)
+      return true;
+   if (src_w != dst_w || src_h != dst_h)
+      return true;
+   if (src_samples > 1)
+      return true; /* multisample source: prefer resolve path over CE sample0 */
+   return false;
+}
+
+/**
+ * Emit minimal 3D state for a full-screen / scissored blit pass that will
+ * sample src via texture and write dst via CT.  Caller binds CT/Z/tex/shaders
+ * separately; this sets viewport/scissor/clip/raster defaults for the pass.
+ *
+ * x,y,w,h: destination rect in pixels (viewport + surface clip).
+ */
+static inline void
+nv_3d_emit_blit_pass_state(struct nv_push *p, uint32_t x, uint32_t y,
+                           uint32_t w, uint32_t h, bool depth_test_off)
+{
+   if (!p)
+      return;
+   if (!w) w = 1;
+   if (!h) h = 1;
+   nv_3d_set_surface_clip(p, x, y, w, h);
+   nv_3d_set_viewport_n(p, 0, (float)x, (float)y, (float)w, (float)h, 0.0f, 1.0f);
+   nv_3d_set_scissor_n(p, 0, (int32_t)x, (int32_t)y, w, h);
+   if (depth_test_off) {
+      nv_push_method(p, NVC597_SET_DEPTH_TEST, 0);
+      nv_push_method(p, NVC597_SET_DEPTH_WRITE, 0);
+   }
+   nv_push_method(p, NVC597_SET_STENCIL_TEST, 0);
+   nv_3d_emit_msaa(p, 1, false);
+   /* Always render for meta blit/resolve pass */
+   nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE,
+                  NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER);
+}
+
+/**
+ * CE-assisted MSAA resolve: when full 3D resolve shaders are unavailable,
+ * copy sample-0 plane with pitch layout (linear approximation).  For
+ * blocklinear multisample surfaces the proprietary driver uses 3D/TEX;
+ * callers should fall back to nv_3d_emit_msaa_resolve_state + blit pass.
+ *
+ * Returns true if CE sample0 path is appropriate (1:1 rect, no filter).
+ */
+static inline bool
+nv_3d_resolve_can_use_ce_sample0(uint32_t src_w, uint32_t src_h,
+                                 uint32_t dst_w, uint32_t dst_h,
+                                 bool linear_filter, uint32_t src_samples,
+                                 bool src_blocklinear)
+{
+   if (linear_filter || src_blocklinear)
+      return false;
+   if (src_w != dst_w || src_h != dst_h)
+      return false;
+   if (src_samples <= 1)
+      return true; /* degenerate: normal copy */
+   /* Multisample linear: sample0 CE is acceptable interim path */
+   return true;
+}
+
+/**
  * Clear one MRT slot (target_index 0..7) with the given colour.  NVC597
  * CLEAR_SURFACE selects the MRT via bits 6..8; colour values are set once
  * then applied per-target.  buffers mask uses bit 4<<i for COLORi (PIPE style)

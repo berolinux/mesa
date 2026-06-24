@@ -66,16 +66,19 @@ nv_shader_fill_stage_defaults(struct nv_shader *sh)
    if (!sh->register_count)
       sh->register_count = 16;
 
-   /* Conservative tess/GS defaults until NIR meta is applied */
+   /* Conservative tess/GS defaults; mark valid so bind emits stage methods
+    * even before NIR meta is available (pipeline create may refine later). */
    if (sh->kind == NV_SHADER_KIND_TESS_EVAL ||
        sh->kind == NV_SHADER_KIND_TESS_CTRL) {
       sh->tess_domain = NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_TRIANGLE;
       sh->tess_spacing = NVC597_SET_TESSELLATION_PARAMETERS_SPACING_INTEGER;
       sh->tess_output_prim = NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CCW;
+      sh->tess_meta_valid = true;
    }
    if (sh->kind == NV_SHADER_KIND_GEOMETRY) {
       sh->gs_output_topology_nv = NVC597_TOPOLOGY_TRIANGLES;
       sh->gs_max_output_vertices = 256;
+      sh->gs_meta_valid = true;
    }
 }
 

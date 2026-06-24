@@ -734,6 +734,35 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
          if (pipe->fs)
             nv_shader_compile_nir_stub(pipe->fs);
       }
+      /* Pipeline-create tess/GS meta: ensure stage meta is valid even if NIR
+       * path was skipped or failed; defaults are safe tri/frac_odd/tri_strip. */
+      if (pipe->tcs) {
+         if (!pipe->tcs->tess_meta_valid)
+            nv_shader_fill_stage_meta_from_nir(pipe->tcs);
+         if (!pipe->tcs->tess_meta_valid)
+            nv_shader_fill_stage_defaults(pipe->tcs);
+      }
+      if (pipe->tes) {
+         if (!pipe->tes->tess_meta_valid)
+            nv_shader_fill_stage_meta_from_nir(pipe->tes);
+         if (!pipe->tes->tess_meta_valid)
+            nv_shader_fill_stage_defaults(pipe->tes);
+      }
+      if (pipe->gs) {
+         if (!pipe->gs->gs_meta_valid)
+            nv_shader_fill_stage_meta_from_nir(pipe->gs);
+         if (!pipe->gs->gs_meta_valid)
+            nv_shader_fill_stage_defaults(pipe->gs);
+      }
+      /* Tessellation state from VkPipelineTessellationStateCreateInfo when present */
+      if (ci->pTessellationState && (pipe->tcs || pipe->tes)) {
+         struct nv_shader *tess_sh = pipe->tes ? pipe->tes : pipe->tcs;
+         if (tess_sh && !tess_sh->tess_meta_valid) {
+            nv_shader_fill_stage_defaults(tess_sh);
+            tess_sh->tess_meta_valid = true;
+         }
+         (void)ci->pTessellationState->patchControlPoints;
+      }
       if (pipe->vs && pipe->vs->code_gpu_addr)
          pipe->program_region_base = pipe->vs->code_gpu_addr;
 

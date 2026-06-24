@@ -745,6 +745,166 @@ nv_nvdec_hevc_set_dpb_ref(struct nv_nvdec_hevc_pic_setup *ps, unsigned slot,
    ps->dpb_chroma[slot] = chroma_va;
 }
 
+/* ---- Minimal Annex-B / AVCC NAL unit walker (host-side bitstream prep) ---- */
+
+/** H.264/HEVC NAL unit types (low 5 bits for H.264; HEVC uses 6-bit type). */
+#define NV_NAL_H264_TYPE_NON_IDR     1
+#define NV_NAL_H264_TYPE_IDR         5
+#define NV_NAL_H264_TYPE_SEI         6
+#define NV_NAL_H264_TYPE_SPS         7
+#define NV_NAL_H264_TYPE_PPS         8
+#define NV_NAL_H264_TYPE_AUD         9
+#define NV_NAL_HEVC_TYPE_VPS         32
+#define NV_NAL_HEVC_TYPE_SPS         33
+#define NV_NAL_HEVC_TYPE_PPS         34
+#define NV_NAL_HEVC_TYPE_IDR_W_RADL  19
+#define NV_NAL_HEVC_TYPE_IDR_N_LP    20
+#define NV_NAL_HEVC_TYPE_CRA         21
+#define NV_NAL_HEVC_TYPE_TRAIL_R     1
+
+struct nv_nal_unit {
+   const uint8_t *data;   /* points at NAL header byte (after start code) */
+   uint32_t size;         /* bytes including header, excluding start code */
+   uint8_t nal_type;      /* H.264: low 5 bits; HEVC: (byte0>>1)&0x3f */
+   uint8_t nal_ref_idc;   /* H.264 only: (byte0>>5)&3 */
+   bool is_hevc;
+};
+
+/**
+ * Find next Annex-B start code (0x000001 or 0x00000001) at or after *off.
+ * Returns start-code byte length (3 or 4), or 0 if none. Updates *off to
+ * first byte of start code.
+ */
+static inline uint32_t
+nv_nal_find_start_code(const uint8_t *buf, uint32_t buf_size, uint32_t *off)
+{
+   uint32_t i;
+   if (!buf || !off || *off >= buf_size)
+      return 0;
+   for (i = *off; i + 3 < buf_size; i++) {
+      if (buf[i] == 0 && buf[i + 1] == 0) {
+         if (buf[i + 2] == 1) {
+            *off = i;
+            return 3;
+         }
+         if (i + 4 <= buf_size && buf[i + 2] == 0 && buf[i + 3] == 1) {
+            *off = i;
+            return 4;
+         }
+      }
+   }
+   return 0;
+}
+
+/**
+ * Parse next Annex-B NAL from bitstream at *cursor. On success advances
+ * *cursor past this NAL (to next start code or end). is_hevc selects type
+ * extraction. Returns true if a NAL was found.
+ */
+static inline bool
+nv_nal_next_annexb(const uint8_t *buf, uint32_t buf_size, uint32_t *cursor,
+                   bool is_hevc, struct nv_nal_unit *out)
+{
+   uint32_t sc_off, sc_len, nal_start, next_sc, next_len, nal_end;
+   if (!buf || !cursor || !out || *cursor >= buf_size)
+      return false;
+   sc_off = *cursor;
+   sc_len = nv_nal_find_start_code(buf, buf_size, &sc_off);
+   if (!sc_len)
+      return false;
+   nal_start = sc_off + sc_len;
+   if (nal_start >= buf_size)
+      return false;
+   next_sc = nal_start;
+   next_len = nv_nal_find_start_code(buf, buf_size, &next_sc);
+   nal_end = next_len ? next_sc : buf_size;
+   /* trim trailing zeros that precede next start code */
+   while (nal_end > nal_start && buf[nal_end - 1] == 0)
+      nal_end--;
+   if (nal_end <= nal_start)
+      return false;
+   memset(out, 0, sizeof(*out));
+   out->data = buf + nal_start;
+   out->size = nal_end - nal_start;
+   out->is_hevc = is_hevc;
+   if (is_hevc)
+      out->nal_type = (uint8_t)((out->data[0] >> 1) & 0x3f);
+   else {
+      out->nal_type = (uint8_t)(out->data[0] & 0x1f);
+      out->nal_ref_idc = (uint8_t)((out->data[0] >> 5) & 0x3);
+   }
+   *cursor = next_len ? next_sc : buf_size;
+   return true;
+}
+
+/**
+ * Scan Annex-B buffer for first SPS/PPS (H.264) or VPS/SPS/PPS (HEVC).
+ * Writes pointer/size of first matching NAL payload (header included) into
+ * out_*; returns number of parameter sets found (0..3).
+ */
+static inline unsigned
+nv_nal_find_param_sets_annexb(const uint8_t *buf, uint32_t buf_size, bool is_hevc,
+                              const uint8_t **sps_out, uint32_t *sps_size,
+                              const uint8_t **pps_out, uint32_t *pps_size,
+                              const uint8_t **vps_out, uint32_t *vps_size)
+{
+   uint32_t cur = 0;
+   struct nv_nal_unit nal;
+   unsigned found = 0;
+   if (sps_out) *sps_out = NULL;
+   if (sps_size) *sps_size = 0;
+   if (pps_out) *pps_out = NULL;
+   if (pps_size) *pps_size = 0;
+   if (vps_out) *vps_out = NULL;
+   if (vps_size) *vps_size = 0;
+   if (!buf || !buf_size)
+      return 0;
+   while (nv_nal_next_annexb(buf, buf_size, &cur, is_hevc, &nal)) {
+      if (is_hevc) {
+         if (nal.nal_type == NV_NAL_HEVC_TYPE_VPS && vps_out && !*vps_out) {
+            *vps_out = nal.data;
+            if (vps_size) *vps_size = nal.size;
+            found++;
+         } else if (nal.nal_type == NV_NAL_HEVC_TYPE_SPS && sps_out && !*sps_out) {
+            *sps_out = nal.data;
+            if (sps_size) *sps_size = nal.size;
+            found++;
+         } else if (nal.nal_type == NV_NAL_HEVC_TYPE_PPS && pps_out && !*pps_out) {
+            *pps_out = nal.data;
+            if (pps_size) *pps_size = nal.size;
+            found++;
+         }
+      } else {
+         if (nal.nal_type == NV_NAL_H264_TYPE_SPS && sps_out && !*sps_out) {
+            *sps_out = nal.data;
+            if (sps_size) *sps_size = nal.size;
+            found++;
+         } else if (nal.nal_type == NV_NAL_H264_TYPE_PPS && pps_out && !*pps_out) {
+            *pps_out = nal.data;
+            if (pps_size) *pps_size = nal.size;
+            found++;
+         }
+      }
+   }
+   return found;
+}
+
+/**
+ * True if NAL is a coded slice that NVDEC execute would consume (non-PS).
+ */
+static inline bool
+nv_nal_is_slice(const struct nv_nal_unit *nal)
+{
+   if (!nal || !nal->data || !nal->size)
+      return false;
+   if (nal->is_hevc) {
+      uint8_t t = nal->nal_type;
+      return t <= 9 || t == NV_NAL_HEVC_TYPE_IDR_W_RADL ||
+             t == NV_NAL_HEVC_TYPE_IDR_N_LP || t == NV_NAL_HEVC_TYPE_CRA;
+   }
+   return nal->nal_type >= 1 && nal->nal_type <= 5;
+}
+
 /* Build frame_setup + write pic_setup BO from codec struct; returns 0 on success */
 static inline int
 nv_nvdec_fill_frame_from_h264(struct nv_nvdec_frame_setup *fs,

@@ -1186,6 +1186,15 @@ nv_nir_compile(const struct nir_shader *nir,
    if (regs > 255)
       regs = 255;
 
+   /* Sanity-check SASS before SPH upload (missing EXIT => append EXIT) */
+   {
+      int sv = nv_sass_buf_validate(&sass, NV_SASS_MAX_INSNS * NV_SASS_DWORDS_PER_INSN * 4);
+      if (sv == -3)
+         nv_sass_emit_exit(&sass);
+      else if (sv == -1 || sv == -2)
+         nv_sass_emit_exit(&sass);
+   }
+
    nv_sph_info_defaults(&info, sph_type);
    if (opts->sph_version)
       info.sph_version = opts->sph_version;

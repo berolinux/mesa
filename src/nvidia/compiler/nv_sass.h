@@ -333,6 +333,22 @@ bool nv_sass_emit_interp_input(struct nv_sass_buf *b, uint8_t rd,
 uint32_t nv_sass_buf_copy_out(const struct nv_sass_buf *b,
                               uint32_t *dst, uint32_t dst_cap_dwords);
 
+/**
+ * Validate a SASS buffer before SPH upload (sanity only; not full decode).
+ * Returns 0 if OK, negative error code:
+ *  -1 null/empty, -2 odd dword count, -3 missing EXIT class at end,
+ *  -4 register count exceeds hardware max (255), -5 oversize vs SPH limit.
+ */
+int nv_sass_buf_validate(const struct nv_sass_buf *b, uint32_t max_insn_dwords);
+
+/** True if hi dword looks like Maxwell/Pascal EXIT/NOP class (0x50b0xxxx). */
+static inline bool
+nv_sass_hi_is_exit_class(uint32_t hi)
+{
+   return (hi & 0xffff0000u) == 0x50b00000u ||
+          (hi & 0xfff00000u) == 0x50b00000u;
+}
+
 /* Track register pressure helper */
 static inline void
 nv_sass_note_reg(struct nv_sass_buf *b, uint8_t r)
