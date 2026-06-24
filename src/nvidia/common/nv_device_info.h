@@ -74,6 +74,8 @@ struct nv_device_info {
    uint32_t class_copy;
    uint32_t class_gpfifo;
    uint32_t class_sw;
+   uint32_t class_nvdec;        /* NVDEC video decode engine */
+   uint32_t class_nvenc;        /* NVENC video encode engine */
 
    bool has_graphics;
    bool has_compute;

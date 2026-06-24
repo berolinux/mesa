@@ -4,6 +4,7 @@
  */
 
 #include "nv_device_info.h"
+#include "nv_video_methods.h"
 
 /* Channel / engine class IDs from open-gpu-kernel-modules class headers */
 #define KEPLER_A_COMPUTE_A          0x0000a0c0
@@ -178,5 +179,15 @@ nv_device_info_select_classes(struct nv_device_info *info)
       info->has_graphics = false;
       info->has_compute = false;
       break;
+   }
+
+   /* Video engines (NVDEC/NVENC) — class IDs from open-gpu-kernel-modules
+    * class/cl*b0.h / cl*b7.h; selected by SM version when known. */
+   if (info->has_graphics || info->has_compute) {
+      uint8_t sm = (uint8_t)(info->sm_version ? info->sm_version : 0x75);
+      info->class_nvdec = nv_video_pick_nvdec_class(sm);
+      info->class_nvenc = nv_video_pick_nvenc_class(sm);
+      info->has_video_decode = (info->class_nvdec != 0);
+      info->has_video_encode = (info->class_nvenc != 0);
    }
 }
