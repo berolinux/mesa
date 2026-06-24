@@ -269,12 +269,18 @@ nvgpu_ensure_shader_uploaded(struct nvgpu_context *ctx,
    if (!scso || !scso->nvsh || scso->nvsh->uploaded)
       return;
 
-   /* NIR->SPH+SASS via nvidia compiler (EXIT stub until full ISel); falls
-    * back to trivial SPH if no NIR attached. */
-   if (scso->nvsh->nir)
-      nv_shader_compile_nir(scso->nvsh, scso->nvsh->nir);
-   else
+   /* NIR->SPH+SASS via nvidia compiler; compute without NIR uses smoke SPH+EXIT */
+   if (scso->nvsh->nir) {
+      if (nv_shader_compile_nir(scso->nvsh, scso->nvsh->nir) != 0 &&
+          scso->nvsh->kind == NV_SHADER_KIND_COMPUTE)
+         (void)nv_shader_upload_compute_smoke(scso->nvsh, 0, 0, 0, 16);
+      else if (!scso->nvsh->uploaded)
+         nv_shader_compile_nir_stub(scso->nvsh);
+   } else if (scso->nvsh->kind == NV_SHADER_KIND_COMPUTE) {
+      (void)nv_shader_upload_compute_smoke(scso->nvsh, 0, 0, 0, 16);
+   } else {
       nv_shader_compile_nir_stub(scso->nvsh);
+   }
    if (scso->nvsh->uploaded && !ctx->program_region_base && scso->nvsh->code_gpu_addr)
       ctx->program_region_base = scso->nvsh->code_gpu_addr;
 }
@@ -956,6 +962,10 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
    (void)color_clear_mask;
    (void)stencil_clear_mask;
 
+   /* Fence sema for CPU wait after clear (3D report release) */
+   if (!ctx->fence && ctx->screen && ctx->screen->rm)
+      ctx->fence = nv_fence_create(ctx->screen->rm);
+
    /* MRT clear when only specific colour targets requested (buffers bits 4..11) */
    if ((buffers & PIPE_CLEAR_COLOR) && color_ui) {
       unsigned ti;
@@ -978,6 +988,13 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
       nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth, stencil);
    }
    (void)sc_enable;
+   /* 3D sema after clear for vertical-slice wait (not only GPGet) */
+   if (ctx->fence && ctx->fence->sema_gpu_addr) {
+      uint32_t payload = nv_fence_alloc_seq(ctx->fence);
+      nv_3d_report_semaphore_release(&push, ctx->fence->sema_gpu_addr,
+                                     payload, true);
+      ctx->last_fence_seq = payload;
+   }
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);
 }
@@ -1125,6 +1142,18 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          nv_3d_emit_draw_vertex_array_instanced(&push, topo, draws[i].start,
                                                 draws[i].count, instance_count,
                                                 start_instance);
+      }
+
+      /* Last draw in batch: 3D sema so flush/wait can poll fence seq */
+      if (i + 1 == num_draws) {
+         if (!ctx->fence && ctx->screen && ctx->screen->rm)
+            ctx->fence = nv_fence_create(ctx->screen->rm);
+         if (ctx->fence && ctx->fence->sema_gpu_addr) {
+            uint32_t payload = nv_fence_alloc_seq(ctx->fence);
+            nv_3d_report_semaphore_release(&push, ctx->fence->sema_gpu_addr,
+                                           payload, true);
+            ctx->last_fence_seq = payload;
+         }
       }
 
       nv_push_wfi(&push);
@@ -1553,6 +1582,19 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       prog = cs->nvsh->code_gpu_addr;
       if (cs->nvsh->register_count)
          regs = cs->nvsh->register_count;
+   } else if (ctx->screen && ctx->screen->rm) {
+      /* No bound CSO: transient smoke compute object for vertical-slice tests */
+      static struct nv_shader *smoke_cs;
+      if (!smoke_cs) {
+         smoke_cs = nv_shader_create(ctx->screen->rm, NV_SHADER_KIND_COMPUTE);
+         if (smoke_cs)
+            (void)nv_shader_upload_compute_smoke(smoke_cs, 0, 0, 0, 16);
+      }
+      if (smoke_cs && smoke_cs->uploaded) {
+         prog = smoke_cs->code_gpu_addr;
+         if (smoke_cs->register_count)
+            regs = smoke_cs->register_count;
+      }
    }
 
    gx = info->grid[0] ? info->grid[0] : 1;

@@ -799,9 +799,14 @@ nvrm_CreateComputePipelines(VkDevice _device, VkPipelineCache pipelineCache,
       pipe->shared_mem_bytes = 0;
       pipe->cs = nvrm_compile_stage(device, &pCreateInfos[i].stage);
       if (!pipe->cs) {
+         /* No SPIR-V/NIR stage: upload compute smoke SPH+EXIT for QMD dispatch */
          pipe->cs = nv_shader_create(device->rm, NV_SHADER_KIND_COMPUTE);
          if (pipe->cs)
-            nv_shader_compile_nir_stub(pipe->cs);
+            (void)nv_shader_upload_compute_smoke(pipe->cs, 0, 0, 0, 16);
+      } else if (pipe->cs && !pipe->cs->uploaded) {
+         /* Compile failed to produce code: still need a valid program object */
+         if (nv_shader_compile_nir_stub(pipe->cs) != 0)
+            (void)nv_shader_upload_compute_smoke(pipe->cs, 0, 0, 0, 16);
       }
       /* Pull local size / shared mem from compiled NIR when available */
       if (pipe->cs && pipe->cs->nir) {
@@ -2801,6 +2806,13 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    desc->sass_version = sass_ver;
    desc->sm_global_caching = true;
    desc->invalidate_caches = !cmd->compute_init_done;
+
+   /* Ensure compute program object exists (smoke SPH+EXIT if still empty) */
+   if (cs && !cs->uploaded && cs->rm)
+      (void)nv_shader_upload_compute_smoke(cs, 0, 0, 0,
+                                           regs ? regs : 16);
+   if (cs && cs->code_gpu_addr)
+      desc->program_addr = cs->code_gpu_addr;
 
    /* QMD sema release0 on submit_fence: alloc seq so CPU/queue wait sees GEQ */
    if (cmd->device && cmd->device->queue &&

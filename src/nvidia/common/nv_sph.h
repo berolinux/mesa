@@ -202,19 +202,19 @@ nv_sph_build_compute_store_imm(struct nv_sph_blob *blob, uint32_t imm_value,
    if (store_addr) {
       uint32_t lo = (uint32_t)(store_addr & 0xffffffffu);
       uint32_t hi = (uint32_t)(store_addr >> 32);
-      /* MOV R2, store_lo (imm in lo dword with Rd=2) */
-      s[n++] = 2u | (lo & 0xffffff00u); /* imm/reg layout approximate */
-      s[n++] = NV_SPH_SASS_MOV_HI_REG | (lo & 0xffu);
-      s[n++] = 2u | lo;
+      /*
+       * Approximate Maxwell/Pascal 64-bit insn layout (matches nv_sass.c notes):
+       *   lo[7:0]=Rd, lo[31:8] often carries imm/addr fragments; hi = class.
+       * MOV32I-style: full imm in lo with Rd in low 8 bits (refined vs traces).
+       */
+      s[n++] = (2u & 0xffu) | ((lo & 0xffffffu) << 8);
       s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      /* MOV R3, store_hi */
-      s[n++] = 3u | hi;
+      s[n++] = (3u & 0xffu) | ((hi & 0xffffffu) << 8);
       s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      /* MOV R1, imm_value (payload written by STG) */
-      s[n++] = 1u | imm_value;
+      s[n++] = (1u & 0xffu) | ((imm_value & 0xffffffu) << 8);
       s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      /* STG.E.32 [R2], R1 — Ra=R2 addr, Rb=R1 data */
-      s[n++] = 2u | (1u << 8);
+      /* STG: Ra=R2 (addr), Rb=R1 (data) in lo fields */
+      s[n++] = (2u & 0xffu) | ((1u & 0xffu) << 8);
       s[n++] = NV_SPH_SASS_STG_HI;
    }
    s[n++] = NV_SASS_EXIT_LO;

@@ -1441,6 +1441,15 @@ nvrm_CmdClearAttachments(VkCommandBuffer commandBuffer,
                                   att->clearValue.depthStencil.stencil);
       }
    }
+   /* Queue submit_fence sema after clears (3D report) for vertical-slice wait */
+   if (cmd->device && cmd->device->queue && cmd->device->queue->submit_fence &&
+       cmd->device->queue->submit_fence->sema_gpu_addr) {
+      struct nv_fence *sf = cmd->device->queue->submit_fence;
+      uint32_t payload = nv_fence_alloc_seq(sf);
+      nv_3d_report_semaphore_release(&cmd->push, sf->sema_gpu_addr, payload,
+                                     true);
+      cmd->device->queue->submit_seq = payload;
+   }
    nv_push_wfi(&cmd->push);
 }
 

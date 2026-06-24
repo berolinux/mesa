@@ -2725,6 +2725,48 @@ nv_3d_push_clear(struct nv_push *p, uint32_t class_3d, unsigned buffers,
    nv_push_wfi(p);
 }
 
+/**
+ * CLEAR_SURFACE then optional 3D report sema release (pipeline ALL).
+ * sema_gpu_addr 0 skips sema; still emits WFI for coarse sync.
+ */
+static inline void
+nv_3d_emit_clear_surface_with_sema(struct nv_push *p, unsigned buffers,
+                                   const uint32_t color_ui[4],
+                                   float depth, uint32_t stencil,
+                                   uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_3d_emit_clear_surface(p, buffers, color_ui, depth, stencil);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+static inline void
+nv_3d_push_clear_with_sema(struct nv_push *p, uint32_t class_3d,
+                           unsigned buffers, const uint32_t color_ui[4],
+                           float depth, uint32_t stencil,
+                           uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_3d_emit_clear_surface_with_sema(p, buffers, color_ui, depth, stencil,
+                                      sema_gpu_addr, sema_payload);
+   nv_push_wfi(p);
+}
+
+/** Draw arrays then sema (after writes) for CPU wait without only GPGet. */
+static inline void
+nv_3d_emit_draw_vertex_array_with_sema(struct nv_push *p,
+                                       uint32_t start, uint32_t count,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload)
+{
+   nv_3d_emit_draw_vertex_array(p, start, count);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
 static inline void
 nv_3d_push_draw_arrays(struct nv_push *p, uint32_t class_3d,
                        uint32_t start, uint32_t count)
@@ -2735,6 +2777,33 @@ nv_3d_push_draw_arrays(struct nv_push *p, uint32_t class_3d,
       nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
    nv_3d_emit_draw_vertex_array(p, start, count);
    nv_push_wfi(p);
+}
+
+static inline void
+nv_3d_push_draw_arrays_with_sema(struct nv_push *p, uint32_t class_3d,
+                                 uint32_t start, uint32_t count,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_3d_emit_draw_vertex_array_with_sema(p, start, count,
+                                          sema_gpu_addr, sema_payload);
+   nv_push_wfi(p);
+}
+
+/**
+ * Smoke triangle draw: 3 vertices non-indexed (relies on bound VS/FS or HW
+ * default).  Caller sets class_3d / shaders / RT before this.
+ */
+static inline void
+nv_3d_emit_smoke_triangle_draw(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t sema_payload)
+{
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr, sema_payload);
 }
 
 #ifdef __cplusplus
