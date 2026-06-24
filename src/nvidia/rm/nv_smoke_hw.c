@@ -442,7 +442,12 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                  ch->info ? ch->info->rm_platform_type : 0u,
                  ch->info && ch->info->rm_driver_version[0]
                     ? ch->info->rm_driver_version : "?");
+         if (ch->info && ch->info->gpu_uuid[0])
+            fprintf(stderr, "nv_smoke_hw G0 gpu_uuid=%s\n", ch->info->gpu_uuid);
       }
+      /* Best-effort arm channel RC eventfd for later G1-G3 RC triage on silicon */
+      if (ch->error_event_fd < 0)
+         (void)nv_channel_ensure_error_event(ch, -1, 0);
       if (res.g0_rc && !r && res.g0_timer_rc != 0)
          r = res.g0_rc;
    }

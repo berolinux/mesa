@@ -16,8 +16,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #if defined(HAVE_LIBDRM_NVIDIA)
+#include <sys/eventfd.h>
 #include "nvidia.h"
 #include "nvidia_rm.h"
 #endif
@@ -488,6 +490,81 @@ nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
                                info32_out, info16_out, more_out);
 }
 
+void
+nv_channel_destroy_error_event(struct nv_channel *ch)
+{
+   uint32_t h_sub;
+   int owned_fd;
+   uint32_t ni;
+   bool owns_fd;
+
+   if (!ch)
+      return;
+   ni = ch->error_event_notify_index;
+   owns_fd = (ni & 0x80000000u) != 0;
+   owned_fd = ch->error_event_fd;
+   h_sub = ch->rm ? nv_rm_device_subdevice_handle(ch->rm) : 0;
+   if (ch->h_error_event && ch->rm && h_sub) {
+      if (ni & 0xffffu) {
+         (void)nv_rm_event_set_notification(
+            ch->rm, h_sub, ni & 0xffffu,
+            NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_DISABLE, false, 0, 0);
+      }
+      (void)nv_rm_free_object(ch->rm, h_sub, ch->h_error_event);
+   }
+   ch->h_error_event = 0;
+   ch->error_event_fd = -1;
+   ch->error_event_notify_index = 0;
+   if (owns_fd && owned_fd >= 0)
+      close(owned_fd);
+}
+
+int
+nv_channel_ensure_error_event(struct nv_channel *ch, int external_fd,
+                              uint32_t notify_index)
+{
+   int efd = -1;
+   uint32_t h_ev = 0;
+   int r;
+   bool owns_fd = false;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   if (ch->h_error_event && ch->error_event_fd >= 0)
+      return 0; /* already armed */
+
+   if (!notify_index)
+      notify_index = NV2080_NOTIFIERS_RC;
+
+   if (external_fd >= 0) {
+      efd = external_fd;
+      owns_fd = false;
+   } else {
+#if defined(HAVE_LIBDRM_NVIDIA)
+      efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+#else
+      efd = -1;
+#endif
+      if (efd < 0)
+         return efd < 0 ? -errno : -ENOSYS;
+      owns_fd = true;
+   }
+
+   r = nv_channel_alloc_error_event(ch, efd, notify_index, &h_ev);
+   if (r != 0) {
+      if (owns_fd && efd >= 0)
+         close(efd);
+      return r;
+   }
+
+   ch->h_error_event = h_ev;
+   ch->error_event_fd = efd;
+   ch->error_event_notify_index = notify_index & 0xffffu;
+   if (owns_fd)
+      ch->error_event_notify_index |= 0x80000000u;
+   return 0;
+}
+
 int
 nv_channel_bind_error_ctxdma(struct nv_channel *ch)
 {
@@ -641,6 +718,26 @@ nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
    (void)os_event_fd;
    (void)notify_index;
    (void)h_event_out;
+   return -ENOSYS;
+}
+
+void
+nv_channel_destroy_error_event(struct nv_channel *ch)
+{
+   if (!ch)
+      return;
+   ch->h_error_event = 0;
+   ch->error_event_fd = -1;
+   ch->error_event_notify_index = 0;
+}
+
+int
+nv_channel_ensure_error_event(struct nv_channel *ch, int external_fd,
+                              uint32_t notify_index)
+{
+   (void)ch;
+   (void)external_fd;
+   (void)notify_index;
    return -ENOSYS;
 }
 
@@ -837,6 +934,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->gpfifo_class = info->class_gpfifo;
    ch->gpfifo_entries = gpfifo_entries;
    ch->push_dw_size = push_dwords;
+   ch->error_event_fd = -1; /* tick99: no async RC event until ensure_error_event */
 
    gpfifo_bytes = gpfifo_entries * NV_GP_ENTRY_SIZE;
    push_bytes = push_dwords * 4;
@@ -1156,6 +1254,8 @@ nv_channel_destroy(struct nv_channel *ch)
 {
    if (!ch)
       return;
+
+   nv_channel_destroy_error_event(ch);
 
 #if defined(HAVE_LIBDRM_NVIDIA)
    if (ch->rm) {

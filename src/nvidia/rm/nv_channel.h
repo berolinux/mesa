@@ -40,6 +40,10 @@ struct nv_channel {
    uint32_t h_userd_mem;
    uint32_t h_error_notifier;      /* memory handle for notifier BO */
    uint32_t h_error_ctxdma;        /* NV01_CONTEXT_ERROR_TO_MEMORY over notifier */
+   /* tick99: owned async RC event (eventfd + NV01_EVENT_OS_EVENT); 0 / -1 if none */
+   uint32_t h_error_event;         /* NV01_EVENT handle under subdevice */
+   int error_event_fd;             /* eventfd for RC notifications; -1 if none */
+   uint32_t error_event_notify_index; /* NV2080_NOTIFIERS_* used at setup */
    uint32_t h_push_mem;
    uint32_t h_gpfifo_mem;
    uint32_t h_vaspace;             /* FERMI_VASPACE_A passed at channel alloc */
@@ -277,6 +281,26 @@ int nv_channel_alloc_error_event(struct nv_channel *ch, int os_event_fd,
 int nv_channel_poll_rm_event(struct nv_channel *ch, uint32_t *h_object_out,
                              uint32_t *notify_index_out, uint32_t *info32_out,
                              uint16_t *info16_out, uint32_t *more_out);
+
+/**
+ * tick99: create eventfd + NV01_EVENT_OS_EVENT for channel RC errors and
+ * store on the channel (idempotent if already set).  Caller may pass
+ * external_fd >= 0 to use an existing fd (channel does not own/close it);
+ * external_fd < 0 allocates a new eventfd (channel owns and closes on destroy).
+ * Returns 0 on success, negative on failure (channel still usable without event).
+ */
+int nv_channel_ensure_error_event(struct nv_channel *ch, int external_fd,
+                                  uint32_t notify_index);
+
+/** Tear down channel-owned error event/eventfd (safe if never set). */
+void nv_channel_destroy_error_event(struct nv_channel *ch);
+
+/** eventfd fd for poll/epoll (-1 if none). Do not close unless you own external. */
+static inline int
+nv_channel_error_event_fd(const struct nv_channel *ch)
+{
+   return ch ? ch->error_event_fd : -1;
+}
 
 /**
  * tick94: Bind channel error CTXDMA to channel (NVOS49) if h_error_ctxdma set.

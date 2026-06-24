@@ -77,6 +77,10 @@ struct nv_device_info {
    uint32_t rm_platform_type;
    char rm_driver_version[64];
    char rm_build_branch[64];
+   /* tick99: GPU_GET_GID_INFO UUID */
+   char gpu_uuid[48];
+   uint8_t gpu_gid_binary[16];
+   uint32_t gpu_gid_binary_len;
 
    char name[64];
    char chipset_name[32];

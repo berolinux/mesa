@@ -160,6 +160,11 @@ nv_rm_device_open(int drm_fd, int gpu_index)
              sizeof(dev->info.rm_driver_version));
       memcpy(dev->info.rm_build_branch, gi.rm_build_branch,
              sizeof(dev->info.rm_build_branch));
+      /* tick99: GPU UUID/GID */
+      memcpy(dev->info.gpu_uuid, gi.gpu_uuid, sizeof(dev->info.gpu_uuid));
+      memcpy(dev->info.gpu_gid_binary, gi.gpu_gid_binary,
+             sizeof(dev->info.gpu_gid_binary));
+      dev->info.gpu_gid_binary_len = gi.gpu_gid_binary_len;
       if (!dev->info.pci_device_id && gi.rm_pci_device_id)
          dev->info.pci_device_id = gi.rm_pci_device_id & 0xffffu;
       memcpy(dev->info.name, gi.name, sizeof(dev->info.name));
