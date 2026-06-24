@@ -156,10 +156,10 @@ main(int argc, char **argv)
            "    3) sready/g1_pre/g1_sched/doorbell: A06F_BIND+SCHEDULE first (pass6), GPPut, token@+0x90\n"
            "    4) g1_host_sema!=0: kickoff/channel (not CE); fix step 3 before CE methods\n"
            "       hs_mode tries 2=blob0x1001>>2, 3=blob&~3, 0=open>>2, 1=open&~3 (sticky after ok)\n"
-           "    5) host_sema ok, g1_rc fail: CE class ladder (C8B5..) / SET_OBJECT subch4 / VA\n"
+           "    5) host_sema ok, g1_rc fail: CE class ladder (C8B5/C1B5/C6B5..) / SET_OBJECT subch4 / VA\n"
            "    6) g1_userd_get unchanged: GPPut/doorbell not running on silicon\n"
-           "    7) g1_fault_rc!=0: expected on normal hosts (SR-IOV-only ctrl; pass6)\n"
-           "    (RE: HW_MODEL_PASS6_DEEP_DISASM_610.43.02.md + PASS5/4)\n",
+           "    7) g1_fault_rc!=0: expected on normal hosts (SR-IOV-only ctrl; pass6/7)\n"
+           "    (RE: HW_MODEL_PASS7_DEEP_DISASM_610.43.02.md + PASS6/5/4)\n",
            r, res.standalone_open_rc, res.standalone_channel_rc,
            res.standalone_gpu_tried,
            res.standalone_buf_va_rc, res.standalone_engine_rc,

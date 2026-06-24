@@ -58,22 +58,32 @@ nv_smoke_hw_env_slices(void)
    return (uint32_t)v & NV_SMOKE_HW_ALL;
 }
 
-/** Verbose: dump GPFIFO/push for trace/diff on HW box (NV_SMOKE_HW_VERBOSE=1). */
+/** Verbose: dump GPFIFO/push for trace/diff on HW box (NV_SMOKE_HW_VERBOSE=1).
+ *  Pass7 goldens: sema block = 20040004 | hi | lo | payload | 1001 (modes 2/3
+ *  vary lo encoding); kick = entry then GPPut@+0x8c then sfence+doorbell@+0x90
+ *  when class > C36E; expect g1_spath=2, g1_hs_mode=2|3 on silicon.
+ */
 static void
 nv_smoke_hw_dump_channel_trace(struct nv_channel *ch, const char *tag)
 {
    unsigned i, n;
    uint32_t gp_get = 0, gp_put = 0, host_put = 0;
    const char *t = tag ? tag : "nv_smoke_hw";
+   bool db_ok;
 
    if (!ch || !nv_smoke_hw_env_verbose())
       return;
    nv_channel_userd_snapshot(ch, &gp_get, &gp_put, &host_put);
+   db_ok = ch->has_work_submit_token && ch->usermode_map &&
+           (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu);
    fprintf(stderr,
-           "%s: trace gpfifo_class=0x%x scheduled=%d tok=%s "
-           "USERD GPGet=%u GPPut=%u host_put=%u\n",
+           "%s: trace gpfifo_class=0x%x scheduled=%d tok=%s tok_val=0x%x "
+           "usermode=%s USERD GPGet=%u GPPut=%u host_put=%u "
+           "kick=multi_USERD(1slot_now) pass7_expect spath=2 hs_mode=2|3\n",
            t, (unsigned)ch->gpfifo_class, ch->scheduled ? 1 : 0,
            ch->has_work_submit_token ? "yes" : "no",
+           (unsigned)ch->work_submit_token,
+           ch->usermode_map ? "yes" : "no",
            (unsigned)gp_get, (unsigned)gp_put, (unsigned)host_put);
    if (ch->gpfifo_cpu && ch->gpfifo_entries) {
       uint32_t slot = ch->gpfifo_put ? (ch->gpfifo_put - 1) % ch->gpfifo_entries : 0;
@@ -88,19 +98,30 @@ nv_smoke_hw_dump_channel_trace(struct nv_channel *ch, const char *tag)
               t, (unsigned)slot, w0, w1,
               (unsigned long long)pb_va, (unsigned)len_dw,
               (w1 >> 8) & 1, (w1 >> 9) & 1, (w1 >> 31) & 1,
-              (ch->has_work_submit_token && ch->usermode_map &&
-               (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu))
-                 ? "yes" : "no/GPPut-only",
+              db_ok ? "yes" : "no/GPPut-only",
               (unsigned)ch->gpfifo_class,
               (ch->gpfifo_class > 0xc36eu) ? ">" :
               (ch->gpfifo_class ? "<=" : "?"));
    }
    if (ch->push_cpu && ch->push_dw_used) {
-      n = ch->push_dw_used < 24u ? ch->push_dw_used : 24u;
+      n = ch->push_dw_used < 32u ? ch->push_dw_used : 32u;
       fprintf(stderr, "%s: push[0..%u):", t, n);
       for (i = 0; i < n; i++)
          fprintf(stderr, " %08x", ch->push_cpu[i]);
       fprintf(stderr, "\n");
+      /* Annotate host sema INC4 block if present (pass7 b6c938) */
+      for (i = 0; i + 4 < ch->push_dw_used; i++) {
+         if (ch->push_cpu[i] == 0x20040004u) {
+            fprintf(stderr,
+                    "%s: sema_block@dw%u: hdr=%08x hi=%08x lo=%08x "
+                    "payload=%08x exec=%08x (blob exec=0x1001; open modes 2/3)\n",
+                    t, i,
+                    ch->push_cpu[i], ch->push_cpu[i + 1], ch->push_cpu[i + 2],
+                    ch->push_cpu[i + 3],
+                    i + 4 < ch->push_dw_used ? ch->push_cpu[i + 4] : 0u);
+            break;
+         }
+      }
    }
 }
 

@@ -1004,21 +1004,30 @@ nv_channel_kickoff(struct nv_channel *ch)
    pb_addr = ch->push_gpu_addr + (uint64_t)ch->push_dw_base * 4;
 
    /*
-    * libdrm submit_one_ex: entry → USERD.GPPut@0x8c → (if class>C36E) sfence +
-    * doorbell@usermode+0x90 with work_submit_token.  Matches 610.43.02 glcore@ac5540.
-    * Pass usermode/token whenever available; class gate is applied inside submit_one_ex.
+    * libdrm submit_one_multi (pass7/glcore@ac5540): entry → GPPut@+0x8c on all
+    * USERD maps (up to 9; we have one today) → (if class>C36E) sfence +
+    * doorbell@usermode+0x90 with work_submit_token.  Class gate inside multi/ex.
+    * When multi-subdevice USERDs are added to nv_channel, extend userd_maps[].
     */
    ring_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL &&
                    nvidia_gpfifo_class_needs_doorbell(ch->gpfifo_class);
 
-   r = nvidia_gpfifo_submit_one_ex(ch->gpfifo_cpu, ch->gpfifo_entries,
-                                   &ch->gpfifo_put, ch->userd,
-                                   pb_addr, seg_dwords,
-                                   ch->usermode_map,
-                                   ch->work_submit_token,
-                                   ch->has_work_submit_token,
-                                   ch->gpfifo_class,
-                                   1000000000ull /* 1s ring-full stall */);
+   {
+      volatile void *userd_maps[1];
+      volatile void *usermode_maps[1];
+
+      userd_maps[0] = (volatile void *)ch->userd;
+      usermode_maps[0] = ch->usermode_map;
+      r = nvidia_gpfifo_submit_one_multi(ch->gpfifo_cpu, ch->gpfifo_entries,
+                                         &ch->gpfifo_put, userd_maps, 1,
+                                         pb_addr, seg_dwords,
+                                         ch->usermode_map,
+                                         usermode_maps, 1,
+                                         ch->work_submit_token,
+                                         ch->has_work_submit_token,
+                                         ch->gpfifo_class,
+                                         1000000000ull /* 1s ring-full stall */);
+   }
    if (r)
       return r;
 
