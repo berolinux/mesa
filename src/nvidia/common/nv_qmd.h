@@ -443,18 +443,68 @@ nv_qmd_patch_grid(uint32_t qmd[NV_QMD_DWORDS],
 #define NV_QMD_OFF_CTA_RASTER_DEPTH_DW   (14u * 4u)  /* low 16 of bits 463:448 */
 
 /**
+ * Compute required global LMEM BO size for a given per-thread local requirement.
+ *
+ * NVIDIA programs SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_* with a per-SM size
+ * and SM count; the backing BO must hold max_sm_count * per_sm_bytes (plus
+ * alignment headroom).  We use:
+ *   per_thread = align(local_mem_low_bytes, 16)  (SPH/QMD local field)
+ *   threads_per_sm = 2048 (conservative Ampere/Turing occupancy ceiling)
+ *   per_sm = align(per_thread * threads_per_sm, 0x10000)  (64KB granule)
+ *   total  = per_sm * max_sm_count
+ *
+ * Spill-only shaders with local_mem_low=0 still get a minimum 64KB/SM window
+ * so STL/LDL of RA spill slots is valid.
+ */
+#define NV_LMEM_THREADS_PER_SM_CONSERVATIVE  2048u
+#define NV_LMEM_SM_GRANULE_BYTES             0x10000u  /* 64 KiB */
+#define NV_LMEM_MIN_PER_SM_BYTES             0x10000u
+
+static inline uint32_t
+nv_lmem_align_u32(uint32_t v, uint32_t align)
+{
+   return (v + align - 1u) & ~(align - 1u);
+}
+
+static inline uint32_t
+nv_lmem_per_sm_bytes(uint32_t local_mem_low_bytes)
+{
+   uint32_t per_thread = local_mem_low_bytes ?
+      nv_lmem_align_u32(local_mem_low_bytes, 16u) : 16u; /* at least one spill slot */
+   uint64_t per_sm = (uint64_t)per_thread * (uint64_t)NV_LMEM_THREADS_PER_SM_CONSERVATIVE;
+   if (per_sm < NV_LMEM_MIN_PER_SM_BYTES)
+      per_sm = NV_LMEM_MIN_PER_SM_BYTES;
+   if (per_sm > 0xffffffffu)
+      per_sm = 0xffffffffu;
+   return nv_lmem_align_u32((uint32_t)per_sm, NV_LMEM_SM_GRANULE_BYTES);
+}
+
+static inline uint64_t
+nv_lmem_total_bo_bytes(uint32_t local_mem_low_bytes, uint32_t sm_count)
+{
+   uint32_t per_sm = nv_lmem_per_sm_bytes(local_mem_low_bytes);
+   uint32_t nsm = sm_count ? sm_count : 1u;
+   return (uint64_t)per_sm * (uint64_t)nsm;
+}
+
+/**
  * Program compute-class global LMEM backing store (address + size window).
- * lmem_gpu_addr should be a device BO sized for worst-case threads * local_mem
- * per SM; for minimal spill-only shaders a small BO (e.g. 64KB) is enough.
+ * lmem_gpu_addr should be a device BO sized via nv_lmem_total_bo_bytes().
+ * size_bytes is the per-SM non-throttled window (not the full BO size).
  */
 static inline void
 nv_compute_set_shader_local_memory(struct nv_push *p, uint64_t lmem_gpu_addr,
                                    uint32_t size_bytes, uint32_t max_sm_count)
 {
-   uint32_t sz = size_bytes ? size_bytes : 0x10000u; /* default 64KB */
+   uint32_t sz = size_bytes ? size_bytes : NV_LMEM_MIN_PER_SM_BYTES;
+   uint32_t sz_hi = 0;
 
    if (!p)
       return;
+   /* Size can exceed 4GB in theory; only low 32b is programmed in B, high in A */
+   if (sz == 0)
+      sz = NV_LMEM_MIN_PER_SM_BYTES;
+
    nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
    /* Global LMEM region base */
    nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_A,
@@ -467,10 +517,24 @@ nv_compute_set_shader_local_memory(struct nv_push *p, uint64_t lmem_gpu_addr,
    nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_WINDOW_B,
                   (uint32_t)(lmem_gpu_addr & 0xffffffffu));
    /* Non-throttled size: SIZE_UPPER in A (bits 7:0 of high part), lower in B */
-   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A, 0);
+   nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A, sz_hi);
    nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B, sz);
    nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_C,
                   max_sm_count ? (max_sm_count & 0x1ffu) : 1u);
+}
+
+/**
+ * Convenience: program LMEM using per-thread requirement and SM count.
+ * Computes per-SM window size internally; caller still allocates the BO.
+ */
+static inline void
+nv_compute_set_shader_local_memory_for_shader(struct nv_push *p,
+                                              uint64_t lmem_gpu_addr,
+                                              uint32_t local_mem_low_bytes,
+                                              uint32_t sm_count)
+{
+   uint32_t per_sm = nv_lmem_per_sm_bytes(local_mem_low_bytes);
+   nv_compute_set_shader_local_memory(p, lmem_gpu_addr, per_sm, sm_count);
 }
 
 #ifdef __cplusplus

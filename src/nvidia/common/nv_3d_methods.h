@@ -27,6 +27,28 @@ extern "C" {
 #define NVC597_DRAW_VERTEX_ARRAY_BEGIN_END_A    0x0270
 #define NVC597_DRAW_VERTEX_ARRAY_BEGIN_END_B    0x0274
 
+/* Instancing / draw control (clc597.h) */
+#define NVC597_SET_INSTANCE_COUNT               0x0220
+#define NVC597_SET_DRAW_CONTROL_A               0x0260
+#define NVC597_SET_DRAW_CONTROL_B               0x0264
+#define NVC597_SET_DRAW_CONTROL_A_TOPOLOGY_SHIFT              0
+#define NVC597_SET_DRAW_CONTROL_A_INSTANCE_ID_FIRST           (0u << 5)
+#define NVC597_SET_DRAW_CONTROL_A_INSTANCE_ID_SUBSEQUENT      (1u << 5)
+#define NVC597_SET_DRAW_CONTROL_A_INSTANCE_ID_UNCHANGED       (2u << 5)
+#define NVC597_SET_DRAW_CONTROL_A_INSTANCE_ITERATE_ENABLE     (1u << 9)
+#define NVC597_SET_DRAW_CONTROL_A_IGNORE_GLOBAL_BASE_VERTEX   (1u << 10)
+#define NVC597_SET_DRAW_CONTROL_A_IGNORE_GLOBAL_BASE_INSTANCE (1u << 11)
+#define NVC597_SET_GLOBAL_BASE_VERTEX_INDEX     0x1434
+#define NVC597_SET_GLOBAL_BASE_INSTANCE_INDEX   0x1438
+#define NVC597_SET_VERTEX_ID_BASE               0x1118
+#define NVC597_SET_PRIMITIVE_TOPOLOGY           0x1970
+#define NVC597_SET_PRIMITIVE_TOPOLOGY_CONTROL   0x1948
+#define NVC597_SET_PRIMITIVE_TOPOLOGY_CONTROL_USE_SEPARATE    0x1
+#define NVC597_SET_DA_PRIMITIVE_RESTART         0x1644
+#define NVC597_SET_DA_PRIMITIVE_RESTART_INDEX   0x1648
+#define NVC597_SET_DRAW_AUTO_START              0x13a4
+#define NVC597_SET_DRAW_AUTO_STRIDE             0x1318
+
 /* Vertex stream j: stride/enable (A), location hi/lo (B/C), frequency (D) */
 #define NVC597_SET_VERTEX_STREAM_A_FORMAT(j)    (0x1c00 + (j) * 16)
 #define NVC597_SET_VERTEX_STREAM_A_LOCATION_A(j) (0x1c04 + (j) * 16)
@@ -551,6 +573,60 @@ nv_3d_emit_clear_surface(struct nv_push *p, unsigned buffers,
       nv_push_method(p, NVC597_CLEAR_SURFACE, clear_flags);
 }
 
+/**
+ * Program draw control: topology in bits 3:0, instance iterate when
+ * instance_count > 1, and optionally ignore global base vertex/instance
+ * (Vulkan draws pass base via SET_GLOBAL_BASE_* instead).
+ */
+static inline void
+nv_3d_set_draw_control(struct nv_push *p, uint32_t topology_nv,
+                       uint32_t instance_count, bool use_global_bases)
+{
+   uint32_t a = (topology_nv & 0xfu) | NVC597_SET_DRAW_CONTROL_A_INSTANCE_ID_FIRST;
+   if (instance_count > 1)
+      a |= NVC597_SET_DRAW_CONTROL_A_INSTANCE_ITERATE_ENABLE;
+   if (use_global_bases)
+      a |= NVC597_SET_DRAW_CONTROL_A_IGNORE_GLOBAL_BASE_VERTEX |
+           NVC597_SET_DRAW_CONTROL_A_IGNORE_GLOBAL_BASE_INSTANCE;
+   nv_push_method(p, NVC597_SET_DRAW_CONTROL_A, a);
+   nv_push_method(p, NVC597_SET_DRAW_CONTROL_B,
+                  instance_count ? instance_count : 1u);
+   nv_push_method(p, NVC597_SET_INSTANCE_COUNT,
+                  instance_count ? instance_count : 1u);
+}
+
+static inline void
+nv_3d_set_global_base_vertex_instance(struct nv_push *p,
+                                      int32_t base_vertex,
+                                      uint32_t base_instance)
+{
+   nv_push_method(p, NVC597_SET_GLOBAL_BASE_VERTEX_INDEX, (uint32_t)base_vertex);
+   nv_push_method(p, NVC597_SET_GLOBAL_BASE_INSTANCE_INDEX, base_instance);
+   nv_push_method(p, NVC597_SET_VERTEX_ID_BASE, (uint32_t)base_vertex);
+}
+
+static inline void
+nv_3d_set_primitive_topology(struct nv_push *p, uint32_t topology_nv)
+{
+   /* Separate topology state (override bit = use this method, not begin/end) */
+   nv_push_method(p, NVC597_SET_PRIMITIVE_TOPOLOGY_CONTROL,
+                  NVC597_SET_PRIMITIVE_TOPOLOGY_CONTROL_USE_SEPARATE);
+   /* Vulkan/GL style values are 1-based in some modes; NVC597 topo 0-6 maps
+    * directly for the common list/strip/fan set when stored in bits 3:0 of
+    * draw control; primitive topology method uses 1=points..5=tristrip. */
+   static const uint32_t topo_v[] = { 1, 2, 3, 4, 5, 6, 7 };
+   uint32_t v = (topology_nv < 7) ? topo_v[topology_nv] : 4;
+   nv_push_method(p, NVC597_SET_PRIMITIVE_TOPOLOGY, v);
+}
+
+static inline void
+nv_3d_set_primitive_restart(struct nv_push *p, bool enable, uint32_t index)
+{
+   nv_push_method(p, NVC597_SET_DA_PRIMITIVE_RESTART, enable ? 1u : 0u);
+   if (enable)
+      nv_push_method(p, NVC597_SET_DA_PRIMITIVE_RESTART_INDEX, index);
+}
+
 static inline void
 nv_3d_emit_draw_vertex_array(struct nv_push *p, uint32_t start, uint32_t count)
 {
@@ -558,11 +634,51 @@ nv_3d_emit_draw_vertex_array(struct nv_push *p, uint32_t start, uint32_t count)
    nv_push_method(p, NVC597_DRAW_VERTEX_ARRAY_BEGIN_END_B, count);
 }
 
+/** Non-indexed draw with full instancing / base instance support. */
+static inline void
+nv_3d_emit_draw_vertex_array_instanced(struct nv_push *p,
+                                       uint32_t topology_nv,
+                                       uint32_t first_vertex,
+                                       uint32_t vertex_count,
+                                       uint32_t instance_count,
+                                       uint32_t first_instance)
+{
+   nv_3d_set_global_base_vertex_instance(p, 0, first_instance);
+   nv_3d_set_draw_control(p, topology_nv, instance_count, true);
+   nv_3d_emit_draw_vertex_array(p, first_vertex, vertex_count);
+}
+
 static inline void
 nv_3d_emit_draw_index_buffer(struct nv_push *p, uint32_t first, uint32_t count)
 {
    nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_A, first);
    nv_push_method(p, NVC597_DRAW_INDEX_BUFFER_BEGIN_END_B, count);
+}
+
+/** Indexed draw with vertexOffset / firstInstance / instanceCount. */
+static inline void
+nv_3d_emit_draw_index_buffer_instanced(struct nv_push *p,
+                                       uint32_t topology_nv,
+                                       uint32_t first_index,
+                                       uint32_t index_count,
+                                       int32_t vertex_offset,
+                                       uint32_t instance_count,
+                                       uint32_t first_instance)
+{
+   nv_3d_set_global_base_vertex_instance(p, vertex_offset, first_instance);
+   nv_3d_set_draw_control(p, topology_nv, instance_count, true);
+   nv_3d_emit_draw_index_buffer(p, first_index, index_count);
+}
+
+/** DrawAuto: vertex count derived from buffer byte size / stride (XFB-style). */
+static inline void
+nv_3d_emit_draw_auto(struct nv_push *p, uint32_t topology_nv,
+                     uint32_t byte_count, uint32_t stride,
+                     uint32_t instance_count)
+{
+   nv_3d_set_draw_control(p, topology_nv, instance_count, false);
+   nv_push_method(p, NVC597_SET_DRAW_AUTO_STRIDE, stride & 0xfffu);
+   nv_push_method(p, NVC597_SET_DRAW_AUTO_START, byte_count);
 }
 
 /** Map pipe_format (numeric, see p_format.h) to vertex component bit-width code. */
