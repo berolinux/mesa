@@ -642,6 +642,13 @@ nv_smoke_capture_g3_push(uint32_t *out, uint32_t out_cap_dwords,
 /* Non-inline entry for meson-linked libnvidia_common / tools */
 int nv_smoke_selftest_host_run(void);
 int nv_smoke_selftest_host_run_verbose(int verbose);
+/** G2 compiler store-imm vs hand SPH (0=ok/skip, -70..-86 fail when linked). */
+int nv_smoke_selftest_g2_compiler_only(void);
+/**
+ * Full host run including optional compiler G2 check when
+ * NV_SMOKE_SELFTEST_HAVE_NV_NIR is defined at compile time.
+ */
+int nv_smoke_selftest_host_run_full(void);
 
 #ifdef __cplusplus
 }

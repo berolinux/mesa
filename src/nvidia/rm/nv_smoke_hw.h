@@ -5,6 +5,42 @@
  * Hardware vertical-slice smoke runners (G1/G2/G3) using nv_channel_g* helpers.
  * Requires live RM/channel; without HAVE_LIBDRM_NVIDIA returns -ENOSYS.
  * Host encode checks remain in nv_smoke_selftest.h (no GPU).
+ *
+ * ---------------------------------------------------------------------------
+ * Environment (bring-up / debug; optional on device/context create)
+ * ---------------------------------------------------------------------------
+ *
+ *   NV_SMOKE_HW=1
+ *     When set (any non-empty value except "0"), nvrm_device_create / nvgpu
+ *     context init may run G1/G2/G3 HW smoke on the first queue channel.
+ *     Failures are logged but typically do not abort device create (bring-up
+ *     mode).  Unset or NV_SMOKE_HW=0 disables this path entirely.
+ *
+ *   NV_SMOKE_HW_SLICES=<mask>
+ *     Bitmask of slices to run when NV_SMOKE_HW is enabled (default: all):
+ *       1 = G1  CE memcpy + sema release (path A/B sema wait on host)
+ *       2 = G2  compute QMD/PCAS + store-imm shader + sema
+ *       4 = G3  3D clear/draw + report sema (no MME; path A/B)
+ *     Examples:
+ *       NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=1     # G1 only (first silicon gate)
+ *       NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=3     # G1+G2
+ *       NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=7     # all (same as default)
+ *
+ * Programmatic entrypoints (same semantics as env):
+ *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
+ *   nv_smoke_hw_run_oneshot(rm, ch, slices, g2_shader, timeout_ns, ...)
+ *   nvrm_device_smoke_hw_run(device, slices, timeout_ns)  // vulkan/nvrm
+ *
+ * Host-only (no GPU): build/run nvidia_smoke_host or nv_smoke_selftest_host().
+ * Compiler G2 store-imm path: nv_nir_compile_g2_store_imm_smoke() /
+ * nv_nir_g2_store_imm_smoke_selftest() (included in nv_smoke_selftest_host).
+ *
+ * Requirements for HW path:
+ *   - Proprietary nvidia.ko (open-gpu-kernel-modules compatible) loaded
+ *   - /dev/nvidia* accessible; libdrm_nvidia + mesa nvgpu/nvrm built
+ *   - Channel/class alloc succeeds (see nv_channel_g1/g2/g3 helpers)
+ *
+ * Slices are independent: fix G1 before trusting G2/G3 failures.
  */
 #ifndef NV_SMOKE_HW_H
 #define NV_SMOKE_HW_H

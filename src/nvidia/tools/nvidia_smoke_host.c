@@ -2,13 +2,21 @@
  * Copyright 2026 - Open NVIDIA userspace driver project
  * SPDX-License-Identifier: MIT
  *
- * Standalone / meson-runnable host smoke selftest (G1 CE sema push + G2 QMD/SPH).
+ * Standalone / meson-runnable host smoke selftest (G1 CE sema push + G2 QMD/SPH
+ * + G3 3D sema + embedded trace goldens + compiler G2 store-imm selftest).
  * Build (standalone, no full mesa link):
- *   gcc -std=c11 -I../common -o nvidia_smoke_host nvidia_smoke_host.c
- *     (header-only path: include nv_smoke_selftest.h only)
- * Or link nv_smoke_selftest.c from mesa build.
+ *   gcc -std=c11 -I../common -I../compiler -o nvidia_smoke_host nvidia_smoke_host.c
+ *     (header-only path: include nv_smoke_selftest.h only; G2 compiler check
+ *      needs nv_nir.c/nv_sass.c linked or run via meson test nvidia_smoke_host)
+ * Or: meson test -C <build> nvidia_smoke_host
  *
  * Exit 0 = pass, 1 = fail (stderr prints code).
+ *
+ * This tool is HOST ONLY (no GPU).  For live hardware vertical slices see
+ * nv_smoke_hw.h environment:
+ *   NV_SMOKE_HW=1              run G1/G2/G3 on device create (if wired)
+ *   NV_SMOKE_HW_SLICES=1|2|4   bitmask: 1=G1, 2=G2, 4=G3 (default all=7)
+ * Example first silicon gate: NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=1 <app>
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +55,8 @@ usage(const char *argv0)
            "Usage: %s [--quiet] [--dump-g1|g2|g3 PATH] [--dump-qmd PATH]\n"
            "         [--check-g1-golden] [--check-g2-golden] [--check-g3-golden]\n"
            "  Host-only NVIDIA vertical-slice selftest (no GPU).\n"
-           "  G1=CE sema; G2=compute QMD/PCAS; G3=3D clear/report sema.\n",
+           "  G1=CE sema; G2=compute QMD/PCAS + store-imm SPH; G3=3D sema.\n"
+           "  HW (separate): NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=1|2|4|7 with nvgpu/nvrm.\n",
            argv0);
 }
 

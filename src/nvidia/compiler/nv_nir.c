@@ -492,6 +492,75 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
 /* Last barycentric intrinsic mode seen in block order (for IPA mode select). */
 static uint8_t nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SMOOTH;
 
+/*
+ * Global memory: address in src[0] (load) / src[1] (store), 32-bit lanes.
+ * Multi-component store/load steps Ra by 4 bytes via IADD between LDG/STG
+ * (sufficient for G2 vec1/vec2 bring-up; full 64-bit addr increment later).
+ * write_mask: only store components with bit set (default all).
+ */
+static bool
+isel_load_global_n(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
+{
+   uint8_t rd = ssa_reg_dst(&intr->def);
+   uint8_t ra = src_reg_reload(sb, &intr->src[0]);
+   unsigned ncomp = intr->def.num_components ? intr->def.num_components : 1;
+   unsigned c;
+   uint8_t addr_reg = ra;
+
+   for (c = 0; c < ncomp; c++) {
+      uint8_t rdc = (uint8_t)(rd + c);
+      if (c > 0) {
+         /* addr += 4: reuse R254 as temp increment if ra is live across lanes */
+         if (!nv_sass_emit_iadd_rri(sb, NV_RA_SPILL_TMP_REG, addr_reg, 4))
+            return false;
+         addr_reg = NV_RA_SPILL_TMP_REG;
+         nv_sass_note_reg(sb, rdc);
+      }
+      if (!nv_sass_emit_ldg_u32(sb, rdc, addr_reg))
+         return false;
+   }
+   return ssa_commit_dst(sb, &intr->def, rd);
+}
+
+static bool
+isel_store_global_n(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
+{
+   /* store_global: src[0]=value, src[1]=addr (nir convention) */
+   uint8_t ra_addr = src_reg_reload(sb, &intr->src[1]);
+   uint8_t rb_base = src_reg_reload(sb, &intr->src[0]);
+   unsigned ncomp = intr->num_components ? intr->num_components : 1;
+   unsigned write_mask = 0xffffffffu;
+   unsigned c;
+   uint8_t addr_reg = ra_addr;
+
+   if (intr->intrinsic == nir_intrinsic_store_global ||
+       intr->intrinsic == nir_intrinsic_store_ssbo)
+      write_mask = nir_intrinsic_write_mask(intr);
+
+   for (c = 0; c < ncomp; c++) {
+      if (!(write_mask & (1u << c)))
+         continue;
+      if (c > 0 && (write_mask & ((1u << c) - 1u))) {
+         /* only increment if we already wrote a prior component */
+         if (!nv_sass_emit_iadd_rri(sb, NV_RA_SPILL_TMP_REG, addr_reg, 4))
+            return false;
+         addr_reg = NV_RA_SPILL_TMP_REG;
+      } else if (c > 0) {
+         /* first written component but not c==0: addr = base + 4*c */
+         if (!nv_sass_emit_iadd_rri(sb, NV_RA_SPILL_TMP_REG, ra_addr,
+                                    (int32_t)(c * 4)))
+            return false;
+         addr_reg = NV_RA_SPILL_TMP_REG;
+      }
+      {
+         uint8_t rb_data = (uint8_t)(rb_base + c);
+         if (!nv_sass_emit_stg_u32(sb, addr_reg, rb_data))
+            return false;
+      }
+   }
+   return true;
+}
+
 static bool
 isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 {
@@ -502,16 +571,11 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    switch (op) {
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant:
-      rd = ssa_reg_dst(&intr->def);
-      ra = src_reg_reload(sb, &intr->src[0]);
-      ok = nv_sass_emit_ldg_u32(sb, rd, ra);
-      break;
+      return isel_load_global_n(sb, intr);
 
    case nir_intrinsic_store_global:
    case nir_intrinsic_store_ssbo:
-      ra = src_reg_reload(sb, &intr->src[1]);
-      rb = src_reg_reload(sb, &intr->src[0]);
-      return nv_sass_emit_stg_u32(sb, ra, rb);
+      return isel_store_global_n(sb, intr);
 
    case nir_intrinsic_load_shared:
       rd = ssa_reg_dst(&intr->def);
@@ -979,13 +1043,37 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
    return ssa_commit_dst(sb, &tex->def, rd);
 }
 
+/*
+ * load_const: emit MOV32I per 32-bit lane.  Multi-component defs occupy
+ * consecutive regs rd, rd+1, ... (trivial SSA map; RA may spill via ssa_commit).
+ * 64-bit values emit lo then hi into rd and rd+1 when bit_size==64 and one comp.
+ * G2 store-imm path depends on this for imm + address constants before STG.
+ */
 static bool
 isel_load_const(struct nv_sass_buf *sb, nir_load_const_instr *lc)
 {
    uint8_t rd = ssa_reg_dst(&lc->def);
-   uint32_t imm = const_u32_from_load(lc, 0);
-   if (!nv_sass_emit_mov_ri(sb, rd, imm))
-      return false;
+   unsigned ncomp = lc->def.num_components ? lc->def.num_components : 1;
+   unsigned c;
+
+   if (lc->def.bit_size == 64 && ncomp == 1) {
+      uint64_t v = lc->value[0].u64;
+      if (!nv_sass_emit_mov_ri(sb, rd, (uint32_t)(v & 0xffffffffu)))
+         return false;
+      if (!nv_sass_emit_mov_ri(sb, (uint8_t)(rd + 1), (uint32_t)(v >> 32)))
+         return false;
+      nv_sass_note_reg(sb, (uint8_t)(rd + 1));
+      return ssa_commit_dst(sb, &lc->def, rd);
+   }
+
+   for (c = 0; c < ncomp; c++) {
+      uint8_t rdc = (uint8_t)(rd + c);
+      uint32_t imm = const_u32_from_load(lc, c);
+      if (c > 0)
+         nv_sass_note_reg(sb, rdc);
+      if (!nv_sass_emit_mov_ri(sb, rdc, imm))
+         return false;
+   }
    return ssa_commit_dst(sb, &lc->def, rd);
 }
 
@@ -1265,6 +1353,143 @@ nv_nir_compile(const struct nir_shader *nir,
    nv_sass_buf_finish(&sass);
    nv_ra_context_finish(&ra);
    return true;
+}
+
+/*
+ * G2 vertical-slice path without a full NIR shader: emit the same SASS as
+ * hand-built store-imm (load_const-style MOV32I + STG + EXIT) via the compiler
+ * pipeline so SPH/register_count/does_global_store match nv_nir_compile output.
+ * Host selftest compares this against nv_sph_build_compute_store_imm.
+ */
+bool
+nv_nir_compile_g2_store_imm_smoke(uint32_t imm_value, uint64_t store_gpu_addr,
+                                  uint16_t min_registers,
+                                  struct nv_compiler_result *out)
+{
+   struct nv_compiler_options opts;
+   struct nv_sph_info info;
+   struct nv_sass_buf sass;
+   uint16_t regs;
+   uint8_t *code;
+   uint32_t total, sass_bytes;
+
+   if (!out)
+      return false;
+   memset(out, 0, sizeof(*out));
+   memset(&opts, 0, sizeof(opts));
+   opts.stage = NV_COMPILER_STAGE_COMPUTE;
+   opts.min_registers = min_registers ? min_registers : 16;
+
+   nv_sass_buf_init(&sass);
+   if (!nv_sass_emit_smoke_store_imm_at_gva(&sass, store_gpu_addr, imm_value)) {
+      snprintf(out->error, sizeof(out->error), "G2 store-imm SASS emit failed");
+      nv_sass_buf_finish(&sass);
+      return false;
+   }
+
+   regs = opts.min_registers;
+   if (sass.max_reg > regs)
+      regs = sass.max_reg;
+   if (regs < 4)
+      regs = 4;
+   if (regs > 255)
+      regs = 255;
+
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs;
+   info.does_global_store = store_gpu_addr != 0;
+   info.barrier_count = 1;
+   nv_sph_encode(&info, out->blob.sph);
+   fill_sph_blob_sass(&out->blob, &sass);
+
+   sass_bytes = sass.count * 4;
+   if (sass_bytes < out->blob.sass_dwords * 4)
+      sass_bytes = out->blob.sass_dwords * 4;
+   total = NV_SPH_BYTES + sass_bytes;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   out->blob.total_bytes = total;
+
+   code = calloc(1, total);
+   if (!code) {
+      snprintf(out->error, sizeof(out->error), "OOM");
+      nv_sass_buf_finish(&sass);
+      return false;
+   }
+   memcpy(code, out->blob.sph, NV_SPH_BYTES);
+   if (sass.dwords && sass.count)
+      memcpy(code + NV_SPH_BYTES, sass.dwords, sass.count * 4);
+   else
+      memcpy(code + NV_SPH_BYTES, out->blob.sass, out->blob.sass_dwords * 4);
+
+   out->code = code;
+   out->code_size = total;
+   out->register_count = regs;
+   out->local_mem_size = 0;
+   out->shared_mem_size = 0;
+   out->success = true;
+   nv_sass_buf_finish(&sass);
+   return true;
+}
+
+/*
+ * Host/selftest: compiler G2 store-imm must match hand SPH builder SASS tail.
+ * Returns 0 on match, negative on mismatch/fail (codes -70..-79 for selftest).
+ */
+int
+nv_nir_g2_store_imm_smoke_selftest(uint32_t imm_value, uint64_t store_gpu_addr,
+                                   uint16_t regs)
+{
+   struct nv_compiler_result res;
+   struct nv_sph_blob hand;
+   const uint32_t *sass_comp, *sass_hand;
+   uint32_t n_comp, n_hand, i;
+
+   if (!nv_nir_compile_g2_store_imm_smoke(imm_value, store_gpu_addr, regs, &res) ||
+       !res.success)
+      return -70;
+
+   nv_sph_build_compute_store_imm(&hand, imm_value, store_gpu_addr, regs);
+   if (nv_sph_smoke_validate_blob(&hand, NV_SPH_TYPE_COMPUTE) != 0) {
+      nv_compiler_result_finish(&res);
+      return -71;
+   }
+
+   /* SPH type + does_global_store must agree */
+   if ((res.blob.sph[0] & 0xf) != NV_SPH_TYPE_COMPUTE) {
+      nv_compiler_result_finish(&res);
+      return -72;
+   }
+   if (store_gpu_addr && !(res.blob.sph[0] & (1u << 11))) {
+      nv_compiler_result_finish(&res);
+      return -73;
+   }
+
+   sass_comp = res.blob.sass;
+   n_comp = res.blob.sass_dwords;
+   sass_hand = hand.sass;
+   n_hand = hand.sass_dwords;
+   if (!n_comp || n_comp != n_hand) {
+      nv_compiler_result_finish(&res);
+      return -74;
+   }
+   for (i = 0; i < n_comp; i++) {
+      if (sass_comp[i] != sass_hand[i]) {
+         nv_compiler_result_finish(&res);
+         return -75;
+      }
+   }
+
+   /* EXIT hi at end */
+   if (n_comp >= 2 && sass_comp[n_comp - 1] != NV_SASS_EXIT_HI &&
+       sass_comp[n_comp - 1] != 0x50b00000u) {
+      nv_compiler_result_finish(&res);
+      return -76;
+   }
+
+   nv_compiler_result_finish(&res);
+   return 0;
 }
 
 void

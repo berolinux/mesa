@@ -54,6 +54,18 @@ bool nv_nir_compile(const struct nir_shader *nir,
                     const struct nv_compiler_options *opts,
                     struct nv_compiler_result *out);
 
+/**
+ * G2 smoke without NIR: MOV32I addr/imm + STG.U32 + EXIT through compiler SPH
+ * path (load_const/store_global equivalent).  Matches hand nv_sph_build_compute_store_imm.
+ */
+bool nv_nir_compile_g2_store_imm_smoke(uint32_t imm_value, uint64_t store_gpu_addr,
+                                       uint16_t min_registers,
+                                       struct nv_compiler_result *out);
+
+/** Compare compiler G2 store-imm vs hand SPH builder; 0 = ok, negative = fail. */
+int nv_nir_g2_store_imm_smoke_selftest(uint32_t imm_value, uint64_t store_gpu_addr,
+                                       uint16_t regs);
+
 void nv_compiler_result_finish(struct nv_compiler_result *res);
 
 /** Map nv_shader_kind / mesa stage to compiler stage. */
