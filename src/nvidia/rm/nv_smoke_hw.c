@@ -9,6 +9,7 @@
 #include "nv_shader.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,15 @@ nv_smoke_hw_env_requested(void)
    return true;
 }
 
+bool
+nv_smoke_hw_env_verbose(void)
+{
+   const char *e = getenv("NV_SMOKE_HW_VERBOSE");
+   if (!e || !e[0] || !strcmp(e, "0"))
+      return false;
+   return true;
+}
+
 uint32_t
 nv_smoke_hw_env_slices(void)
 {
@@ -45,6 +55,30 @@ nv_smoke_hw_env_slices(void)
    if (end == e || !v)
       return NV_SMOKE_HW_ALL;
    return (uint32_t)v & NV_SMOKE_HW_ALL;
+}
+
+void
+nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
+{
+   const char *p = prefix ? prefix : "nv_smoke_hw";
+   if (!res)
+      return;
+   fprintf(stderr,
+           "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
+           " g1_submit=%d g1_payload=%d g1_sema=0x%x g1_class=0x%x\n",
+           p,
+           (unsigned)res->slices_run, (unsigned)res->slices_ok,
+           res->g1_rc, res->g2_rc, res->g3_rc,
+           res->g1_submit_rc, res->g1_payload_rc,
+           (unsigned)res->g1_sema_observed,
+           (unsigned)res->g1_class_copy);
+   if (res->g1_rc < 0 && (res->slices_run & NV_SMOKE_HW_G1)) {
+      fprintf(stderr,
+              "%s: G1 bring-up hints: class_copy=0x%x submit_rc=%d "
+              "(EINVAL=bad class/args, ETIMEDOUT/EIO=sema wait, "
+              "payload_rc=-EIO means sema ok but CE copy wrong)\n",
+              p, (unsigned)res->g1_class_copy, res->g1_submit_rc);
+   }
 }
 
 int
@@ -182,27 +216,45 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;
+      if (ch->info)
+         res.g1_class_copy = ch->info->class_copy;
       if (!sc->src_gpu || !sc->dst_gpu) {
          res.g1_rc = -EINVAL;
+         res.g1_submit_rc = -EINVAL;
+         r = res.g1_rc;
+      } else if (!res.g1_class_copy && !ch->info) {
+         /* No class_copy on channel — submit will also fail; record early */
+         res.g1_rc = -EINVAL;
+         res.g1_submit_rc = -EINVAL;
          r = res.g1_rc;
       } else {
          if (sc->src_cpu)
             memset(sc->src_cpu, 0xa5, 256);
          if (sc->dst_cpu)
             memset(sc->dst_cpu, 0, 256);
-         res.g1_rc = nv_channel_g1_ce_copy_sema_submit(ch, 0,
-                                                       sc->src_gpu, sc->dst_gpu,
-                                                       256, sc->sema_gpu,
-                                                       sc->sema_cpu,
-                                                       sc->sema_payload,
-                                                       true, to, check_notifier);
-         if (res.g1_rc == 0) {
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         res.g1_submit_rc = nv_channel_g1_ce_copy_sema_submit(ch, 0,
+                                                              sc->src_gpu,
+                                                              sc->dst_gpu,
+                                                              256, sc->sema_gpu,
+                                                              sc->sema_cpu,
+                                                              sc->sema_payload,
+                                                              true, to,
+                                                              check_notifier);
+         res.g1_rc = res.g1_submit_rc;
+         if (sc->sema_cpu)
+            res.g1_sema_observed = sc->sema_cpu[0];
+         if (res.g1_submit_rc == 0) {
             /* Full 256B payload check when host maps exist */
             if (sc->src_cpu && sc->dst_cpu &&
-                memcmp(sc->src_cpu, sc->dst_cpu, 256) != 0)
+                memcmp(sc->src_cpu, sc->dst_cpu, 256) != 0) {
+               res.g1_payload_rc = -EIO;
                res.g1_rc = -EIO;
-            else
+            } else {
+               res.g1_payload_rc = 0;
                res.slices_ok |= NV_SMOKE_HW_G1;
+            }
          }
          if (res.g1_rc && !r)
             r = res.g1_rc;
@@ -274,6 +326,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (result_out)
       *result_out = res;
+   if (nv_smoke_hw_env_verbose() || r != 0)
+      nv_smoke_hw_log_result(&res, "nv_smoke_hw");
    return r;
 }
 

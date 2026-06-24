@@ -16,3 +16,33 @@ subdir('rm')
 if with_nvrm_vk
   subdir('vulkan')
 endif
+
+# Mesa-linked full host smoke (encode + compiler G2 via NV_SMOKE_SELFTEST_HAVE_NV_NIR).
+# Built after compiler so idep_nvidia_compiler / idep_nir are available.
+if meson.can_run_host_binaries() or true
+  nvidia_smoke_full = executable(
+    'nvidia_smoke_full',
+    files(
+      'tools/nvidia_smoke_full.c',
+      'common/nv_smoke_selftest.c',
+    ),
+    include_directories : [
+      inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
+      include_directories('common'),
+      include_directories('compiler'),
+      include_directories('rm'),
+      include_directories('../compiler'),
+    ],
+    c_args : [
+      no_override_init_args,
+      '-DNV_SMOKE_SELFTEST_HAVE_NV_NIR=1',
+      '-DHAVE_NIR=1',
+    ],
+    dependencies : [idep_nvidia_compiler, idep_nir, idep_mesautil],
+    install : false,
+    build_by_default : false,
+  )
+  test('nvidia_smoke_full', nvidia_smoke_full,
+       suite : ['nvidia'],
+       is_parallel : false)
+endif

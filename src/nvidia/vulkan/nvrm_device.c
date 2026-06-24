@@ -15,6 +15,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <xf86drm.h>
@@ -732,6 +733,8 @@ nvrm_device_smoke_hw_run(struct nvrm_device *device, uint32_t slices,
       if (r) {
          vk_free(&device->vk.alloc, device->smoke_hw);
          device->smoke_hw = NULL;
+         if (nv_smoke_hw_env_verbose())
+            fprintf(stderr, "nvrm_smoke_hw: scratch_create failed rc=%d\n", r);
          return r;
       }
    }
@@ -742,8 +745,12 @@ nvrm_device_smoke_hw_run(struct nvrm_device *device, uint32_t slices,
          (void)nv_shader_upload_compute_smoke(device->smoke_cs, 0, 0, 0, 16);
    }
 
-   return nv_smoke_hw_run_on_channel(ch, device->smoke_hw, slices,
-                                     device->smoke_cs, timeout_ns, true, &res);
+   r = nv_smoke_hw_run_on_channel(ch, device->smoke_hw, slices,
+                                  device->smoke_cs, timeout_ns, true, &res);
+   /* Always log when env requested (bring-up); verbose adds phase detail */
+   if (nv_smoke_hw_env_requested() || nv_smoke_hw_env_verbose() || r != 0)
+      nv_smoke_hw_log_result(&res, "nvrm_smoke_hw");
+   return r;
 }
 
 VKAPI_ATTR void VKAPI_CALL

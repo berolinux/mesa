@@ -26,6 +26,10 @@
  *       NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=3     # G1+G2
  *       NV_SMOKE_HW=1 NV_SMOKE_HW_SLICES=7     # all (same as default)
  *
+ *   NV_SMOKE_HW_VERBOSE=1
+ *     Always print nv_smoke_hw_log_result (g1_submit/payload/sema/class).
+ *     Failures also log even without this flag.
+ *
  * Programmatic entrypoints (same semantics as env):
  *   nv_smoke_hw_env_requested() / nv_smoke_hw_env_slices()
  *   nv_smoke_hw_run_oneshot(rm, ch, slices, g2_shader, timeout_ns, ...)
@@ -68,7 +72,19 @@ struct nv_smoke_hw_result {
    int g3_rc;
    uint32_t slices_run;
    uint32_t slices_ok;
+   /* G1 phase detail for bring-up (0 = n/a or success path) */
+   int g1_submit_rc;   /* return from nv_channel_g1_ce_copy_sema_submit */
+   int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
+   uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
+   uint32_t g1_class_copy;    /* class used (0 if unknown) */
 };
+
+/** True if NV_SMOKE_HW_VERBOSE is set (non-empty, not "0"). */
+bool nv_smoke_hw_env_verbose(void);
+
+/** Print result to stderr (always if verbose or any slice failed). */
+void nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res,
+                            const char *prefix);
 
 /**
  * Scratch BOs for smoke: sema (4B), CE src/dst (G1), QMD (G2), CT (G3).
