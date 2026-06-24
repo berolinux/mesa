@@ -190,10 +190,16 @@ extern "C" {
 #define NVC597_SET_CONSTANT_BUFFER_SELECTOR_A   0x2380
 #define NVC597_SET_CONSTANT_BUFFER_SELECTOR_B   0x2384
 #define NVC597_SET_CONSTANT_BUFFER_SELECTOR_C   0x2388
+#define NVC597_LOAD_CONSTANT_BUFFER_OFFSET      0x238c
+#define NVC597_LOAD_CONSTANT_BUFFER(i)          (0x2390 + (i) * 4)
 #define NVC597_BIND_GROUP_CONSTANT_BUFFER(j)    (0x2410 + (j) * 32)
 #define NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_TRUE  0x1
 #define NVC597_BIND_GROUP_CONSTANT_BUFFER_VALID_FALSE 0x0
 #define NVC597_BIND_GROUP_CONSTANT_BUFFER_SHADER_SLOT_SHIFT 4
+/* Push constants conventionally use bind group vertex/pixel slot 0 (c[0] / bank 1) */
+#define NV_3D_PUSH_CONST_SHADER_SLOT            0
+#define NV_3D_PUSH_CONST_BIND_GROUP_VS          NV_3D_BIND_GROUP_VERTEX
+#define NV_3D_PUSH_CONST_BIND_GROUP_FS          NV_3D_BIND_GROUP_PIXEL
 
 /* Report semaphore (3D engine completion signal; nvidia-3d / nvkms-headsurface) */
 #define NVC597_SET_REPORT_SEMAPHORE_A           0x1b00
@@ -795,6 +801,71 @@ nv_3d_bind_group_constant_buffer(struct nv_push *p, unsigned bind_group,
                 ((shader_slot & 0x1f) << NVC597_BIND_GROUP_CONSTANT_BUFFER_SHADER_SLOT_SHIFT);
    nv_push_method(p, NVC597_BIND_GROUP_CONSTANT_BUFFER(bind_group), v);
 }
+
+/**
+ * Upload dwords into the currently selected constant buffer via
+ * LOAD_CONSTANT_BUFFER_OFFSET + LOAD_CONSTANT_BUFFER(i) (clc597.h).
+ * offset_bytes must be dword-aligned; count is number of uint32_t words.
+ * Hardware accepts bursts; we emit in chunks of 16 dwords per method range.
+ */
+static inline void
+nv_3d_load_constant_buffer_dwords(struct nv_push *p, uint32_t offset_bytes,
+                                  const uint32_t *dwords, uint32_t count)
+{
+   uint32_t off = offset_bytes & 0xffffu;
+   uint32_t i = 0;
+   if (!p || !dwords || !count)
+      return;
+   while (i < count) {
+      uint32_t chunk = count - i;
+      uint32_t j;
+      if (chunk > 16)
+         chunk = 16;
+      nv_push_method(p, NVC597_LOAD_CONSTANT_BUFFER_OFFSET, (off + i * 4u) & 0xffffu);
+      for (j = 0; j < chunk; j++)
+         nv_push_method(p, NVC597_LOAD_CONSTANT_BUFFER(j), dwords[i + j]);
+      i += chunk;
+   }
+}
+
+/**
+ * Select CB at gpu_addr, upload dwords, bind to VS+FS push-const slots.
+ * size_bytes is the CB allocation size (must be >= offset + count*4, 256-aligned preferred).
+ */
+static inline void
+nv_3d_upload_and_bind_push_constants(struct nv_push *p, uint64_t cb_gpu_addr,
+                                     uint32_t cb_size_bytes,
+                                     uint32_t offset_bytes,
+                                     const uint32_t *dwords, uint32_t count)
+{
+   uint32_t sel_size = cb_size_bytes ? cb_size_bytes : 256u;
+   if (!p || !cb_gpu_addr)
+      return;
+   if (sel_size < 256u)
+      sel_size = 256u;
+   sel_size = (sel_size + 255u) & ~255u;
+   nv_3d_set_constant_buffer_selector(p, sel_size, cb_gpu_addr);
+   if (dwords && count)
+      nv_3d_load_constant_buffer_dwords(p, offset_bytes, dwords, count);
+   nv_3d_bind_group_constant_buffer(p, NV_3D_PUSH_CONST_BIND_GROUP_VS,
+                                    NV_3D_PUSH_CONST_SHADER_SLOT, true);
+   nv_3d_bind_group_constant_buffer(p, NV_3D_PUSH_CONST_BIND_GROUP_FS,
+                                    NV_3D_PUSH_CONST_SHADER_SLOT, true);
+}
+
+/* VkDrawIndirectCommand / VkDrawIndexedIndirectCommand field offsets (bytes) */
+#define NV_VK_DRAW_INDIRECT_VERTEX_COUNT_OFF      0
+#define NV_VK_DRAW_INDIRECT_INSTANCE_COUNT_OFF    4
+#define NV_VK_DRAW_INDIRECT_FIRST_VERTEX_OFF      8
+#define NV_VK_DRAW_INDIRECT_FIRST_INSTANCE_OFF   12
+#define NV_VK_DRAW_INDIRECT_STRIDE_DEFAULT       16
+
+#define NV_VK_DRAWINDEXED_INDIRECT_INDEX_COUNT_OFF     0
+#define NV_VK_DRAWINDEXED_INDIRECT_INSTANCE_COUNT_OFF  4
+#define NV_VK_DRAWINDEXED_INDIRECT_FIRST_INDEX_OFF     8
+#define NV_VK_DRAWINDEXED_INDIRECT_VERTEX_OFFSET_OFF  12
+#define NV_VK_DRAWINDEXED_INDIRECT_FIRST_INSTANCE_OFF 16
+#define NV_VK_DRAWINDEXED_INDIRECT_STRIDE_DEFAULT     20
 
 /**
  * 3D report semaphore release (writes payload when pipeline reaches location).
