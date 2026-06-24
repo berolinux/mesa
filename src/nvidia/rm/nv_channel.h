@@ -248,6 +248,40 @@ nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
                                            uint64_t wait_timeout_ns,
                                            bool check_notifier);
 
+/**
+ * G3 vertical slice (hardware path, no MME): SET_OBJECT 3D, optional pitch
+ * colour target, colour clear, optional smoke triangle draw, 3D report sema,
+ * submit_wait_sema.  class_3d 0 uses ch->info->class_3d.
+ *
+ * ct_gpu_addr 0 skips CT bind (clear methods only; HW may NOP without RT).
+ * emit_draw false = clear+sema only (safer encode test without shaders).
+ */
+int
+nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
+                                uint32_t class_3d,
+                                uint64_t ct_gpu_addr,
+                                uint32_t ct_w, uint32_t ct_h,
+                                uint32_t ct_format,
+                                const uint32_t color_ui[4],
+                                bool emit_draw,
+                                uint64_t sema_gpu_addr,
+                                volatile uint32_t *sema_cpu,
+                                uint32_t sema_payload,
+                                bool sema_reset,
+                                uint64_t wait_timeout_ns,
+                                bool check_notifier);
+
+/** G3: 3D report sema only (fence marker) + submit/wait. */
+int
+nv_channel_g3_sema_only_submit(struct nv_channel *ch,
+                               uint32_t class_3d,
+                               uint64_t sema_gpu_addr,
+                               volatile uint32_t *sema_cpu,
+                               uint32_t sema_payload,
+                               bool sema_reset,
+                               uint64_t wait_timeout_ns,
+                               bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

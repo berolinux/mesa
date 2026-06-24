@@ -4,6 +4,7 @@
  */
 
 #include "nv_channel.h"
+#include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
 #include "nv_push.h"
 #include "nv_qmd.h"
@@ -705,4 +706,105 @@ nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
                                                      method_invalidate,
                                                      wait_timeout_ns,
                                                      check_notifier);
+}
+
+int
+nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
+                                uint32_t class_3d,
+                                uint64_t ct_gpu_addr,
+                                uint32_t ct_w, uint32_t ct_h,
+                                uint32_t ct_format,
+                                const uint32_t color_ui[4],
+                                bool emit_draw,
+                                uint64_t sema_gpu_addr,
+                                volatile uint32_t *sema_cpu,
+                                uint32_t sema_payload,
+                                bool sema_reset,
+                                uint64_t wait_timeout_ns,
+                                bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 128;
+   uint32_t c3;
+   uint32_t c[4];
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   c3 = class_3d;
+   if (!c3 && ch->info)
+      c3 = ch->info->class_3d;
+   if (!c3)
+      return -EINVAL;
+
+   if (!ct_format)
+      ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   if (emit_draw)
+      nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                    ct_format, c, false /* sema after draw */,
+                                    sema_gpu_addr, sema_payload);
+   else
+      nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                     ct_format, c, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g3_sema_only_submit(struct nv_channel *ch,
+                               uint32_t class_3d,
+                               uint64_t sema_gpu_addr,
+                               volatile uint32_t *sema_cpu,
+                               uint32_t sema_payload,
+                               bool sema_reset,
+                               uint64_t wait_timeout_ns,
+                               bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 32;
+   uint32_t c3;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   c3 = class_3d;
+   if (!c3 && ch->info)
+      c3 = ch->info->class_3d;
+   if (!c3)
+      return -EINVAL;
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   nv_3d_emit_g3_sema_only(&push, c3, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
 }

@@ -42,10 +42,10 @@ static void
 usage(const char *argv0)
 {
    fprintf(stderr,
-           "Usage: %s [--quiet] [--dump-g1 PATH] [--dump-g2 PATH] "
-           "[--dump-qmd PATH] [--check-g1-golden] [--check-g2-golden]\n"
+           "Usage: %s [--quiet] [--dump-g1|g2|g3 PATH] [--dump-qmd PATH]\n"
+           "         [--check-g1-golden] [--check-g2-golden] [--check-g3-golden]\n"
            "  Host-only NVIDIA vertical-slice selftest (no GPU).\n"
-           "  G1 = CE sema push; G2 = compute QMD/PCAS sema push.\n",
+           "  G1=CE sema; G2=compute QMD/PCAS; G3=3D clear/report sema.\n",
            argv0);
 }
 
@@ -53,8 +53,9 @@ int
 main(int argc, char **argv)
 {
    int quiet = 0;
-   int check_g1 = 0, check_g2 = 0;
-   const char *dump_g1 = NULL, *dump_g2 = NULL, *dump_qmd = NULL;
+   int check_g1 = 0, check_g2 = 0, check_g3 = 0;
+   const char *dump_g1 = NULL, *dump_g2 = NULL, *dump_g3 = NULL;
+   const char *dump_qmd = NULL;
    int i, r;
    uint32_t push_a[320], push_b[320];
    uint32_t qmd_a[NV_QMD_DWORDS], qmd_b[NV_QMD_DWORDS];
@@ -70,10 +71,14 @@ main(int argc, char **argv)
          check_g1 = 1;
       else if (!strcmp(argv[i], "--check-g2-golden"))
          check_g2 = 1;
+      else if (!strcmp(argv[i], "--check-g3-golden"))
+         check_g3 = 1;
       else if (!strcmp(argv[i], "--dump-g1") && i + 1 < argc)
          dump_g1 = argv[++i];
       else if (!strcmp(argv[i], "--dump-g2") && i + 1 < argc)
          dump_g2 = argv[++i];
+      else if (!strcmp(argv[i], "--dump-g3") && i + 1 < argc)
+         dump_g3 = argv[++i];
       else if (!strcmp(argv[i], "--dump-qmd") && i + 1 < argc)
          dump_qmd = argv[++i];
       else {
@@ -162,6 +167,40 @@ main(int argc, char **argv)
       }
       if (!quiet)
          fprintf(stderr, "g2 trace_compare self-golden: PASS\n");
+   }
+
+   if (check_g3 || dump_g3) {
+      r = nv_smoke_selftest_g3_3d_sema_push(NULL, 0, push_a,
+                                            (uint32_t)(sizeof(push_a) / 4),
+                                            &na);
+      if (r != 0) {
+         if (!quiet)
+            fprintf(stderr, "g3 capture: FAIL %d\n", r);
+         return 1;
+      }
+      r = nv_smoke_selftest_g3_3d_sema_push(NULL, 0, push_b,
+                                            (uint32_t)(sizeof(push_b) / 4),
+                                            &nb);
+      if (r != 0 || na != nb || memcmp(push_a, push_b, (size_t)na * 4) != 0) {
+         if (!quiet)
+            fprintf(stderr, "g3 golden/determinism: FAIL r=%d na=%u nb=%u\n",
+                    r, na, nb);
+         return 1;
+      }
+      if (!quiet)
+         fprintf(stderr, "g3 golden/determinism: PASS (%u dwords)\n", na);
+      if (dump_g3 && dump_dwords(dump_g3, push_a, na, quiet))
+         return 1;
+      r = nv_smoke_selftest_g3_3d_sema_push(push_a, na, push_b,
+                                            (uint32_t)(sizeof(push_b) / 4),
+                                            &nb);
+      if (r != 0) {
+         if (!quiet)
+            fprintf(stderr, "g3 trace_compare self-golden: FAIL %d\n", r);
+         return 1;
+      }
+      if (!quiet)
+         fprintf(stderr, "g3 trace_compare self-golden: PASS\n");
    }
 
    return 0;

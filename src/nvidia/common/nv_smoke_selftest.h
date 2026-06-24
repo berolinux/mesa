@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
 #include "nv_qmd.h"
 #include "nv_sph.h"
@@ -358,9 +359,129 @@ nv_smoke_selftest_g2_compute_sema_push(const uint32_t *trace_push,
    return 0;
 }
 
+/* G3 smoke defaults (match libdrm NVIDIA_SMOKE_G3_* / channel g3_*) */
+#define NV_SMOKE_G3_CT_GPU_DEFAULT     0x500000ull
+#define NV_SMOKE_G3_SEMA_GPU_DEFAULT   0x300000ull
+#define NV_SMOKE_G3_SEMA_PAYLOAD_DEFAULT 0x42u
+#define NV_SMOKE_G3_CT_W_DEFAULT       64u
+#define NV_SMOKE_G3_CT_H_DEFAULT       64u
+#define NV_SMOKE_G3_CLASS_PLACEHOLDER  0xc597u
+
+/**
+ * G3 host slice: clear+sema and sema-only method streams; verify CLEAR_SURFACE,
+ * SET_REPORT_SEMAPHORE_C payload, and sema-only path.  Optional trace compare.
+ */
+static inline int
+nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
+                                  uint32_t trace_dwords,
+                                  uint32_t *push_out,
+                                  uint32_t push_cap_dwords,
+                                  uint32_t *push_dwords_out)
+{
+   uint32_t buf_a[256], buf_b[256];
+   uint32_t *buf = push_out ? push_out : buf_a;
+   uint32_t cap = push_out ? push_cap_dwords : (uint32_t)(sizeof(buf_a) / 4);
+   struct nv_push p;
+   uint32_t n, i;
+   uint32_t color[4] = { 0xff0000ffu, 0, 0, 0 };
+   uint32_t sema_payload = NV_SMOKE_G3_SEMA_PAYLOAD_DEFAULT;
+   uint64_t sema_gpu = NV_SMOKE_G3_SEMA_GPU_DEFAULT;
+   uint64_t ct_gpu = NV_SMOKE_G3_CT_GPU_DEFAULT;
+   bool saw_clear = false, saw_sema_c = false, saw_sema_d = false;
+   uint32_t diff = 0;
+   int r;
+
+   if (cap < 32)
+      return -300;
+
+   memset(buf, 0, (size_t)cap * 4);
+   nv_push_init(&p, buf, cap);
+   nv_3d_emit_g3_clear_color_sema(&p, NV_SMOKE_G3_CLASS_PLACEHOLDER,
+                                  ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+                                  NV_SMOKE_G3_CT_H_DEFAULT,
+                                  NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+                                  color, sema_gpu, sema_payload);
+   n = nv_push_dw_count(&p);
+   if (n < 10 || n > cap)
+      return -301;
+   if (push_dwords_out)
+      *push_dwords_out = n;
+
+   for (i = 0; i + 1 < n; i++) {
+      uint32_t hdr = buf[i];
+      uint32_t data = buf[i + 1];
+      uint32_t method = (hdr & 0x1fff) << 2;
+      uint32_t subch = (hdr >> 13) & 7;
+      if ((hdr >> 29) != 0)
+         continue;
+      if (subch != NV_PUSH_SUBCH_3D)
+         continue;
+      if (method == NVC597_CLEAR_SURFACE)
+         saw_clear = true;
+      else if (method == NVC597_SET_REPORT_SEMAPHORE_C) {
+         if (data != sema_payload)
+            return -302;
+         saw_sema_c = true;
+      } else if (method == NVC597_SET_REPORT_SEMAPHORE_D) {
+         if ((data & 0x1) != NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_RELEASE)
+            return -303;
+         saw_sema_d = true;
+      }
+   }
+   if (!saw_clear)
+      return -304;
+   if (!saw_sema_c || !saw_sema_d)
+      return -305;
+
+   /* Determinism */
+   memset(buf_b, 0, sizeof(buf_b));
+   nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
+   nv_3d_emit_g3_clear_color_sema(&p, NV_SMOKE_G3_CLASS_PLACEHOLDER,
+                                  ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+                                  NV_SMOKE_G3_CT_H_DEFAULT,
+                                  NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+                                  color, sema_gpu, sema_payload);
+   if (nv_push_dw_count(&p) != n || memcmp(buf, buf_b, (size_t)n * 4) != 0)
+      return -306;
+
+   /* Sema-only path has report sema without CLEAR */
+   memset(buf_b, 0, sizeof(buf_b));
+   nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
+   nv_3d_emit_g3_sema_only(&p, NV_SMOKE_G3_CLASS_PLACEHOLDER, sema_gpu,
+                           sema_payload);
+   {
+      uint32_t n_sema = nv_push_dw_count(&p);
+      bool saw_c = false;
+      if (n_sema < 4)
+         return -307;
+      for (i = 0; i + 1 < n_sema; i++) {
+         uint32_t hdr = buf_b[i];
+         uint32_t data = buf_b[i + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_C && data == sema_payload)
+            saw_c = true;
+         if (method == NVC597_CLEAR_SURFACE)
+            return -308; /* sema-only must not clear */
+      }
+      if (!saw_c)
+         return -309;
+   }
+
+   if (trace_push && trace_dwords) {
+      r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
+                                 &diff);
+      if (r == -3)
+         return 0;
+      return r == 0 ? 0 : -310 + r;
+   }
+   return 0;
+}
+
 /**
  * Run QMD encode determinism + sema enable bit + compute SPH EXIT validate +
- * G1/G2 push shape.  Returns 0 on success; negative code = which check.
+ * G1/G2/G3 push shape.  Returns 0 on success; negative code = which check.
  */
 static inline int
 nv_smoke_selftest_host(void)
@@ -378,6 +499,10 @@ nv_smoke_selftest_host(void)
    r = nv_smoke_selftest_g2_compute_sema_push(NULL, 0, NULL, 0, NULL, NULL);
    if (r != 0)
       return r; /* -200..-212 */
+
+   r = nv_smoke_selftest_g3_3d_sema_push(NULL, 0, NULL, 0, NULL);
+   if (r != 0)
+      return r; /* -300..-312 */
 
    r = nv_qmd_trace_golden_selftest(qmd_a, qmd_b);
    if (r != 0)
@@ -445,6 +570,21 @@ nv_smoke_selftest_host(void)
          return -160 + r;
       if (na != nb)
          return -165;
+      {
+         uint32_t g3a[256], g3b[256];
+         r = nv_smoke_selftest_g3_3d_sema_push(NULL, 0, g3a,
+                                               (uint32_t)(sizeof(g3a) / 4),
+                                               &na);
+         if (r != 0)
+            return -170 + r;
+         r = nv_smoke_selftest_g3_3d_sema_push(g3a, na, g3b,
+                                               (uint32_t)(sizeof(g3b) / 4),
+                                               &nb);
+         if (r != 0)
+            return -180 + r;
+         if (na != nb)
+            return -185;
+      }
    }
 
    return 0;
@@ -482,6 +622,14 @@ nv_smoke_capture_g2_push(uint32_t *out, uint32_t out_cap_dwords,
 {
    return nv_smoke_selftest_g2_compute_sema_push(NULL, 0, out, out_cap_dwords,
                                                  dwords_out, qmd_out);
+}
+
+static inline int
+nv_smoke_capture_g3_push(uint32_t *out, uint32_t out_cap_dwords,
+                         uint32_t *dwords_out)
+{
+   return nv_smoke_selftest_g3_3d_sema_push(NULL, 0, out, out_cap_dwords,
+                                            dwords_out);
 }
 
 /* Non-inline entry for meson-linked libnvidia_common / tools */

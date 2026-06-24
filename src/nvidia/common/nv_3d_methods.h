@@ -2883,6 +2883,103 @@ nv_3d_emit_smoke_triangle_draw(struct nv_push *p, uint64_t sema_gpu_addr,
    nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr, sema_payload);
 }
 
+/**
+ * G3 vertical slice (path A/B, no MME): SET_OBJECT 3D, optional colour target 0
+ * (pitch), colour clear (buffers 0x10), optional 3D report sema release.
+ * Does not bind shaders — encode/submit plumbing + sema completion only.
+ * class_3d 0 => only set subch 3D (caller already set object).
+ */
+static inline void
+nv_3d_emit_g3_clear_color_sema(struct nv_push *p, uint32_t class_3d,
+                               uint64_t ct_gpu_addr, uint32_t ct_w,
+                               uint32_t ct_h, uint32_t ct_format,
+                               const uint32_t color_ui[4],
+                               uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   uint32_t c[4];
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr,
+                                       ct_w ? ct_w : 1, ct_h ? ct_h : 1,
+                                       ct_format, false /* pitch */, 0);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10 /* PIPE_CLEAR_COLOR0 */, c, 0.0f, 0);
+
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/**
+ * G3: colour clear + smoke triangle draw + sema (after draw). sema only on
+ * final report (clear does not sema unless sema_after_clear is set).
+ */
+static inline void
+nv_3d_emit_g3_clear_draw_sema(struct nv_push *p, uint32_t class_3d,
+                              uint64_t ct_gpu_addr, uint32_t ct_w,
+                              uint32_t ct_h, uint32_t ct_format,
+                              const uint32_t color_ui[4],
+                              bool sema_after_clear,
+                              uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   uint32_t c[4];
+   uint64_t sema_clear = sema_after_clear ? sema_gpu_addr : 0;
+   uint32_t sema_clear_pay = sema_after_clear ? sema_payload : 0;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr,
+                                       ct_w ? ct_w : 1, ct_h ? ct_h : 1,
+                                       ct_format, false, 0);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
+   if (sema_clear && sema_clear_pay)
+      nv_3d_report_semaphore_release(p, sema_clear, sema_clear_pay, true);
+
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   /* Draw without sema if sema_after_clear used it; else sema after draw */
+   if (sema_after_clear || !sema_gpu_addr)
+      nv_3d_emit_draw_vertex_array(p, 0, 3);
+   else
+      nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                             sema_payload);
+}
+
+/** G3 sema-only 3D fence (report sema release, no clear/draw). */
+static inline void
+nv_3d_emit_g3_sema_only(struct nv_push *p, uint32_t class_3d,
+                        uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (!p || !sema_gpu_addr || !sema_payload)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
 #ifdef __cplusplus
 }
 #endif
