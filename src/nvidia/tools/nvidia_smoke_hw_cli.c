@@ -145,7 +145,8 @@ main(int argc, char **argv)
            "nvidia_smoke_hw_cli: FAIL rc=%d open_rc=%d ch_rc=%d gpu_tried=%d "
            "buf_va_rc=%d eng_rc=%d sready_rc=%d\n"
            "  slices_run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d\n"
-           "  g1_pre=%d g1_sched=%d g1_eng_alloc=%d g1_host_sema=%d g1_hs_mode=%d g1_sema_obs=0x%x\n"
+           "  g1_pre=%d g1_sched=%d g1_spath=%d g1_sbind=%d g1_tsg=%d g1_eng_alloc=%d\n"
+           "  g1_host_sema=%d g1_hs_mode=%d g1_sema_obs=0x%x\n"
            "  g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x g1_h_copy=0x%x\n"
            "  g1_submit=%d sema_only=%d remap=%d\n"
            "  g1_userd_get/put=%u/%u host_gpfifo_put=%u doorbell=%d scheduled=%d\n"
@@ -164,7 +165,8 @@ main(int argc, char **argv)
            res.standalone_submit_ready_rc,
            (unsigned)res.slices_run, (unsigned)res.slices_ok,
            res.g1_rc, res.g2_rc, res.g3_rc,
-           res.g1_preflight_rc, res.g1_schedule_rc, res.g1_engine_alloc_rc,
+           res.g1_preflight_rc, res.g1_schedule_rc, res.g1_schedule_path,
+           res.g1_schedule_bind_rc, res.g1_tsg, res.g1_engine_alloc_rc,
            res.g1_host_sema_rc, res.g1_host_sema_mode,
            (unsigned)res.g1_sema_observed,
            (unsigned)res.g1_class_copy, (unsigned)res.g1_gpfifo_class,

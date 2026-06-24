@@ -18,6 +18,11 @@
  *   (b) emit a fixed method sequence via host-side "shadow program" that
  *       duplicates what the macro *should* emit (path C' correctness).
  *
+ * Pass5 (610.43.02 glcore) shows real CALL_MME traffic at method offs
+ * 0x3800 (5), 0x3998 (21), 0x39e0 (45 hottest) — confirms HW uses MME, not
+ * only GL "immediate mode" strings.  ISA still unvalidated → keep END stubs
+ * and rely on host path A/B/C' for indirect draws.
+ *
  * Host-side shadow programs live in nv_3d_methods.h / callers; this header
  * owns instruction constants and multi-insn program tables.
  */
@@ -54,6 +59,17 @@ extern "C" {
 #define NV_MME_SLOT_DRAW_INDIRECT            0
 #define NV_MME_SLOT_DRAW_INDEXED_INDIRECT    1
 #define NV_MME_SLOT_COUNT                    2
+
+/*
+ * Pass5 glcore method-off frequency (inc1 s0 CALL_MME-ish headers):
+ *   0x3800 base (hdr 0x20010e00) — 5 hits
+ *   0x3998 (hdr 0x20010e66) — 21 hits
+ *   0x39e0 (hdr 0x20010e78) — 45 hits (hottest observed)
+ * Macro index i is at byte off 0x3800 + i*8 (CALL_MME_MACRO(i)).
+ * Hottest slot index ≈ (0x39e0 - 0x3800) / 8 = 28 — not our indirect slots 0/1.
+ */
+#define NV_MME_PASS5_HOT_METHOD_OFF          0x39e0u
+#define NV_MME_PASS5_HOT_MACRO_INDEX         28u
 
 /* Instruction RAM layout: each macro gets a dedicated region */
 #define NV_MME_RAM_SLOT_STRIDE               16  /* dwords per macro region */

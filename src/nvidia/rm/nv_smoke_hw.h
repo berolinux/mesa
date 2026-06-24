@@ -108,6 +108,9 @@ struct nv_smoke_hw_result {
    int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */
    int g1_preflight_detail; /* 0 ok, 1=GPPut-only (no doorbell token), else errno */
    int g1_schedule_rc;  /* channel->schedule_rc from last GPFIFO_SCHEDULE attempt */
+   int g1_schedule_path; /* 0=none 1=A06C_TSG 2=A06F_channel (tick79) */
+   int g1_schedule_bind_rc; /* A06C/A06F BIND status (-1 n/a) */
+   int g1_tsg;          /* 1 if channel has h_channel_group */
    int g1_engine_alloc_rc; /* channel engine RmAlloc status (copy/compute/3d children) */
    uint32_t g1_h_obj_copy; /* non-zero if copy engine object allocated under channel */
    uint16_t g1_notifier_status; /* error notifier status word (0xffff = unset) */

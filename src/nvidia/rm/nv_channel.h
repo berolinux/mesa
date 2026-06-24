@@ -62,6 +62,14 @@ struct nv_channel {
    bool has_work_submit_token;
    bool scheduled;
    int schedule_rc;                /* last GPFIFO_SCHEDULE errno (0 = ok/n/a) */
+   int schedule_bind_rc;           /* last A06C/A06F BIND errno (0 ok / -1 n/a) */
+   /*
+    * Which schedule path succeeded (smoke/triage):
+    *   0 = not scheduled
+    *   1 = A06C TSG schedule (optionally after BIND)
+    *   2 = A06F channel schedule (optionally after BIND)
+    */
+   int schedule_path;
    bool use_channel_group;
 
    /* CPU mappings */

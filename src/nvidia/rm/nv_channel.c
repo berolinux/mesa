@@ -35,6 +35,137 @@ now_ns(void)
    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+#if defined(HAVE_LIBDRM_NVIDIA)
+/*
+ * Schedule channel (and/or TSG) so PBDMA can run methods.
+ * Pass5 / OGKM ctrla06c: A06C_BIND configures group engine; then GPFIFO_SCHEDULE.
+ * Also try A06F_BIND + A06F_GPFIFO_SCHEDULE on the channel object.
+ * Returns 0 if scheduled, else last errno; updates ch->schedule_rc/path/bind_rc.
+ */
+static int
+nv_channel_try_schedule(struct nv_channel *ch)
+{
+   struct nv_rm_device *rm;
+   int sret = -EAGAIN;
+   int last_err = -EAGAIN;
+
+   if (!ch || !ch->rm || !ch->h_channel)
+      return -EINVAL;
+   if (ch->scheduled)
+      return 0;
+
+   rm = ch->rm;
+   ch->schedule_bind_rc = -1;
+
+   /* --- TSG path: BIND (engine) then A06C_GPFIFO_SCHEDULE --- */
+   if (ch->h_channel_group) {
+      NVA06C_CTRL_BIND_PARAMS bind;
+      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+
+      memset(&bind, 0, sizeof(bind));
+      bind.engineType = ch->engine_type;
+      sret = nv_rm_control(rm, ch->h_channel_group, NVA06C_CTRL_CMD_BIND,
+                           &bind, sizeof(bind));
+      ch->schedule_bind_rc = sret;
+      /* BIND may fail if already bound; still try schedule */
+
+      memset(&gsched, 0, sizeof(gsched));
+      gsched.bEnable = NV_TRUE;
+      gsched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel_group,
+                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &gsched, sizeof(gsched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 1; /* A06C TSG */
+         ch->use_channel_group = true;
+         return 0;
+      }
+      last_err = sret;
+
+      /* Retry schedule without assuming BIND succeeded (order variation) */
+      memset(&gsched, 0, sizeof(gsched));
+      gsched.bEnable = NV_TRUE;
+      gsched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel_group,
+                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &gsched, sizeof(gsched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 1;
+         ch->use_channel_group = true;
+         return 0;
+      }
+      last_err = sret;
+   }
+
+   /* --- Channel path: A06F_BIND then A06F_GPFIFO_SCHEDULE --- */
+   {
+      NVA06F_CTRL_BIND_PARAMS cbind;
+      NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
+
+      memset(&cbind, 0, sizeof(cbind));
+      cbind.engineType = ch->engine_type;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_BIND,
+                           &cbind, sizeof(cbind));
+      if (ch->schedule_bind_rc != 0)
+         ch->schedule_bind_rc = sret;
+
+      memset(&sched, 0, sizeof(sched));
+      sched.bEnable = NV_TRUE;
+      sched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &sched, sizeof(sched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 2; /* A06F channel */
+         return 0;
+      }
+      last_err = sret;
+
+      /* Plain schedule without BIND (legacy path that worked before tick79) */
+      memset(&sched, 0, sizeof(sched));
+      sched.bEnable = NV_TRUE;
+      sched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &sched, sizeof(sched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 2;
+         return 0;
+      }
+      last_err = sret;
+   }
+
+   /* Final TSG-only schedule if group exists but channel-first was preferred earlier */
+   if (!ch->scheduled && ch->h_channel_group) {
+      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+      memset(&gsched, 0, sizeof(gsched));
+      gsched.bEnable = NV_TRUE;
+      gsched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel_group,
+                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &gsched, sizeof(gsched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 1;
+         ch->use_channel_group = true;
+         return 0;
+      }
+      last_err = sret;
+   }
+
+   ch->schedule_rc = last_err;
+   ch->schedule_path = 0;
+   return last_err;
+}
+#endif /* HAVE_LIBDRM_NVIDIA */
+
 /* Fallback class IDs (OGKM + 610.43.02 binary ladders; prefer refined/bound over these) */
 #ifndef NV_CH_FALLBACK_COPY
 #define NV_CH_FALLBACK_COPY     0x0000c8b5u  /* HOPPER_DMA_COPY_A — common in 610 RE */
@@ -330,52 +461,11 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       }
    }
 
-   /*
-    * Schedule: try both TSG (A06C) and per-channel (A06F) GPFIFO_SCHEDULE.
-    * Order depends on whether channel was parented under TSG; if first fails,
-    * always attempt the other (RM often accepts only one form).
-    */
+   /* Schedule: A06C BIND+SCHEDULE and/or A06F BIND+SCHEDULE (tick79 / pass5). */
    ch->schedule_rc = -EAGAIN;
-   if (ch->use_channel_group && ch->h_channel_group) {
-      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
-      memset(&gsched, 0, sizeof(gsched));
-      gsched.bEnable = NV_TRUE;
-      gsched.bSkipSubmit = NV_FALSE;
-      ret = nv_rm_control(rm, ch->h_channel_group,
-                          NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                          &gsched, sizeof(gsched));
-      ch->schedule_rc = ret;
-      if (ret == 0)
-         ch->scheduled = true;
-   }
-   if (!ch->scheduled) {
-      NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
-      memset(&sched, 0, sizeof(sched));
-      sched.bEnable = NV_TRUE;
-      sched.bSkipSubmit = NV_FALSE;
-      ret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
-                          &sched, sizeof(sched));
-      if (ret == 0) {
-         ch->scheduled = true;
-         ch->schedule_rc = 0;
-      } else if (!ch->scheduled)
-         ch->schedule_rc = ret;
-   }
-   /* If TSG schedule failed but we only tried channel-first path inverse: try TSG last */
-   if (!ch->scheduled && ch->h_channel_group) {
-      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
-      memset(&gsched, 0, sizeof(gsched));
-      gsched.bEnable = NV_TRUE;
-      gsched.bSkipSubmit = NV_FALSE;
-      ret = nv_rm_control(rm, ch->h_channel_group,
-                          NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                          &gsched, sizeof(gsched));
-      if (ret == 0) {
-         ch->scheduled = true;
-         ch->schedule_rc = 0;
-      } else if (!ch->scheduled)
-         ch->schedule_rc = ret;
-   }
+   ch->schedule_path = 0;
+   ch->schedule_bind_rc = -1;
+   (void)nv_channel_try_schedule(ch);
 
    /* Work submit token (Turing+ / class > C36E): NOTIF_INDEX then GET_TOKEN.
     * 610.43.02 glcore RE (a53229 then a53269); try channel then TSG parent. */
@@ -753,51 +843,8 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
    (void)nv_channel_ensure_engine_objects(ch);
 
    /* Schedule if create-time schedule failed (channel won't run methods) */
-   if (!ch->scheduled) {
-      int sret = -1;
-      if (ch->use_channel_group && ch->h_channel_group) {
-         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
-         memset(&gsched, 0, sizeof(gsched));
-         gsched.bEnable = NV_TRUE;
-         gsched.bSkipSubmit = NV_FALSE;
-         sret = nv_rm_control(ch->rm, ch->h_channel_group,
-                              NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                              &gsched, sizeof(gsched));
-         if (sret == 0) {
-            ch->scheduled = true;
-            ch->schedule_rc = 0;
-         } else
-            ch->schedule_rc = sret;
-      }
-      if (!ch->scheduled) {
-         NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
-         memset(&sched, 0, sizeof(sched));
-         sched.bEnable = NV_TRUE;
-         sched.bSkipSubmit = NV_FALSE;
-         sret = nv_rm_control(ch->rm, ch->h_channel,
-                              NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
-                              &sched, sizeof(sched));
-         if (sret == 0) {
-            ch->scheduled = true;
-            ch->schedule_rc = 0;
-         } else if (!ch->scheduled)
-            ch->schedule_rc = sret;
-      }
-      if (!ch->scheduled && ch->h_channel_group) {
-         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
-         memset(&gsched, 0, sizeof(gsched));
-         gsched.bEnable = NV_TRUE;
-         gsched.bSkipSubmit = NV_FALSE;
-         sret = nv_rm_control(ch->rm, ch->h_channel_group,
-                              NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                              &gsched, sizeof(gsched));
-         if (sret == 0) {
-            ch->scheduled = true;
-            ch->schedule_rc = 0;
-         } else if (!ch->scheduled)
-            ch->schedule_rc = sret;
-      }
-   }
+   if (!ch->scheduled)
+      (void)nv_channel_try_schedule(ch);
 
    /* Doorbell prerequisites (Volta+ / class > C36E): usermode + work_submit_token.
     * 610.43.02 glcore RE (ac5557): doorbell path only when gpfifo_class > 0xC36E.

@@ -112,7 +112,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
       return;
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
-           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
+           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_spath=%d g1_sbind=%d g1_tsg=%d g1_eng_rc=%d g1_h_copy=0x%x g1_db=%d"
            " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d g1_host_sema=%d g1_hs_mode=%d"
            " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x g1_gpfifo=0x%x g1_tok=0x%x"
            " g1_notif=0x%x/0x%x"
@@ -127,6 +127,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
            res->g1_rc, res->g2_rc, res->g3_rc,
            res->g1_preflight_rc, res->g1_preflight_detail,
            res->g1_was_scheduled ? 1 : 0, res->g1_schedule_rc,
+           res->g1_schedule_path, res->g1_schedule_bind_rc, res->g1_tsg,
            res->g1_engine_alloc_rc, (unsigned)res->g1_h_obj_copy,
            res->g1_had_doorbell ? 1 : 0,
            res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
@@ -396,6 +397,9 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
       res.g1_was_scheduled = ch->scheduled;
       res.g1_schedule_rc = ch->schedule_rc;
+      res.g1_schedule_path = ch->schedule_path;
+      res.g1_schedule_bind_rc = ch->schedule_bind_rc;
+      res.g1_tsg = ch->h_channel_group ? 1 : 0;
       res.g1_engine_alloc_rc = ch->engine_alloc_rc;
       res.g1_h_obj_copy = ch->h_obj_copy;
       res.g1_notifier_status = 0xffff;
