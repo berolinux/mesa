@@ -229,15 +229,16 @@ engines, flush modes, or channel types) — not different architectures.
 
 ### 4.3 USERD + doorbell (from headers + constants; limited x86 addressing)
 
-`Nvc36fControl` (`clc36f.h`):
+`Nvc36fControl` (`clc36f.h`) — **offsets confirmed by 581× `mov …, 0x8c(%reg)` in glcore `.text`:**
 
 | Offset | Field | Writer | Role |
 |-------:|-------|--------|------|
-| 0x40 | Put | host/hw | legacy/alternate put |
-| 0x44 | Get | hw | |
-| 0x48 | Reference | hw | |
-| **0x88** | **GPGet** | **hw** | HW progress through GPFIFO ring |
-| **0x8c** | **GPPut** | **host** | Host publishes new entries |
+| 0x00.. | Put / Get / Ref (legacy FIFO fields) | mixed | Pre-GPFIFO / compat |
+| **0x88** | **GPGet** | **hw** | HW progress through GPFIFO ring (host polls) |
+| **0x8c** | **GPPut** | **host** | Host publishes new GPFIFO entries (kick step 1) |
+
+Note: some pass-1 notes listed GPPut at `+0x4c`; that is **wrong for Turing+ `Nvc36fControl`**.
+The live driver writes **`+0x8c`**. Open `nv_channel` / smoke must use `0x8c`.
 
 `VOLTA_USERMODE_A` (`clc361.h`):
 
@@ -250,22 +251,146 @@ Whole-file u32 constant hits in glcore (earlier pass): `0x88` ~2859, `0x8c` ~111
 `0x84` ~3121. These are **not** all USERD accesses (many false positives), but magnitudes are
 consistent with these offsets being first-class in the binary.
 
-Objdump did not easily surface `[reg+0x8c]` / `[reg+0x90]` as simple `DWORD PTR` forms — the
-driver likely uses:
-- scaled/indexed addressing through channel structs
-- or writes via the indirect kick functions above
+**Pass 3 (2026-06-24) supersedes the above uncertainty.** Direct x86 stores to `0x8c` and `0x90`
+are abundant in `libnvidia-glcore.so` executable segment:
 
-OGKM RPC explicitly serializes `NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN` — the value written
-to usermode+0x90 is a **token from RM**, not a constant.
+| Pattern | Count in `.text` | Meaning |
+|---------|-----------------:|---------|
+| `mov %regd, 0x8c(%reg64)` | **581** | **USERD.GPPut** write |
+| `mov %regd, 0x90(%reg64)` | **252** | **usermode doorbell** write |
 
-**Kick sequence (validated by architecture + headers + sfence disasm):**
+OGKM RPC gets the doorbell value: `NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN` (`0xc36f0108`)
+returns a token; userspace writes it to usermode+0x90. It is **not** a compile-time constant.
+
+**Kick sequence (now validated by direct disassembly — see §4.4):**
 
 1. Write method stream into pushbuffer (GPU VA)
 2. Write GPFIFO ring entry(ies) at current GPPut index
-3. **`sfence`**
-4. Store new index to **USERD + 0x8c (GPPut)**
-5. Store **work_submit_token** to **usermode map + 0x90**
-6. Poll sema / USERD.GPGet / notifier for completion
+3. Store new index to **USERD + 0x8c (GPPut)** — may loop over multiple USERD pages/subdevices
+4. If channel class **> 0xC36E** (i.e. Turing+ GPFIFO `C36F` and newer): **`sfence`**, then store
+   **work_submit_token** to **usermode map + 0x90** (`NVC361_NOTIFY_CHANNEL_PENDING`)
+5. Older channels (`<= 0xC36E`) skip the usermode doorbell path (legacy kick only)
+6. Poll sema / USERD.GPGet (`+0x88`) / notifier for completion
+
+---
+
+## 4.4 Pass 3 smoking gun: complete kick at `glcore+0xac5540`
+
+Disassembled from `libnvidia-glcore.so.610.43.02` at VA `0xac5540` (function cluster under
+`_nv037glcore`). This is the **production submit/kick** for multi-USERD channels:
+
+```asm
+; --- publish GPPut to every USERD in the set ---
+ac5540:  mov    0x370(%rbp,%rax,8),%rdx   ; USERD host mapping for index %rax
+ac5548:  add    $0x1,%rax
+ac554c:  mov    %esi,0x8c(%rdx)           ; *** USERD.GPPut = new put index ***
+ac5552:  cmp    %eax,%r15d
+ac5555:  ja     ac5540                    ; loop all USERDs
+
+; --- gate: only Turing+ GPFIFO classes use usermode doorbell ---
+ac5557:  cmpl   $0xc36e,0x1030(%rbp)      ; channel class in context struct
+ac5561:  jbe    ac55ca                    ; <= C36E: skip doorbell (pre-Turing path)
+ac5563:  ... flag checks ...
+
+; --- order all prior stores (push + GPFIFO ring + GPPut) before doorbell ---
+ac5585:  sfence
+
+; --- ring doorbell with RM-issued work_submit_token ---
+ac5592:  mov    0x3d8(%rbp),%eax          ; token / runqueue index math
+ac55a8:  add    0x1418(%rbp,%rdx,8),%rax  ; token table lookup
+ac55b0:  mov    0x8(%rax),%edx            ; *** work_submit_token value ***
+ac55b3:  mov    0x27550(%r8,%rcx,8),%rax  ; usermode object host mapping
+ac55bf:  mov    %edx,0x90(%rax)           ; *** NVC361_NOTIFY_CHANNEL_PENDING ***
+```
+
+**What this proves about the hardware (and what open code must do):**
+
+1. **GPPut is at USERD + 0x8c**, exactly `Nvc36fControl.GPPut` in `clc36f.h` (field at 0x8c, not 0x4c).
+2. **GPGet is at USERD + 0x88** (companion; host reads, HW writes) — symmetric to GPPut.
+3. **Doorbell is usermode + 0x90**, exactly `NVC361_NOTIFY_CHANNEL_PENDING`.
+4. **`sfence` sits between GPPut and doorbell**, not before GPPut in this path — so ring/push stores
+   must already be globally visible *or* the GPPut loop provides enough ordering for older CPUs;
+   open code should still barrier before GPPut *and* before doorbell (harmless, matches other clusters).
+5. **Doorbell payload is a dynamic token** looked up from context state (`0x3d8` / `0x1418` tables),
+   obtained earlier via RmControl `GET_WORK_SUBMIT_TOKEN` — not `1`, not channel ID, not GPPut index.
+6. **Class threshold `0xC36E`** means: if your allocated GPFIFO class is `C36F`/`C46F`/`C56F`/`C86F`
+   you **must** program usermode+doorbell; if somehow on `C06F`/`B06F`/older, doorbell may be optional
+   (legacy doorbell-less submit). Open bring-up on any modern GPU will be `>= C36F` → doorbell required.
+7. **Multi-USERD loop** (`0x370(%rbp,idx,8)`) — MIG / multi-subdevice / multi-runqueue setups write
+   GPPut to *every* mapped USERD. Single-GPU single-channel open smoke: one USERD is enough, but
+   the loop shows the driver never assumes only one.
+
+Second sibling site at `0xac5859` repeats the same `sfence` + `0x90` pattern (variant for different
+flag/runqueue selection). Across all of glcore `.text`: **581 GPPut stores, 252 doorbell stores** —
+submit is not a rare ioctl; it is a hot userspace path.
+
+### 4.5 RM control for token / notif — disasm at `glcore+0xa53229`
+
+```asm
+a53229:  mov    $0xc36f010a,%edx          ; SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX
+a5322e:  mov    %ebx,%edi                 ; channel / object handle
+a53230:  call   <RmControl wrapper>
+
+a53269:  mov    $0xc36f0108,%edx          ; GET_WORK_SUBMIT_TOKEN
+a5326e:  mov    %ebx,%edi
+a53270:  call   <RmControl wrapper>
+; result stored into context token table (feeds 0xac55b0 load above)
+```
+
+**Corrected command map** (pass 2 had wrong labels — fix against `ctrlc36f.h`):
+
+| ID | OGKM name | Role |
+|---:|-----------|------|
+| `0xc36f0108` | `NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN` | Returns doorbell token |
+| `0xc36f0109` | `NVC36F_CTRL_CMD_GPFIFO_UPDATE_FAULT_METHOD_BUFFER` | Fault buffer VA setup |
+| `0xc36f010a` | `NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX` | Binds which notifier index the token signals |
+
+Channel **schedule** is a separate RmControl (often on TSG/channel group, not this triplet). Open code
+must still issue schedule before expecting work to run; binaries embed `0xc36f0108`/`0xa` in channel
+setup, not on every kick.
+
+Embedded counts (glcore pass 3): `0xc36f0108` ×2, `0xc36f010a` ×2 in whole file — rare because setup
+is once per channel, not per frame. Contrast: 581 GPPut writes (every submit).
+
+### 4.6 CE method emission — live pushbuffer writer at `glcore+0xd6d0b0`
+
+Not a rodata template: executable code **constructs** Fermi+ headers at runtime:
+
+```asm
+d6d0b0:  mov    0x5e8(%rsi),%rax          ; channel / push context
+d6d0b7:  shr    $0x2,%edx                 ; method_byte_off >> 2  → method index
+d6d0ba:  and    $0xfff,%edx               ; mask method index (13 bits)
+d6d0c0:  mov    0x68(%rax),%rsi           ; current push cursor (GPU-mapped host ptr)
+d6d0c4:  or     $0x20018000,%edx          ; *** INC, count=1, subch=4, method=0 (SET_OBJECT) ***
+d6d0ca:  mov    %edx,(%rsi)               ; store header word
+d6d0cc:  mov    0x68(%rax),%rdx
+d6d0d0:  mov    %ecx,0x4(%rdx)            ; store class ID data word (e.g. 0xC6B5)
+d6d0d3:  addq   $0x8,0x68(%rax)           ; advance cursor by 2 dwords
+d6d0d8:  xor    %eax,%eax
+d6d0da:  ret
+```
+
+**Hardware insight:** subchannel is **baked into the header constant** (`0x20018000` = subch 4),
+not selected by a separate MMIO write. Rebinding an engine = write SET_OBJECT header + class on
+that subchannel's stream; PBDMA routes methods to the object last bound on that subch.
+
+CE launch site `0xb71e52` writes literal `0x200180c0` (INC, count=1, subch=4, method `0x300>>2`)
+then the LAUNCH_DMA control dword — exact match to `NVC6B5_LAUNCH_DMA` at byte offset `0x300`.
+
+Alternate CE packet forms in same function use `0x80000451` / `0x20050056` (type-4 / multi-word
+encodings) — the driver has **multiple CE emit specializations** (legacy vs modern, sema-included
+vs separate). Open G1 should implement the simple `0x200180c0` + control dword path first.
+
+### 4.7 Push cursor model (confirmed again)
+
+Channel context object holds at `+0x68` a **host pointer into the current push segment**. Emitters:
+1. Load cursor
+2. Store header (+ optional data words)
+3. Add 4×(1+count) to cursor field
+4. Eventually kick (GPPut/doorbell) via indirect vtable (`call *0x548(%tls_ctx)` family at `0x69c540+`)
+
+GPU sees the same bytes via GPU-VA mapping of that segment; host cursor and GPU-VA base are paired
+at segment bind time.
 
 ---
 
@@ -471,29 +596,167 @@ That order is what the binaries implement; it is what we should implement.
 
 ---
 
-## 13. Artifacts from this pass
+## 13. Pass 3: embedded class ladders (contiguous u32 tables in glcore rodata)
 
-| Path | Content |
-|------|---------|
-| `mesa/src/nvidia/traces/HW_MODEL_FROM_BINARIES_610.43.02.md` | First pass (class tables, priorities) |
-| `mesa/src/nvidia/traces/HW_MODEL_DEEP_DISASM_610.43.02.md` | **This document** |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/class_ladder_deep.txt` | Per-lib class u16/u32 counts |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/method_histogram.txt` | Fermi+ method histograms |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/deep_analysis_summary.txt` | Header literals + subch stats |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/glcore_submit_disasm.txt` | x86 submit/sfence/push cursor cluster |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/hw_strings_curated.txt` | Curated HW-related strings |
-| `/tmp/nvidia-reveng-pp-v2/re_disasm/*.strings_hw.txt` | Per-lib string extracts |
+Not switch/case scatter only — **actual sorted newest-first tables** exist. Dumped from
+`libnvidia-glcore.so` file offsets (pass 3 structural scan):
 
-**Method:** ELF structural scan (class IDs, method headers, constants) + targeted `objdump` of
-sfence-dense regions + OGKM header correlation. No execution of proprietary code; no GPU required
-for this pass.
+### CE (`file+0x11bb60c` and `+0x1236f8c`)
+
+```
+C7B5, C6B5, C5B5, C3B5, C1B5, C0B5, B0B5 [, A0B5 at second site]
+```
+
+Second site adds `A0B5` and small integer capability flags (`1,3,7,4,0x24,9,…`) — likely
+engine-partner / instance counts, not classes.
+
+**Open ladder should start at `C8B5`** (highest in 610 frequency tables, may live in a newer
+table not at this exact offset) then fall through `C7B5…A0B5`. Pass 3 u16 counts: glcore
+`C8B5`=132, `C6B5`=64 — both first-class.
+
+### Compute (`file+0x11bb650`)
+
+```
+C7C0, C6C0, C5C0, C3C0, C1C0, C0C0, B1C0, B0C0
+```
+
+Immediately followed by a **3D ladder** (`CE97…B097`) — shared classlist blob for GR engines.
+
+### 3D (`file+0x11bb520` region)
+
+```
+C797, C697, C597, C397, C197, … B097
+```
+
+eglcore has far more `C897` u16 hits (306) than this particular table shows — newer 3D class
+lives in additional tables / code immediates.
+
+### GPFIFO (`file+0x1238b6c`)
+
+```
+C46F, C36F, C06F, B06F, A06F, A26F, 906F, 506F
+```
+
+Nearby: display/video class runs (`C5B7…D1B7`, `C4B0…C7B0`) — **not** GPFIFO; do not allocate
+those as channel classes.
+
+**USERMODE ladder:** no tight 3+ class cluster found (classes appear singly in alloc paths).
+Frequency still orders: `C761 > C661 > C561 > C461 > C361` in glcore u16 counts. Doorbell
+offset `+0x90` is stable from `C361` (`clc361.h`) through at least this generation.
 
 ---
 
-## 14. Recommended next RE actions (on GPU box)
+## 14. Pass 3: how the silicon actually works (consolidated model)
+
+```
+                         ┌─────────────────────────────────────────┐
+                         │           Host CPU (userspace)          │
+                         │  glcore / eglcore / cuda / open mesa    │
+                         └─────────────┬───────────────────────────┘
+                                       │ ioctl NVOS (alloc/map/ctrl)
+                                       │ once per object lifetime
+                         ┌─────────────▼───────────────────────────┐
+                         │     nvidia.ko RM (kernel, closed)       │
+                         │  owns: channel, TSG, VASpace, engines,  │
+                         │  USERD page, usermode page, notifiers   │
+                         └─────────────┬───────────────────────────┘
+                                       │ returns handles + GPU VAs
+                                       │ + mmap of USERD & usermode
+         per-submit hot path (no ioctl):
+         ┌─────────────────────────────▼───────────────────────────┐
+         │ 1. Emit methods into pushbuffer (host writes; GPU VA)   │
+         │    header = type|count|subch|method_idx  (Fermi+)       │
+         │    SET_OBJECT(subch, class) binds engine on that subch  │
+         │ 2. Write GPFIFO ring entry: {push_gpu_va, len, flags} │
+         │ 3. mov GPPut_index → USERD+0x8c   (×N USERDs if multi) │
+         │ 4. if class > C36E: sfence; mov token → usermode+0x90   │
+         └─────────────────────────────┬───────────────────────────┘
+                                       │ doorbell wakes runqueue
+         ┌─────────────────────────────▼───────────────────────────┐
+         │  GPU: PBDMA / GPFIFO engine                             │
+         │  - reads ring from GPGet..GPPut                         │
+         │  - fetches push segments by GPU VA                      │
+         │  - dispatches methods to 8 subchannel pipelines         │
+         │  - each subch has a bound object (class instance)       │
+         │  - CE/3D/compute/2D execute; write semas & notifiers    │
+         │  - advances USERD.GPGet as ring drains                  │
+         └─────────────────────────────────────────────────────────┘
+```
+
+**There is no per-draw ioctl in the normal path.** RM is setup/teardown/control only.
+If open G1 hangs with no fault, the bug is almost always in steps 3–4 (schedule missing,
+wrong USERD, wrong doorbell token, missing sfence, class `<= C36E` path divergence) — not in
+CE method fields.
+
+**Subchannel roles (refined, pass 3 histograms are noisy due to ASCII/false positives in type-4;
+executable-segment immediates are trustworthy):**
+
+| Subch | Evidence | Role for bring-up |
+|------:|----------|-------------------|
+| 0 | `0x20010000` SET_OBJECT; host sema headers `0x20020005` | GPFIFO/host methods, sema gate |
+| 1 | rare `0x20012000` in exec | compute/aux in some paths |
+| 2 | heavy method traffic in rodata scans | 3D/compute state (defer) |
+| 3 | SET_OBJECT NI header `0x40006000` common | 3D/aux (defer) |
+| **4** | **`0x20018000` / `0x200180c0` constructed in `.text`** | **CE primary pipe** |
+| 5–7 | low | aux |
+
+---
+
+## 15. Pass 3: implications for open userspace (actionable checklist)
+
+Map directly onto `libdrm_nvidia` + `nv_channel` + `nv_smoke_hw`:
+
+| # | Requirement | Blob evidence | Open status / note |
+|--:|-------------|---------------|-------------------|
+| 1 | USERD.GPPut at **+0x8c** (not +0x4c) | 581× stores | Verify `nv_channel` / smoke writes `0x8c` |
+| 2 | Doorbell at usermode **+0x90** | 252× stores + `clc361.h` | Already targeted; must use RM token |
+| 3 | Token via `RmControl 0xc36f0108` | `a53269` call site | Must call before first kick |
+| 4 | Optional `0xc36f010a` notif index | `a53229` before get-token | Helps notifier-based waits |
+| 5 | `sfence` before doorbell (Turing+) | `ac5585` | Required on x86 |
+| 6 | Skip doorbell only if class `<= 0xC36E` | `ac5557` compare | Modern GPUs always doorbell |
+| 7 | CE on **subch 4**, `LAUNCH_DMA` @ **0x300** | `d6d0c4` / `b71e52` | G1 path; try subch 0 only as fallback |
+| 8 | SET_OBJECT = header `0x2001_s_000` + class dword | live emitter | Already in `nv_push_set_object` |
+| 9 | Host sema on **subch 0** methods 0x10–0x1c | header literals + OGKM | G0/G1 gate before CE |
+| 10 | Newest-first class ladders | rodata tables §13 | `nv_device_info_fill_class_ladder` |
+| 11 | No UVM for GL-style bring-up | glcore lacks `/dev/nvidia-uvm` strings vs cuda | Smoke uses NVOS46 only |
+| 12 | RM client is internal to blob | no `RmAlloc` export | Open implements ioctl/NVOS fully |
+| 13 | Multi-USERD GPPut loop | `ac5540` loop | Single USERD OK for smoke |
+| 14 | Schedule channel/TSG once | separate from token cmds | Without it: sema timeout, no fault |
+
+**First green on silicon should be:** alloc channel+USERD+usermode → get token → schedule →
+push host sema on subch 0 → GPPut+sfence+doorbell → observe sema memory change.
+Only then CE on subch 4. Only then compute/3D.
+
+---
+
+## 16. Artifacts
+
+| Path | Content |
+|------|---------|
+| `mesa/src/nvidia/traces/HW_MODEL_FROM_BINARIES_610.43.02.md` | Pass 1 (class tables, priorities) |
+| `mesa/src/nvidia/traces/HW_MODEL_DEEP_DISASM_610.43.02.md` | **This document** (pass 2+3) |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/deep3_structural_report.md` | Pass 3 full structural scan (glcore/eglcore/cuda/glsi) |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/glcore_targeted_disasm.txt` | Kick / CE / sema / schedule sites |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/submit_kick_ac54e0.txt` | Full submit function objdump |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/rmctrl_gpfifo_a531e0.txt` | Token/notif RmControl block |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/gput_0x8c_stores.txt` | All 581 GPPut store VAs |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep3/doorbell_0x90_stores.txt` | All 252 doorbell store VAs |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/deep/glcore_submit_disasm.txt` | Pass 2 push-cursor/sfence cluster |
+| `/tmp/nvidia-reveng-pp-v2/re_disasm/*.strings_hw.txt` | Per-lib string extracts |
+
+**Method:** ELF structural scan (class IDs, method headers, RM ctrl IDs, ladder proximity) +
+executable-segment immediate scan (pyelftools) + targeted `objdump` of kick/CE/RmControl sites +
+x86 store-pattern scan for disp32 `0x8c`/`0x90` + OGKM header correlation. No execution of
+proprietary code; no GPU required.
+
+---
+
+## 17. Recommended next RE actions (on GPU box)
 
 1. Run blob `glxgears`/trivial clear under `strace -e openat,ioctl,mmap` — capture ioctl order.
 2. LD_PRELOAD logger on `ioctl`/`mmap` comparing blob vs `nvidia_smoke_hw_cli --slices 1`.
-3. After host sema green: dump GPFIFO ring + push segment from open path; compare to blob CE blit.
-4. Trace stores to usermode mapping at +0x90 (token value, frequency, multi-channel).
-5. Only then refine method streams for CE/3D/compute beyond what headers already specify.
+3. Single-step or trace open path stores to USERD+0x8c and usermode+0x90; compare token value
+   and ordering to `ac5540` sequence.
+4. After host sema green: dump GPFIFO ring + push segment; compare CE emit to `d6d0b0`/`b71e52`.
+5. Confirm open code uses GPPut **0x8c** (audit for any remaining 0x4c references).
+6. Only then refine compute QMD/SPH and 3D clear beyond header-driven sequences.
