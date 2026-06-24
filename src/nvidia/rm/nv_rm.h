@@ -134,6 +134,33 @@ int nv_rm_import_object_from_fd(struct nv_rm_device *dev, uint32_t h_parent,
  */
 int nv_rm_share_object_all_dup(struct nv_rm_device *dev, uint32_t h_object);
 
+/**
+ * tick98: non-destructive bring-up probe for event/share/export/timer paths.
+ * Does not affect normal driver operation; safe to call from smoke on HW box.
+ *
+ * eventfd_rc: eventfd(2) + NV01_EVENT_OS_EVENT + EVENT_SET_NOTIFICATION (disable cleanup)
+ * share_rc: NVOS57 share_all_dup on device handle
+ * export_rc: export device object to FD then close (or best-effort error)
+ * timer_rc: TIMER_GET_TIME on subdevice
+ * time_nsec_out: optional PTIMER sample when timer_rc == 0
+ *
+ * Returns 0 if all attempted steps succeeded (or skipped missing pieces);
+ * negative = first hard failure. Individual *rc fields always set.
+ */
+struct nv_rm_aux_probe_result {
+   int eventfd_rc;
+   int share_rc;
+   int export_rc;
+   int timer_rc;
+   int eventfd_fd;          /* eventfd fd if created (>=0), else -1; caller may close if still open */
+   int export_fd;           /* export FD if non-negative; caller should close */
+   uint32_t h_event;        /* NV01_EVENT handle if allocated (caller frees via nv_rm_free_object) */
+   uint64_t time_nsec;
+};
+
+int nv_rm_probe_aux_paths(struct nv_rm_device *dev,
+                          struct nv_rm_aux_probe_result *out);
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 

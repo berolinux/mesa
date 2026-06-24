@@ -83,12 +83,21 @@ struct nv_shader;
 #define NV_SMOKE_HW_G1   (1u << 0)
 #define NV_SMOKE_HW_G2   (1u << 1)
 #define NV_SMOKE_HW_G3   (1u << 2)
-#define NV_SMOKE_HW_ALL  (NV_SMOKE_HW_G1 | NV_SMOKE_HW_G2 | NV_SMOKE_HW_G3)
+/* tick98: G0 = aux probe (eventfd/share/export/timer); included in ALL */
+#define NV_SMOKE_HW_G0   (1u << 3)
+#define NV_SMOKE_HW_ALL  (NV_SMOKE_HW_G0 | NV_SMOKE_HW_G1 | NV_SMOKE_HW_G2 | NV_SMOKE_HW_G3)
 
 struct nv_smoke_hw_result {
    int g1_rc;   /* 0 ok, negative errno/fail; 1 = skipped */
    int g2_rc;
    int g3_rc;
+   /* tick98: aux RM paths (event/share/export/timer); 1 = skipped */
+   int g0_rc;
+   int g0_eventfd_rc;
+   int g0_share_rc;
+   int g0_export_rc;
+   int g0_timer_rc;
+   uint64_t g0_timer_nsec;
    /* standalone path only (0 = n/a or ok; set by nv_smoke_hw_run_standalone) */
    int standalone_open_rc;    /* -ENODEV if nv_rm_device_open failed */
    int standalone_channel_rc; /* -EIO if nv_channel_create failed */

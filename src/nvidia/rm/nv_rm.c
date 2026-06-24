@@ -12,6 +12,8 @@
 
 #if defined(HAVE_LIBDRM_NVIDIA)
 #include <stdio.h>
+#include <unistd.h>
+#include <sys/eventfd.h>
 #endif
 
 #include "nv_rm.h"
@@ -150,6 +152,14 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.rm_pci_device_id = gi.rm_pci_device_id;
       dev->info.rm_pci_subsystem_id = gi.rm_pci_subsystem_id;
       dev->info.rm_pci_revision_id = gi.rm_pci_revision_id;
+      /* tick98: RM build/version from NV0000 system probe */
+      dev->info.rm_changelist = gi.rm_changelist;
+      dev->info.rm_official_cl = gi.rm_official_cl;
+      dev->info.rm_platform_type = gi.rm_platform_type;
+      memcpy(dev->info.rm_driver_version, gi.rm_driver_version,
+             sizeof(dev->info.rm_driver_version));
+      memcpy(dev->info.rm_build_branch, gi.rm_build_branch,
+             sizeof(dev->info.rm_build_branch));
       if (!dev->info.pci_device_id && gi.rm_pci_device_id)
          dev->info.pci_device_id = gi.rm_pci_device_id & 0xffffu;
       memcpy(dev->info.name, gi.name, sizeof(dev->info.name));
@@ -640,6 +650,109 @@ nv_rm_share_object_all_dup(struct nv_rm_device *dev, uint32_t h_object)
 #else
    (void)dev;
    (void)h_object;
+   return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_probe_aux_paths(struct nv_rm_device *dev,
+                      struct nv_rm_aux_probe_result *out)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   struct nv_rm_aux_probe_result r;
+   uint32_t h_dev, h_sub;
+   int efd = -1;
+   int xfd = -1;
+   uint32_t h_ev = 0;
+   int first_err = 0;
+
+   memset(&r, 0, sizeof(r));
+   r.eventfd_rc = -ENOSYS;
+   r.share_rc = -ENOSYS;
+   r.export_rc = -ENOSYS;
+   r.timer_rc = -ENOSYS;
+   r.eventfd_fd = -1;
+   r.export_fd = -1;
+   r.h_event = 0;
+
+   if (!dev || !dev->nvdev)
+      return -EINVAL;
+   if (!out)
+      return -EINVAL;
+
+   h_dev = nv_rm_device_device_handle(dev);
+   h_sub = nv_rm_device_subdevice_handle(dev);
+
+   /* Timer: always cheap when subdevice exists */
+   r.timer_rc = nv_rm_timer_get_time(dev, &r.time_nsec);
+   if (r.timer_rc != 0 && !first_err)
+      first_err = r.timer_rc;
+
+   /* NVOS57 share on device object (best-effort; may fail without policy support) */
+   if (h_dev) {
+      r.share_rc = nv_rm_share_object_all_dup(dev, h_dev);
+      if (r.share_rc != 0 && !first_err)
+         first_err = r.share_rc;
+   } else {
+      r.share_rc = -ENODEV;
+   }
+
+   /* Export device object to Unix FD (may require prior share on some RM builds) */
+   if (h_dev) {
+      xfd = -1;
+      r.export_rc = nv_rm_export_object_to_fd(dev, 0, h_dev, &xfd, 0);
+      if (r.export_rc == 0 && xfd >= 0) {
+         r.export_fd = xfd;
+         close(xfd);
+         r.export_fd = -1;
+      } else if (r.export_rc != 0 && !first_err) {
+         first_err = r.export_rc;
+      }
+   } else {
+      r.export_rc = -ENODEV;
+   }
+
+   /* eventfd + NV01_EVENT_OS_EVENT on subdevice (RC notifier index) */
+   efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+   if (efd < 0) {
+      r.eventfd_rc = -errno;
+      if (!first_err)
+         first_err = r.eventfd_rc;
+   } else if (!h_sub) {
+      r.eventfd_rc = -ENODEV;
+      close(efd);
+      efd = -1;
+   } else {
+      r.eventfd_fd = efd;
+      r.eventfd_rc = nv_rm_alloc_event_os(dev, h_sub, h_dev ? h_dev : h_sub,
+                                          efd, NV2080_NOTIFIERS_RC, &h_ev);
+      if (r.eventfd_rc == 0 && h_ev) {
+         r.h_event = h_ev;
+         /* Arm then disable notification so we leave RM quiet */
+         (void)nv_rm_event_set_notification(
+            dev, h_sub, NV2080_NOTIFIERS_RC,
+            NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_SINGLE, true, 0, 0);
+         (void)nv_rm_event_set_notification(
+            dev, h_sub, NV2080_NOTIFIERS_RC,
+            NV2080_CTRL_EVENT_SET_NOTIFICATION_ACTION_DISABLE, false, 0, 0);
+         (void)nv_rm_free_object(dev, h_sub, h_ev);
+         r.h_event = 0;
+      } else if (r.eventfd_rc != 0 && !first_err) {
+         first_err = r.eventfd_rc;
+      }
+      close(efd);
+      r.eventfd_fd = -1;
+   }
+
+   *out = r;
+   return first_err;
+#else
+   (void)dev;
+   if (out) {
+      memset(out, 0, sizeof(*out));
+      out->eventfd_rc = out->share_rc = out->export_rc = out->timer_rc = -ENOSYS;
+      out->eventfd_fd = out->export_fd = -1;
+   }
    return -ENOSYS;
 #endif
 }

@@ -71,6 +71,12 @@ struct nv_device_info {
    uint32_t rm_pci_device_id;
    uint32_t rm_pci_subsystem_id;
    uint32_t rm_pci_revision_id;
+   /* tick98: NV0000 SYSTEM_GET_BUILD_VERSION / PLATFORM_TYPE */
+   uint32_t rm_changelist;
+   uint32_t rm_official_cl;
+   uint32_t rm_platform_type;
+   char rm_driver_version[64];
+   char rm_build_branch[64];
 
    char name[64];
    char chipset_name[32];

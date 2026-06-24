@@ -51,11 +51,23 @@ extern "C" {
 #define NV_NVDEC_SEMAPHORE_A             0x0240
 #define NV_NVDEC_SEMAPHORE_B             0x0244
 #define NV_NVDEC_SEMAPHORE_C             0x0248
+/* tick98: common NVDEC picture/bitstream method offs (class family *B0; provisional) */
+#define NV_NVDEC_SET_CONTROL_PARAMS      0x0400
+#define NV_NVDEC_SET_DRV_PIC_SETUP_OFFSET 0x0404
+#define NV_NVDEC_SET_IN_BUF_BASE_OFFSET  0x0408
+#define NV_NVDEC_SET_PICTURE_INDEX       0x040c
+#define NV_NVDEC_SET_SLICE_OFFSETS_BUF_OFFSET 0x0410
+#define NV_NVDEC_SET_COLOC_DATA_OFFSET   0x0414
+#define NV_NVDEC_SET_HISTORY_OFFSET      0x0418
+#define NV_NVDEC_SET_DISPLAY_BUF_SIZE    0x041c
+#define NV_NVDEC_SET_HISTOGRAM_OFFSET    0x0420
 #define NV_NVDEC_EXECUTE                 0x0300
 
 #define NV_NVENC_SET_OBJECT              0x0000
 #define NV_NVENC_NOP                     0x0100
 #define NV_NVENC_SET_APPLICATION_ID      0x0200
+#define NV_NVENC_SET_CONTROL_PARAMS      0x0400
+#define NV_NVENC_SET_DRV_PIC_SETUP_OFFSET 0x0404
 #define NV_NVENC_EXECUTE                 0x0300
 
 #define NV_NVDEC_APP_ID_MPEG12           1
@@ -133,6 +145,78 @@ nv_nvdec_emit_execute(struct nv_push *p, uint32_t app_id, uint32_t execute_flags
       return;
    nv_push_method(p, NV_NVDEC_SET_APPLICATION_ID, app_id);
    nv_push_method(p, NV_NVDEC_EXECUTE, execute_flags);
+}
+
+/**
+ * tick98: minimal NVDEC picture/bitstream buffer setup (offsets are GPU VAs
+ * in the video engine address space / mapped via CTXDMA).  Generation-specific
+ * control struct at pic_setup_gpu is caller-built; we only emit method sequence.
+ */
+struct nv_nvdec_pic_setup {
+   uint32_t app_id;            /* NV_NVDEC_APP_ID_* */
+   uint32_t picture_index;
+   uint64_t pic_setup_gpu;     /* driver picture setup struct */
+   uint64_t bitstream_gpu;     /* in-buf / bitstream base */
+   uint64_t slice_offsets_gpu; /* optional slice offset table */
+   uint64_t coloc_gpu;         /* optional coloc / history */
+   uint64_t history_gpu;
+   uint32_t display_buf_size;
+   uint32_t execute_flags;
+   uint32_t control_params;    /* SET_CONTROL_PARAMS dword (codec flags) */
+};
+
+static inline void
+nv_nvdec_emit_pic_setup(struct nv_push *p, const struct nv_nvdec_pic_setup *s)
+{
+   if (!p || !s)
+      return;
+   nv_push_method(p, NV_NVDEC_SET_APPLICATION_ID, s->app_id);
+   if (s->control_params)
+      nv_push_method(p, NV_NVDEC_SET_CONTROL_PARAMS, s->control_params);
+   if (s->pic_setup_gpu) {
+      nv_push_method(p, NV_NVDEC_SET_DRV_PIC_SETUP_OFFSET,
+                     (uint32_t)(s->pic_setup_gpu >> 8)); /* often 256B units; tune on HW */
+   }
+   if (s->bitstream_gpu) {
+      nv_push_method(p, NV_NVDEC_SET_IN_BUF_BASE_OFFSET,
+                     (uint32_t)(s->bitstream_gpu >> 8));
+   }
+   nv_push_method(p, NV_NVDEC_SET_PICTURE_INDEX, s->picture_index);
+   if (s->slice_offsets_gpu) {
+      nv_push_method(p, NV_NVDEC_SET_SLICE_OFFSETS_BUF_OFFSET,
+                     (uint32_t)(s->slice_offsets_gpu >> 8));
+   }
+   if (s->coloc_gpu) {
+      nv_push_method(p, NV_NVDEC_SET_COLOC_DATA_OFFSET,
+                     (uint32_t)(s->coloc_gpu >> 8));
+   }
+   if (s->history_gpu) {
+      nv_push_method(p, NV_NVDEC_SET_HISTORY_OFFSET,
+                     (uint32_t)(s->history_gpu >> 8));
+   }
+   if (s->display_buf_size)
+      nv_push_method(p, NV_NVDEC_SET_DISPLAY_BUF_SIZE, s->display_buf_size);
+}
+
+/** SET_OBJECT + pic setup + sema + EXECUTE — full vertical slice without codec payload. */
+static inline void
+nv_nvdec_emit_frame_kick(struct nv_push *p, uint32_t class_nvdec,
+                         const struct nv_nvdec_pic_setup *s,
+                         uint64_t sema_gpu, uint32_t sema_payload,
+                         volatile uint32_t *status_cpu)
+{
+   if (!p)
+      return;
+   if (class_nvdec)
+      nv_nvdec_set_object(p, class_nvdec);
+   if (s)
+      nv_nvdec_emit_pic_setup(p, s);
+   if (sema_gpu)
+      nv_nvdec_emit_semaphore_release_reset(p, sema_gpu, sema_payload, status_cpu);
+   if (s)
+      nv_push_method(p, NV_NVDEC_EXECUTE, s->execute_flags);
+   else
+      nv_push_method(p, NV_NVDEC_EXECUTE, 0);
 }
 
 /** NVDEC completion sema (SEMAPHORE_A/B/C) before EXECUTE — payload = done marker. */

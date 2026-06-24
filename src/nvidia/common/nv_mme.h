@@ -112,18 +112,30 @@ nv_mme_program_init_end_only(struct nv_mme_program *prog, uint32_t slot,
  * Current: END-only stub.  Host path C' emits equivalent methods from CPU
  * shadow/map (path A/B) while this macro only primes MME state.
  */
+/**
+ * tick98: multi-insn scaffold (still stub — not validated ISA).
+ * Layout: NOP padding then END, so LOAD_MME_INSTRUCTION_RAM writes >1 dword
+ * and exercises POINTER/RAM/START/CALL with a non-trivial RAM span.  Host
+ * indirect path remains authoritative until binary RE fills real opcodes.
+ */
 static inline void
 nv_mme_build_draw_indirect_program(struct nv_mme_program *prog, uint32_t slot,
                                    uint32_t ram_offset, bool indexed)
 {
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+   /* Reserved class bits document intended roles; all low bits still END-safe. */
+   prog->insns[0] = NV_MME_INSN_NOP | (indexed ? NV_MME_INSN_STATE_LOAD_CLASS : 0);
+   prog->insns[1] = NV_MME_INSN_NOP | NV_MME_INSN_ALU_CLASS;
+   prog->insns[2] = NV_MME_INSN_NOP | NV_MME_INSN_BRANCH_CLASS;
+   prog->insns[3] = NV_MME_INSN_NOP | NV_MME_INSN_MERGE_CLASS;
+   prog->insns[4] = NV_MME_INSN_END;
+   prog->insn_count = 5;
+   prog->is_stub_end_only = true; /* not real microcode; do not enable in prod paths */
    (void)indexed;
-   nv_mme_program_init_end_only(prog, slot, ram_offset);
-   /* Future: append STATE_LOAD/ALU/BRANCH/MERGE insns validated from binary. */
-   (void)NV_MME_INSN_NOP;
-   (void)NV_MME_INSN_MERGE_CLASS;
-   (void)NV_MME_INSN_STATE_LOAD_CLASS;
-   (void)NV_MME_INSN_BRANCH_CLASS;
-   (void)NV_MME_INSN_ALU_CLASS;
 }
 
 /**

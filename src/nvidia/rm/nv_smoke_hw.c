@@ -400,6 +400,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g2_qmd_host_sema_rc = -1;
    res.g3_clear_host_sema_rc = -1;
    res.g1_fault_method_rc = -1;
+   res.g0_rc = 1;
    res.g1_rc = 1;
    res.g2_rc = 1;
    res.g3_rc = 1;
@@ -412,6 +413,39 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    /* Bring-up: log resolved classes once when verbose */
    if (nv_smoke_hw_env_verbose() && ch->info)
       nv_device_info_log_classes(ch->info, "nv_smoke_hw");
+
+   /* tick98: G0 aux probe — eventfd/NV01_EVENT, NVOS57 share, export FD, timer */
+   if (slices & NV_SMOKE_HW_G0) {
+      struct nv_rm_aux_probe_result aux;
+
+      res.slices_run |= NV_SMOKE_HW_G0;
+      memset(&aux, 0, sizeof(aux));
+      res.g0_rc = nv_rm_probe_aux_paths(ch->rm, &aux);
+      res.g0_eventfd_rc = aux.eventfd_rc;
+      res.g0_share_rc = aux.share_rc;
+      res.g0_export_rc = aux.export_rc;
+      res.g0_timer_rc = aux.timer_rc;
+      res.g0_timer_nsec = aux.time_nsec;
+      /* Timer success is enough for G0 ok on headless agents; event/share/export
+       * may fail without full permissions — still record codes for silicon logs. */
+      if (res.g0_timer_rc == 0)
+         res.slices_ok |= NV_SMOKE_HW_G0;
+      else if (res.g0_rc == 0)
+         res.slices_ok |= NV_SMOKE_HW_G0;
+      if (nv_smoke_hw_env_verbose()) {
+         fprintf(stderr,
+                 "nv_smoke_hw G0 aux: rc=%d eventfd=%d share=%d export=%d "
+                 "timer=%d t=%llu ns driver_cl=%u platform=%u ver=%s\n",
+                 res.g0_rc, res.g0_eventfd_rc, res.g0_share_rc, res.g0_export_rc,
+                 res.g0_timer_rc, (unsigned long long)res.g0_timer_nsec,
+                 ch->info ? ch->info->rm_changelist : 0u,
+                 ch->info ? ch->info->rm_platform_type : 0u,
+                 ch->info && ch->info->rm_driver_version[0]
+                    ? ch->info->rm_driver_version : "?");
+      }
+      if (res.g0_rc && !r && res.g0_timer_rc != 0)
+         r = res.g0_rc;
+   }
 
    if (slices & NV_SMOKE_HW_G1) {
       res.slices_run |= NV_SMOKE_HW_G1;
