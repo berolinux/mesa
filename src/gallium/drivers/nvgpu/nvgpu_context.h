@@ -115,6 +115,11 @@ struct nvgpu_context {
    unsigned num_so_targets;
    unsigned so_append_bitmask; /* bit i set => append (don't reset write ptr) */
    bool so_enabled;
+
+   /* Indirect draw path B: host-mappable shadow (CE target for GPU-only IB) */
+   struct nv_rm_bo *indirect_shadow_bo;
+   void *indirect_shadow_map;
+   uint32_t indirect_shadow_bo_size;
 };
 
 /* Occlusion / timestamp query backed by RM sema BO (report semaphore target).

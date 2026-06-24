@@ -3352,7 +3352,8 @@ nvrm_CmdSetRasterizationSamplesEXT(VkCommandBuffer commandBuffer,
    }
 }
 
-/* Indirect count: host-read count buffer (path A), clamp to maxDrawCount */
+/* Indirect count: path A host map, path B CE-copy 4B count into indirect_shadow_bo
+ * then host read (same shadow BO as indirect draws; WFI ensures coherence). */
 static uint32_t
 nvrm_read_draw_count(struct nvrm_cmd_buffer *cmd, VkBuffer countBuffer,
                      VkDeviceSize countBufferOffset, uint32_t maxDrawCount)
@@ -3364,6 +3365,11 @@ nvrm_read_draw_count(struct nvrm_cmd_buffer *cmd, VkBuffer countBuffer,
    if (!cbuf)
       return maxDrawCount;
    p = nvrm_try_map_indirect_u32(cbuf, countBufferOffset, 4, &unmap);
+   if (!p && cmd && cmd->indirect_shadow_bo && cmd->indirect_shadow_map) {
+      /* Dedicated path B: always use start of shadow BO for count dword so
+       * draw records copied later (if any) do not overlap count word. */
+      p = nvrm_indirect_path_b_shadow(cmd, cbuf, countBufferOffset, 4, &unmap);
+   }
    if (!p)
       p = nvrm_indirect_path_b_shadow(cmd, cbuf, countBufferOffset, 4, &unmap);
    if (p) {

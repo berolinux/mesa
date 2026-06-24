@@ -15,6 +15,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(HAVE_NIR) || defined(NIR_H)
+#include "nir.h"
+#include "shader_enums.h"
+#endif
+
 #define NV_SHADER_MIN_CODE_SIZE  256
 #define NV_SHADER_CODE_ALIGN     256
 
@@ -60,6 +65,100 @@ nv_shader_fill_stage_defaults(struct nv_shader *sh)
 
    if (!sh->register_count)
       sh->register_count = 16;
+
+   /* Conservative tess/GS defaults until NIR meta is applied */
+   if (sh->kind == NV_SHADER_KIND_TESS_EVAL ||
+       sh->kind == NV_SHADER_KIND_TESS_CTRL) {
+      sh->tess_domain = NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_TRIANGLE;
+      sh->tess_spacing = NVC597_SET_TESSELLATION_PARAMETERS_SPACING_INTEGER;
+      sh->tess_output_prim = NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CCW;
+   }
+   if (sh->kind == NV_SHADER_KIND_GEOMETRY) {
+      sh->gs_output_topology_nv = NVC597_TOPOLOGY_TRIANGLES;
+      sh->gs_max_output_vertices = 256;
+   }
+}
+
+void
+nv_shader_fill_stage_meta_from_nir(struct nv_shader *sh)
+{
+#if defined(HAVE_NIR) || defined(NIR_H)
+   const struct nir_shader *ns;
+   if (!sh || !sh->nir)
+      return;
+   ns = (const struct nir_shader *)sh->nir;
+
+   if (sh->kind == NV_SHADER_KIND_TESS_EVAL ||
+       sh->kind == NV_SHADER_KIND_TESS_CTRL) {
+      /* NIR tess info: tess.primitive_mode / spacing / point_mode / ccw */
+      unsigned prim = ns->info.tess._primitive_mode;
+      unsigned spacing = ns->info.tess.spacing;
+      sh->tess_domain = NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_TRIANGLE;
+      if (prim == TESS_PRIMITIVE_ISOLINES)
+         sh->tess_domain = NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_ISOLINE;
+      else if (prim == TESS_PRIMITIVE_QUADS)
+         sh->tess_domain = NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_QUAD;
+      sh->tess_spacing = NVC597_SET_TESSELLATION_PARAMETERS_SPACING_INTEGER;
+      if (spacing == TESS_SPACING_FRACTIONAL_ODD)
+         sh->tess_spacing = NVC597_SET_TESSELLATION_PARAMETERS_SPACING_FRAC_ODD;
+      else if (spacing == TESS_SPACING_FRACTIONAL_EVEN)
+         sh->tess_spacing = NVC597_SET_TESSELLATION_PARAMETERS_SPACING_FRAC_EVEN;
+      if (ns->info.tess.point_mode)
+         sh->tess_output_prim = NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_POINTS;
+      else if (sh->tess_domain == NVC597_SET_TESSELLATION_PARAMETERS_DOMAIN_ISOLINE)
+         sh->tess_output_prim = NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_LINES;
+      else
+         sh->tess_output_prim = ns->info.tess.ccw
+            ? NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CCW
+            : NVC597_SET_TESSELLATION_PARAMETERS_OUTPUT_TRI_CW;
+      sh->tess_meta_valid = true;
+   }
+
+   if (sh->kind == NV_SHADER_KIND_GEOMETRY) {
+      unsigned out_prim = ns->info.gs.output_primitive;
+      sh->gs_max_output_vertices = ns->info.gs.vertices_out
+         ? ns->info.gs.vertices_out : 256;
+      if (sh->gs_max_output_vertices > 1024)
+         sh->gs_max_output_vertices = 1024;
+      switch (out_prim) {
+      case MESA_PRIM_POINTS:
+         sh->gs_output_topology_nv = NVC597_TOPOLOGY_POINTS;
+         break;
+      case MESA_PRIM_LINES:
+      case MESA_PRIM_LINE_STRIP:
+         sh->gs_output_topology_nv = NVC597_TOPOLOGY_LINE_STRIP;
+         break;
+      case MESA_PRIM_TRIANGLES:
+      case MESA_PRIM_TRIANGLE_STRIP:
+      default:
+         sh->gs_output_topology_nv = NVC597_TOPOLOGY_TRIANGLE_STRIP;
+         break;
+      }
+      sh->gs_meta_valid = true;
+   }
+#else
+   (void)sh;
+#endif
+}
+
+void
+nv_shader_emit_stage_meta(struct nv_push *p, const struct nv_shader *sh)
+{
+   const uint32_t one_f = 0x3f800000u;
+   if (!p || !sh)
+      return;
+   if (sh->tess_meta_valid &&
+       (sh->kind == NV_SHADER_KIND_TESS_EVAL ||
+        sh->kind == NV_SHADER_KIND_TESS_CTRL)) {
+      nv_3d_set_tessellation_parameters(p, sh->tess_domain, sh->tess_spacing,
+                                        sh->tess_output_prim);
+      nv_3d_set_tessellation_lod(p, one_f, one_f, one_f, one_f);
+      nv_push_method(p, NVC597_SET_TESSELLATION_CUT_HEIGHT, 0);
+   }
+   if (sh->gs_meta_valid && sh->kind == NV_SHADER_KIND_GEOMETRY) {
+      nv_3d_set_geometry_shader_output(p, sh->gs_output_topology_nv,
+                                       sh->gs_max_output_vertices);
+   }
 }
 
 struct nv_shader *
@@ -217,6 +316,7 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
    if (sh->uploaded)
       return 0;
    if (sh->nir) {
+      nv_shader_fill_stage_meta_from_nir(sh);
       r = nv_shader_compile_nir(sh, (const struct nir_shader *)sh->nir);
       if (r == 0)
          return 0;
@@ -250,6 +350,9 @@ nv_shader_emit_bind(struct nv_push *p, const struct nv_shader *sh,
 
    nv_3d_load_pipeline_shader(p, sh->pipeline_stage, sh->pipeline_type,
                               code_addr, regs, sh->bind_group);
+
+   /* Tess/GS stage methods from NIR-derived meta (or defaults) */
+   nv_shader_emit_stage_meta(p, sh);
 
    if (const_shader_slot >= 0 && sh->const_gpu_addr && sh->const_size) {
       /* Constant buffer bind via selector is done by caller with CB methods;

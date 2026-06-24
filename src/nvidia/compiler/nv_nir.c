@@ -489,6 +489,9 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
    return ssa_commit_dst(sb, &alu->def, rd);
 }
 
+/* Last barycentric intrinsic mode seen in block order (for IPA mode select). */
+static uint8_t nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SMOOTH;
+
 static bool
 isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 {
@@ -633,18 +636,17 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    }
 
    case nir_intrinsic_load_interpolated_input: {
-      /* IPA: interpolate attribute at pixel barycentrics.
-       * base = attribute index, component = .xyzw lane; src[0] is bary SSA
-       * (mode refined via interp_mode/interpolation info in later passes). */
+      /* IPA: interpolate attribute; mode from preceding barycentric intrinsic
+       * (pixel=smooth, centroid, sample=sc) recorded during isel walk order. */
       uint32_t loc = 0;
       uint32_t comp = 0;
-      uint8_t mode = NV_SASS_IPA_MODE_SMOOTH;
+      uint8_t mode = nv_isel_last_bary_mode;
       rd = ssa_reg_dst(&intr->def);
       if (nir_intrinsic_has_base(intr))
          loc = nir_intrinsic_base(intr);
       if (nir_intrinsic_has_component(intr))
          comp = nir_intrinsic_component(intr);
-      (void)intr->src[0]; /* barycentric inputs consumed by IPA hardware path */
+      (void)intr->src[0]; /* bary SSA consumed by IPA hardware path */
       ok = nv_sass_emit_interp_input(sb, rd, (uint8_t)(loc & 0xff),
                                      (uint8_t)(comp & 0x3), mode);
       break;
@@ -681,10 +683,19 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    }
 
    case nir_intrinsic_load_barycentric_pixel:
-   case nir_intrinsic_load_barycentric_centroid:
-   case nir_intrinsic_load_barycentric_sample:
+      nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SMOOTH;
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
+      break;
+   case nir_intrinsic_load_barycentric_centroid:
+      nv_isel_last_bary_mode = NV_SASS_IPA_MODE_CENTROID;
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
+      break;
+   case nir_intrinsic_load_barycentric_sample:
+      nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SC;
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_SAMPLE_IDX);
       break;
 
    case nir_intrinsic_image_load:
@@ -1001,6 +1012,7 @@ isel_shader(struct nv_sass_buf *sb, const nir_shader *nir,
    } else {
       nv_isel_ra = NULL;
    }
+   nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SMOOTH;
 
    nir_foreach_function (func, nir) {
       if (!func->impl)

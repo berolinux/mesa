@@ -811,6 +811,27 @@ nvgpu_emit_cb0(struct nvgpu_context *ctx, struct nv_push *push,
    }
 }
 
+/* Ensure indirect shadow BO exists for GPU-only indirect buffers (path B). */
+static void
+nvgpu_ensure_indirect_shadow(struct nvgpu_context *ctx)
+{
+   struct nv_rm_bo_req req;
+   if (!ctx || ctx->indirect_shadow_bo || !ctx->screen || !ctx->screen->rm)
+      return;
+   memset(&req, 0, sizeof(req));
+   req.size = 4096;
+   req.alignment = 256;
+   req.vram = false;
+   req.cpu_access = true;
+   req.no_scanout = true;
+   req.map_gpu_va = true;
+   ctx->indirect_shadow_bo = nv_rm_bo_alloc(ctx->screen->rm, &req);
+   if (ctx->indirect_shadow_bo) {
+      ctx->indirect_shadow_bo_size = 4096;
+      ctx->indirect_shadow_map = nv_rm_bo_map(ctx->indirect_shadow_bo);
+   }
+}
+
 /* Emit bound VS/TCS/TES/GS/FS via SET_PIPELINE_SHADER. */
 static void
 nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
@@ -845,11 +866,8 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
                  tes && tes->nvsh && tes->nvsh->uploaded;
    gs_active = gs && gs->nvsh && gs->nvsh->uploaded;
 
-   /* Tess: program domain/LOD defaults when TCS+TES both bound */
-   if (tess_active)
-      nv_3d_tess_enable_defaults(push);
-
-   /* Tess/geom: enable only when CSO present, else disable stage */
+   /* Tess/geom: enable only when CSO present, else disable stage.
+    * nv_shader_emit_bind emits NIR-derived tess/GS meta when valid. */
    if (tcs && tcs->nvsh && tcs->nvsh->uploaded) {
       nv_shader_emit_bind(push, tcs->nvsh, region_once ? region : 0, -1);
       region_once = false;
@@ -861,10 +879,15 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
    } else {
       nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_TESS);
    }
+   /* If tess active but TES had no meta, apply conservative defaults once */
+   if (tess_active && tes && tes->nvsh && !tes->nvsh->tess_meta_valid &&
+       (!tcs || !tcs->nvsh || !tcs->nvsh->tess_meta_valid))
+      nv_3d_tess_enable_defaults(push);
+
    if (gs_active) {
       nv_shader_emit_bind(push, gs->nvsh, 0, -1);
-      /* Default GS output: triangles, up to 256 verts (hardware max class) */
-      nv_3d_set_geometry_shader_output(push, NVC597_TOPOLOGY_TRIANGLES, 256);
+      if (!gs->nvsh->gs_meta_valid)
+         nv_3d_set_geometry_shader_output(push, NVC597_TOPOLOGY_TRIANGLES, 256);
    } else {
       nv_3d_disable_pipeline_shader(push, NV_3D_PIPE_STAGE_GEOMETRY);
    }
@@ -1004,18 +1027,26 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          /* Path B: GPU-only indirect BO — CE linear copy into stack/heap, then
           * materialize normal draws (requires prior GPU writes flushed). */
          ind_bytes = draw_count * ind_stride;
-         /* Path B: transient map of indirect BO if not already host-mirrored */
-         if (!ind_base && ibuf && ibuf->bo && ind_bytes > 0) {
-            void *try_map = nv_rm_bo_map(ibuf->bo);
-            if (try_map) {
-               ind_base = (const uint32_t *)((const uint8_t *)try_map +
-                                             indirect->offset);
-               ind_map = try_map; /* unmap after emit */
+         /* Path B: CE-copy into host-mappable indirect_shadow_bo, then read */
+         if (!ind_base && ibuf && ind_bytes > 0) {
+            nvgpu_ensure_indirect_shadow(ctx);
+            if (ctx->indirect_shadow_map && ctx->indirect_shadow_bo &&
+                ind_bytes <= ctx->indirect_shadow_bo_size && class_copy) {
+               uint64_t src_addr = ibuf->gpu_offset + indirect->offset;
+               uint64_t dst_addr = nv_rm_bo_gpu_offset(ctx->indirect_shadow_bo);
+               nv_copy_indirect_to_shadow(&push, class_copy, src_addr, dst_addr,
+                                          ind_bytes);
+               ind_base = (const uint32_t *)ctx->indirect_shadow_map;
+            } else if (ibuf->bo) {
+               void *try_map = nv_rm_bo_map(ibuf->bo);
+               if (try_map) {
+                  ind_base = (const uint32_t *)((const uint8_t *)try_map +
+                                                indirect->offset);
+                  ind_map = try_map;
+               }
             }
-            (void)class_copy;
             (void)stack_shadow;
             (void)heap_shadow;
-            (void)ind_bytes;
          }
 
          if (info->index_size && info->has_user_indices == false &&
@@ -1230,6 +1261,11 @@ nvgpu_destroy_context(struct pipe_context *pctx)
       nv_tex_pool_destroy(ctx->tex_pool);
    if (ctx->lmem_bo)
       nv_rm_bo_free(ctx->lmem_bo);
+   if (ctx->indirect_shadow_bo) {
+      if (ctx->indirect_shadow_map)
+         nv_rm_bo_unmap(ctx->indirect_shadow_bo);
+      nv_rm_bo_free(ctx->indirect_shadow_bo);
+   }
    if (ctx->fence)
       nv_fence_destroy(ctx->fence);
    if (ctx->channel)

@@ -51,7 +51,22 @@ struct nv_shader {
    bool uploaded;
    void *nir;
    bool owns_nir;
+
+   /* Geometry / tessellation stage metadata (from NIR or pipeline state) */
+   uint8_t tess_domain;       /* 0=isoline 1=tri 2=quad (NVC597 domain) */
+   uint8_t tess_spacing;      /* 0=integer 1=frac_odd 2=frac_even */
+   uint8_t tess_output_prim;  /* 0=pts 1=lines 2=tri_cw 3=tri_ccw */
+   bool tess_meta_valid;
+   uint32_t gs_output_topology_nv; /* NVC597_TOPOLOGY_* */
+   uint32_t gs_max_output_vertices;
+   bool gs_meta_valid;
 };
+
+/** Fill tess/GS fields from NIR shader info when available (HAVE_NIR). */
+void nv_shader_fill_stage_meta_from_nir(struct nv_shader *sh);
+
+/** Emit tess params or GS output methods if meta_valid. */
+void nv_shader_emit_stage_meta(struct nv_push *p, const struct nv_shader *sh);
 
 struct nv_shader *
 nv_shader_create(struct nv_rm_device *rm, enum nv_shader_kind kind);
