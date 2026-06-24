@@ -2454,6 +2454,7 @@ nvgpu_context_smoke_hw_run(struct pipe_context *pctx, uint32_t slices,
 
    if (!ctx->smoke_cs && ctx->screen->rm) {
       ctx->smoke_cs = nv_shader_create(ctx->screen->rm, NV_SHADER_KIND_COMPUTE);
+      /* G2 path re-uploads store-imm inside nv_smoke_hw_run_on_channel */
       if (ctx->smoke_cs)
          (void)nv_shader_upload_compute_smoke(ctx->smoke_cs, 0, 0, 0, 16);
    }
@@ -2566,5 +2567,10 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
       ctx->fence = nv_fence_create(screen->rm);
    /* Software blitter for scaled/filtered blits (uses driver shaders/CSOs) */
    ctx->blitter = util_blitter_create(&ctx->base);
+
+   /* Optional bring-up: NV_SMOKE_HW=1 runs G1/G2/G3 on channel at context create */
+   if (nv_smoke_hw_env_requested())
+      (void)nvgpu_context_smoke_hw_run(&ctx->base, nv_smoke_hw_env_slices(), 0);
+
    return &ctx->base;
 }

@@ -56,8 +56,15 @@ struct nv_smoke_hw_scratch {
    uint64_t qmd_gpu;
    uint64_t ct_gpu;
    uint32_t sema_payload;
+   uint32_t g2_store_imm;   /* value written by G2 store-imm smoke (default 0xdeadbeef) */
    bool owned; /* scratch alloc'd by create; destroy frees */
 };
+
+/** True if getenv("NV_SMOKE_HW") is set and non-zero/non-empty (not "0"). */
+bool nv_smoke_hw_env_requested(void);
+
+/** Parse NV_SMOKE_HW_SLICES (default ALL). Bits: 1=G1, 2=G2, 4=G3. */
+uint32_t nv_smoke_hw_env_slices(void);
 
 /** Allocate/map host-mappable scratch BOs on rm. Returns 0 or negative errno. */
 int nv_smoke_hw_scratch_create(struct nv_rm_device *rm,

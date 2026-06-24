@@ -9,6 +9,7 @@
 #include "nv_shader.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef NV_SMOKE_HW_DEFAULT_TIMEOUT_NS
@@ -20,6 +21,30 @@ scratch_zero(struct nv_smoke_hw_scratch *sc)
 {
    if (sc)
       memset(sc, 0, sizeof(*sc));
+}
+
+bool
+nv_smoke_hw_env_requested(void)
+{
+   const char *e = getenv("NV_SMOKE_HW");
+   if (!e || !e[0] || !strcmp(e, "0"))
+      return false;
+   return true;
+}
+
+uint32_t
+nv_smoke_hw_env_slices(void)
+{
+   const char *e = getenv("NV_SMOKE_HW_SLICES");
+   unsigned long v;
+   char *end = NULL;
+
+   if (!e || !e[0])
+      return NV_SMOKE_HW_ALL;
+   v = strtoul(e, &end, 0);
+   if (end == e || !v)
+      return NV_SMOKE_HW_ALL;
+   return (uint32_t)v & NV_SMOKE_HW_ALL;
 }
 
 int
@@ -35,6 +60,7 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
    scratch_zero(&sc);
    sc.rm = rm;
    sc.sema_payload = 0x42u;
+   sc.g2_store_imm = 0xdeadbeefu;
    sc.owned = true;
 
    memset(&req, 0, sizeof(req));
@@ -171,11 +197,12 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                                                        sc->sema_payload,
                                                        true, to, check_notifier);
          if (res.g1_rc == 0) {
-            res.slices_ok |= NV_SMOKE_HW_G1;
-            /* Optional: verify first dword copied if maps present */
+            /* Full 256B payload check when host maps exist */
             if (sc->src_cpu && sc->dst_cpu &&
-                memcmp(sc->src_cpu, sc->dst_cpu, 4) != 0)
-               res.g1_rc = -EIO; /* sema ok but data wrong — still report */
+                memcmp(sc->src_cpu, sc->dst_cpu, 256) != 0)
+               res.g1_rc = -EIO;
+            else
+               res.slices_ok |= NV_SMOKE_HW_G1;
          }
          if (res.g1_rc && !r)
             r = res.g1_rc;
@@ -189,7 +216,22 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (!r)
             r = res.g2_rc;
       } else {
-         if (g2_shader && g2_shader->uploaded) {
+         uint32_t store_imm = sc->g2_store_imm ? sc->g2_store_imm : 0xdeadbeefu;
+         uint64_t store_gpu = sc->dst_gpu; /* reuse G1 dst BO as G2 store target */
+
+         /* Prefer store-imm smoke shader targeting dst_bo[0] */
+         if (g2_shader && sc->rm && store_gpu) {
+            if (sc->dst_cpu)
+               memset(sc->dst_cpu, 0, 256);
+            if (nv_shader_upload_compute_smoke(g2_shader, 1 /* store_imm */,
+                                               store_imm, store_gpu, 16) == 0 &&
+                g2_shader->uploaded) {
+               prog = g2_shader->code_gpu_addr;
+               if (g2_shader->register_count)
+                  regs = g2_shader->register_count;
+            }
+         }
+         if (!prog && g2_shader && g2_shader->uploaded) {
             prog = g2_shader->code_gpu_addr;
             if (g2_shader->register_count)
                regs = g2_shader->register_count;
@@ -202,8 +244,14 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                                                              sc->sema_payload,
                                                              true, true, true,
                                                              to, check_notifier);
-         if (res.g2_rc == 0)
-            res.slices_ok |= NV_SMOKE_HW_G2;
+         if (res.g2_rc == 0) {
+            /* If store-imm path and mapped, verify first dword */
+            if (store_gpu && sc->dst_cpu &&
+                ((volatile uint32_t *)sc->dst_cpu)[0] != store_imm)
+               res.g2_rc = -EIO;
+            else
+               res.slices_ok |= NV_SMOKE_HW_G2;
+         }
          if (res.g2_rc && !r)
             r = res.g2_rc;
       }

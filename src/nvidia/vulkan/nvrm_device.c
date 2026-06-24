@@ -663,6 +663,10 @@ nvrm_CreateDevice(VkPhysicalDevice physicalDevice,
       return result;
    }
 
+   /* Optional bring-up: NV_SMOKE_HW=1 runs G1/G2/G3 on queue channel at create */
+   if (nv_smoke_hw_env_requested())
+      (void)nvrm_device_smoke_hw_run(device, nv_smoke_hw_env_slices(), 0);
+
    *pDevice = nvrm_device_to_handle(device);
    return VK_SUCCESS;
 }

@@ -542,6 +542,13 @@ nv_smoke_selftest_host(void)
       return -60 + r;
    if (!(sph.sph[0] & (1u << 11))) /* does_global_store bit */
       return -65;
+   /* G2 store-imm: expect 5*2 dwords (4 MOV/STG/EXIT-ish) min before pad */
+   if (sph.sass_dwords < 8)
+      return -66;
+   /* EXIT hi at end */
+   if (sph.sass[sph.sass_dwords - 1] != NV_SASS_EXIT_HI &&
+       sph.sass[sph.sass_dwords - 1] != 0x50b00000u)
+      return -67;
 
    /* Self-golden: G1/G2 streams must match themselves via trace_compare */
    {

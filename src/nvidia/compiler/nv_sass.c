@@ -75,6 +75,25 @@ nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b)
 }
 
 bool
+nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
+                                    uint64_t store_gpu_addr,
+                                    uint32_t imm_value)
+{
+   uint32_t lo = (uint32_t)(store_gpu_addr & 0xffffffffu);
+   uint32_t hi = (uint32_t)(store_gpu_addr >> 32);
+   /* R2 = addr lo, R3 = addr hi (hi unused by STG.U32 but mirrors SPH path) */
+   if (!nv_sass_emit_mov_ri(b, 2, lo))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 3, hi))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 1, imm_value))
+      return false;
+   if (!nv_sass_emit_stg_u32(b, 2 /* ra_addr */, 1 /* rd_data */))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
 nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                uint8_t ra_addr, uint32_t imm)
 {

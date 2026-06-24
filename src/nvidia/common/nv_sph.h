@@ -200,25 +200,30 @@ nv_sph_build_compute_store_imm(struct nv_sph_blob *blob, uint32_t imm_value,
 
    s = blob->sass;
    if (store_addr) {
-      uint32_t lo = (uint32_t)(store_addr & 0xffffffffu);
-      uint32_t hi = (uint32_t)(store_addr >> 32);
+      uint32_t alo = (uint32_t)(store_addr & 0xffffffffu);
+      uint32_t ahi = (uint32_t)(store_addr >> 32);
       /*
-       * Approximate Maxwell/Pascal 64-bit insn layout (matches nv_sass.c notes):
-       *   lo[7:0]=Rd, lo[31:8] often carries imm/addr fragments; hi = class.
-       * MOV32I-style: full imm in lo with Rd in low 8 bits (refined vs traces).
+       * G2 store-imm smoke (mirrors nv_sass_emit_smoke_store_imm_at_gva /
+       * nv_sass_emit_mov_ri: imm in lo, hi = 0x01000000|Rd).
+       *   MOV R2,addr_lo; MOV R3,addr_hi; MOV R1,imm; STG.U32 [R2],R1; EXIT
        */
-      s[n++] = (2u & 0xffu) | ((lo & 0xffffffu) << 8);
-      s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      s[n++] = (3u & 0xffu) | ((hi & 0xffffffu) << 8);
-      s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      s[n++] = (1u & 0xffu) | ((imm_value & 0xffffffu) << 8);
-      s[n++] = NV_SPH_SASS_MOV_HI_REG;
-      /* STG: Ra=R2 (addr), Rb=R1 (data) in lo fields */
-      s[n++] = (2u & 0xffu) | ((1u & 0xffu) << 8);
+#define NV_SPH_SASS_MOV32I_HI(rd)  (0x01000000u | ((uint32_t)(rd) & 0xffu))
+      s[n++] = alo;
+      s[n++] = NV_SPH_SASS_MOV32I_HI(2);
+      s[n++] = ahi;
+      s[n++] = NV_SPH_SASS_MOV32I_HI(3);
+      s[n++] = imm_value;
+      s[n++] = NV_SPH_SASS_MOV32I_HI(1);
+      /* STG: Rd=0/RZ, Ra=R2, Rb=R1 (nv_sass_emit_stg_u32) */
+      s[n++] = (0u) | ((2u & 0xffu) << 8) | ((1u & 0xffu) << 16);
       s[n++] = NV_SPH_SASS_STG_HI;
+      s[n++] = NV_SASS_EXIT_LO;
+      s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_SASS_MOV32I_HI
+   } else {
+      s[n++] = NV_SASS_EXIT_LO;
+      s[n++] = NV_SASS_EXIT_HI;
    }
-   s[n++] = NV_SASS_EXIT_LO;
-   s[n++] = NV_SASS_EXIT_HI;
    blob->sass_dwords = n;
 
    code_off = NV_SPH_BYTES;

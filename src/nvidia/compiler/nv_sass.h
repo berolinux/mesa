@@ -258,6 +258,15 @@ bool nv_sass_emit_nop(struct nv_sass_buf *b);
  * must have address in R2 or use nv_sph_build_compute_store_imm which embeds MOVs).
  */
 bool nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b);
+/**
+ * G2 smoke: MOV R2=addr_lo, MOV R3=addr_hi (unused in STG for 32b path but
+ * kept for 64b addr setup), MOV R1=imm, STG.U32 [R2], R1, EXIT.
+ * Writes up to 5 instructions into b.
+ */
+bool nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
+                                         uint64_t store_gpu_addr,
+                                         uint32_t imm_value);
+
 bool nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                     uint8_t ra_addr, uint32_t imm);
 bool nv_sass_emit_mov_rr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra);
