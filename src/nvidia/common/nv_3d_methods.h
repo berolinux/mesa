@@ -222,6 +222,19 @@ extern "C" {
 #define NVC597_SET_REPORT_SEMAPHORE_D_PIPELINE_LOCATION_ALL  (0xfu << 12)
 #define NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_ONE_WORD (1u << 28)
 #define NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS 0
+/* ZPASS / query counter report modes (subset) */
+#define NVC597_SET_REPORT_SEMAPHORE_D_REPORT_NONE           0
+#define NVC597_SET_REPORT_SEMAPHORE_D_REPORT_ZPASS_PIXEL_CNT (1u << 5)
+#define NVC597_SET_RENDER_ENABLE_A              0x1550
+#define NVC597_SET_RENDER_ENABLE_B              0x1554
+#define NVC597_SET_RENDER_ENABLE_C              0x1558
+#define NVC597_SET_RENDER_ENABLE_OVERRIDE       0x1944
+#define NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_RENDER  0x0
+#define NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_USE_RENDER_ENABLE 0x1
+#define NVC597_SET_RENDER_ENABLE_OVERRIDE_MODE_ALWAYS_FALSE  0x2
+#define NVC597_SET_ZPASS_PIXEL_COUNT             0x0d70
+#define NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_TRUE  1
+#define NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_FALSE 0
 #define NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE     (1u << 2)
 
 /* Fixed-function / texture pool / channel init (nvidia-3d fermi init) */
@@ -900,6 +913,100 @@ nv_3d_upload_and_bind_push_constants(struct nv_push *p, uint64_t cb_gpu_addr,
  * 3D report semaphore release (writes payload when pipeline reaches location).
  * nvidia-3d / nvkms uses PIPELINE_LOCATION_ALL + RELEASE + ONE_WORD/FOUR_WORDS.
  */
+
+static inline void
+nv_3d_emit_line_width(struct nv_push *p, float width)
+{
+   union { float f; uint32_t u; } w;
+   w.f = width > 0.0f ? width : 1.0f;
+   nv_push_method(p, NVC597_SET_LINE_WIDTH_FLOAT, w.u);
+}
+
+/** Viewport slot j (0..15): scale/offset from VkViewport-style params */
+static inline void
+nv_3d_set_viewport_n(struct nv_push *p, unsigned j,
+                     float x, float y, float w, float h,
+                     float min_z, float max_z)
+{
+   union { float f; uint32_t u; } sx, sy, sz, ox, oy, oz;
+   unsigned slot = j & 15u;
+   sx.f = w * 0.5f;
+   sy.f = h * 0.5f;
+   sz.f = (max_z - min_z) * 0.5f;
+   ox.f = x + w * 0.5f;
+   oy.f = y + h * 0.5f;
+   oz.f = (max_z + min_z) * 0.5f;
+   nv_push_method(p, NVC597_SET_VIEWPORT_SCALE_X(slot), sx.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_SCALE_Y(slot), sy.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_SCALE_Z(slot), sz.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_OFFSET_X(slot), ox.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_OFFSET_Y(slot), oy.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_OFFSET_Z(slot), oz.u);
+}
+
+static inline void
+nv_3d_set_scissor_n(struct nv_push *p, unsigned j,
+                    int32_t x, int32_t y, uint32_t w, uint32_t h)
+{
+   unsigned slot = j & 15u;
+   uint32_t xmin = (uint32_t)(x < 0 ? 0 : x);
+   uint32_t ymin = (uint32_t)(y < 0 ? 0 : y);
+   uint32_t xmax = xmin + (w ? w : 1);
+   uint32_t ymax = ymin + (h ? h : 1);
+   nv_push_method(p, NVC597_SET_SCISSOR_ENABLE(slot), 1);
+   nv_push_method(p, NVC597_SET_SCISSOR_HORIZONTAL(slot),
+                  (xmax << 16) | (xmin & 0xffffu));
+   nv_push_method(p, NVC597_SET_SCISSOR_VERTICAL(slot),
+                  (ymax << 16) | (ymin & 0xffffu));
+}
+
+/**
+ * Conditional render / predication: point RENDER_ENABLE at a sema/report
+ * memory word; override mode selects always/use/never render.
+ */
+static inline void
+nv_3d_set_render_enable_memory(struct nv_push *p, uint64_t cond_gpu_addr,
+                               uint32_t mode_override)
+{
+   if (cond_gpu_addr) {
+      nv_push_method(p, NVC597_SET_RENDER_ENABLE_A,
+                     (uint32_t)(cond_gpu_addr >> 32) & 0xff);
+      nv_push_method(p, NVC597_SET_RENDER_ENABLE_B,
+                     (uint32_t)(cond_gpu_addr & 0xffffffffu));
+      nv_push_method(p, NVC597_SET_RENDER_ENABLE_C, 0); /* mode: render if != 0 */
+   }
+   nv_push_method(p, NVC597_SET_RENDER_ENABLE_OVERRIDE, mode_override);
+}
+
+static inline void
+nv_3d_set_zpass_pixel_count(struct nv_push *p, bool enable)
+{
+   nv_push_method(p, NVC597_SET_ZPASS_PIXEL_COUNT,
+                  enable ? NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_TRUE
+                         : NVC597_SET_ZPASS_PIXEL_COUNT_ENABLE_FALSE);
+}
+
+/** Write occlusion (ZPASS) or timestamp-style report to sema addr (4 or 16 bytes). */
+static inline void
+nv_3d_report_query_release(struct nv_push *p, uint64_t sema_gpu_addr,
+                           uint32_t payload, bool zpass_counter, bool one_word)
+{
+   uint32_t d = NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_RELEASE |
+                NVC597_SET_REPORT_SEMAPHORE_D_RELEASE_AFTER_WRITES |
+                NVC597_SET_REPORT_SEMAPHORE_D_PIPELINE_LOCATION_ALL |
+                NVC597_SET_REPORT_SEMAPHORE_D_FLUSH_DISABLE_TRUE |
+                (one_word ? NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_ONE_WORD
+                          : NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS);
+   if (zpass_counter)
+      d |= NVC597_SET_REPORT_SEMAPHORE_D_REPORT_ZPASS_PIXEL_CNT;
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_A,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_B,
+                  (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_C, payload);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_D, d);
+}
+
 static inline void
 nv_3d_report_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                                uint32_t payload, bool one_word)
