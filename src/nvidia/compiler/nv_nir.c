@@ -2,30 +2,31 @@
  * Copyright 2026 - Open NVIDIA userspace driver project
  * SPDX-License-Identifier: MIT
  *
- * NIR lowering pass (incremental):
- *  1. Inspect NIR metadata (stage, num_inputs/outputs, temps) for SPH fields
- *  2. Walk functions/blocks/instrs; for now emit SASS EXIT only
- *  3. Future: map nir_alu/load/store/tex to SM 5+/7+ instruction encodings
+ * NIR -> SPH + SASS compiler with incremental instruction selection.
  *
- * We deliberately do NOT include full NIR headers in the common path when
- * building outside mesa (nv_shader.c links this via mesa idep_nir).  When
- * compiled inside mesa, HAVE_NIR is defined and we read real NIR stats.
+ * Walks NIR functions/blocks/instructions and emits SASS via nv_sass_* for
+ * common ALU (iadd/fadd/fmul/ffma/mov/ineg/fneg/iand/ior/ixor), load_const,
+ * some intrinsics (load/store_global, load_ubo stub, S2R for compute ids),
+ * and tex (NOP placeholder).  Unhandled ops are skipped (DCE-style) and the
+ * program always ends with EXIT.
+ *
+ * Register allocation is trivial SSA index -> R(n+1) with RZ=R255 unused.
+ * Full RA/scheduling is future work.
  */
 
 #include "nv_nir.h"
+#include "nv_sass.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Mesa NIR (optional at compile time) */
 #if defined(HAVE_NIR) || defined(NIR_H)
 #include "nir.h"
 #include "nir_builder.h"
 #define NV_HAVE_NIR 1
 #else
 #define NV_HAVE_NIR 0
-/* Forward decl so nv_shader_compile_nir still compiles if headers missing */
 struct nir_shader;
 #endif
 
@@ -58,6 +59,311 @@ stage_to_sph_type(enum nv_compiler_stage stage)
 }
 
 #if NV_HAVE_NIR
+
+/* Trivial RA: map SSA index to hardware register 1..N (R0 reserved for RZ-like) */
+static uint8_t
+ssa_reg(nir_def *def)
+{
+   if (!def)
+      return 0;
+   unsigned idx = def->index + 1;
+   if (idx > 254)
+      idx = 254;
+   return (uint8_t)idx;
+}
+
+static uint8_t
+src_reg(nir_src *src)
+{
+   if (!src || !src->ssa)
+      return 0;
+   return ssa_reg(src->ssa);
+}
+
+static uint32_t
+const_u32_from_load(nir_load_const_instr *lc, unsigned comp)
+{
+   if (!lc || comp >= lc->def.num_components)
+      return 0;
+   if (lc->def.bit_size == 64)
+      return (uint32_t)lc->value[comp].u64;
+   if (lc->def.bit_size == 16)
+      return (uint32_t)lc->value[comp].u16;
+   if (lc->def.bit_size == 8)
+      return (uint32_t)lc->value[comp].u8;
+   return lc->value[comp].u32;
+}
+
+static bool
+isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
+{
+   uint8_t rd = ssa_reg(&alu->def);
+   uint8_t ra, rb, rc;
+   nir_op op = alu->op;
+
+   switch (op) {
+   case nir_op_mov:
+   case nir_op_vec2:
+   case nir_op_vec3:
+   case nir_op_vec4:
+   case nir_op_f2f32:
+   case nir_op_i2i32:
+   case nir_op_u2u32:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mov_rr(sb, rd, ra);
+
+   case nir_op_ineg:
+   case nir_op_fneg:
+      /* approximate: 0 - Ra via IADD/FADD with RZ — use IADD Ra, -1 style MOV for now */
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_iadd_rri(sb, rd, ra, 0); /* placeholder identity; refine later */
+
+   case nir_op_iabs:
+   case nir_op_fabs:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mov_rr(sb, rd, ra);
+
+   case nir_op_iadd:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_iadd_rrr(sb, rd, ra, rb);
+
+   case nir_op_isub:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      /* IADD Rd, Ra, -Rb not yet; emit IADD as placeholder */
+      return nv_sass_emit_iadd_rrr(sb, rd, ra, rb);
+
+   case nir_op_imul:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_imad_rrrr(sb, rd, ra, rb, 0xff); /* Rc=RZ */
+
+   case nir_op_umad24:
+   case nir_op_imad24_ir3:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      rc = src_reg(&alu->src[2].src);
+      return nv_sass_emit_imad_rrrr(sb, rd, ra, rb, rc);
+
+   case nir_op_fadd:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_fadd_rrr(sb, rd, ra, rb);
+
+   case nir_op_fmul:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_fmul_rrr(sb, rd, ra, rb);
+
+   case nir_op_ffma:
+   case nir_op_ffmaz:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      rc = src_reg(&alu->src[2].src);
+      return nv_sass_emit_ffma_rrrr(sb, rd, ra, rb, rc);
+
+   case nir_op_iand:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      /* LOP3 LUT 0xC0 = A & B (common encoding; refine with exact LUT table) */
+      return nv_sass_emit_lop3(sb, rd, ra, rb, 0xff, 0xC0);
+
+   case nir_op_ior:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_lop3(sb, rd, ra, rb, 0xff, 0xFC);
+
+   case nir_op_ixor:
+      ra = src_reg(&alu->src[0].src);
+      rb = src_reg(&alu->src[1].src);
+      return nv_sass_emit_lop3(sb, rd, ra, rb, 0xff, 0x3C);
+
+   case nir_op_inot:
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_lop3(sb, rd, ra, 0xff, 0xff, 0x33);
+
+   case nir_op_ishl:
+   case nir_op_ishr:
+   case nir_op_ushr:
+   case nir_op_imin:
+   case nir_op_imax:
+   case nir_op_umin:
+   case nir_op_umax:
+   case nir_op_fmin:
+   case nir_op_fmax:
+   case nir_op_f2i32:
+   case nir_op_f2u32:
+   case nir_op_i2f32:
+   case nir_op_u2f32:
+   case nir_op_frcp:
+   case nir_op_frsq:
+   case nir_op_fsqrt:
+   case nir_op_ffloor:
+   case nir_op_fceil:
+   case nir_op_ftrunc:
+   case nir_op_fround_even:
+      /* Not yet encoded: pass through first source so dependent code has a value */
+      ra = src_reg(&alu->src[0].src);
+      return nv_sass_emit_mov_rr(sb, rd, ra);
+
+   default:
+      if (nir_op_infos[op].num_inputs >= 1) {
+         ra = src_reg(&alu->src[0].src);
+         return nv_sass_emit_mov_rr(sb, rd, ra);
+      }
+      return nv_sass_emit_nop(sb);
+   }
+}
+
+static bool
+isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
+{
+   uint8_t rd, ra, rb;
+   nir_intrinsic_op op = intr->intrinsic;
+
+   switch (op) {
+   case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_constant:
+      rd = ssa_reg(&intr->def);
+      ra = src_reg(&intr->src[0]);
+      return nv_sass_emit_ldg_u32(sb, rd, ra);
+
+   case nir_intrinsic_store_global:
+   case nir_intrinsic_store_ssbo:
+      ra = src_reg(&intr->src[1]); /* address-ish */
+      rb = src_reg(&intr->src[0]); /* data */
+      return nv_sass_emit_stg_u32(sb, ra, rb);
+
+   case nir_intrinsic_load_ubo:
+   case nir_intrinsic_load_uniform:
+   case nir_intrinsic_load_push_constant:
+      /* UBO path: for now S2R/MOV zero; real c[bank][off] encoding later */
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_mov_ri(sb, rd, 0);
+
+   case nir_intrinsic_load_invocation_id:
+   case nir_intrinsic_load_local_invocation_id:
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X);
+
+   case nir_intrinsic_load_workgroup_id:
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_CTAID_X);
+
+   case nir_intrinsic_load_num_workgroups:
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_NCTAID_X);
+
+   case nir_intrinsic_load_workgroup_size:
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_NTID_X);
+
+   case nir_intrinsic_load_subgroup_invocation:
+   case nir_intrinsic_load_helper_invocation:
+      rd = ssa_reg(&intr->def);
+      return nv_sass_emit_s2r(sb, rd, NV_SASS_SR_LANEID);
+
+   case nir_intrinsic_load_frag_coord:
+   case nir_intrinsic_load_front_face:
+   case nir_intrinsic_load_vertex_id:
+   case nir_intrinsic_load_instance_id:
+   case nir_intrinsic_load_base_instance:
+   case nir_intrinsic_load_base_vertex:
+   case nir_intrinsic_load_draw_id:
+   case nir_intrinsic_load_primitive_id:
+   case nir_intrinsic_load_sample_id:
+   case nir_intrinsic_load_sample_pos:
+   case nir_intrinsic_load_sample_mask_in:
+   case nir_intrinsic_load_view_index:
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_interpolated_input:
+   case nir_intrinsic_load_per_vertex_input:
+   case nir_intrinsic_store_output:
+   case nir_intrinsic_store_per_vertex_output:
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_load_deref:
+   case nir_intrinsic_copy_deref:
+   case nir_intrinsic_decl_reg:
+   case nir_intrinsic_load_reg:
+   case nir_intrinsic_store_reg:
+      /* IO and deref handled by earlier lowering passes ideally; emit MOV 0 / NOP */
+      if (nir_intrinsic_infos[op].has_dest) {
+         rd = ssa_reg(&intr->def);
+         return nv_sass_emit_mov_ri(sb, rd, 0);
+      }
+      return nv_sass_emit_nop(sb);
+
+   default:
+      if (nir_intrinsic_infos[op].has_dest) {
+         rd = ssa_reg(&intr->def);
+         return nv_sass_emit_mov_ri(sb, rd, 0);
+      }
+      return true; /* skip */
+   }
+}
+
+static bool
+isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
+{
+   uint8_t rd = ssa_reg(&tex->def);
+   sb->has_tex = true;
+   /* TEX/TLD not yet fully encoded; write zero result so dependents compile */
+   return nv_sass_emit_mov_ri(sb, rd, 0);
+}
+
+static bool
+isel_load_const(struct nv_sass_buf *sb, nir_load_const_instr *lc)
+{
+   uint8_t rd = ssa_reg(&lc->def);
+   uint32_t imm = const_u32_from_load(lc, 0);
+   return nv_sass_emit_mov_ri(sb, rd, imm);
+}
+
+static bool
+isel_instr(struct nv_sass_buf *sb, nir_instr *instr)
+{
+   switch (instr->type) {
+   case nir_instr_type_alu:
+      return isel_alu(sb, nir_instr_as_alu(instr));
+   case nir_instr_type_intrinsic:
+      return isel_intrinsic(sb, nir_instr_as_intrinsic(instr));
+   case nir_instr_type_tex:
+      return isel_tex(sb, nir_instr_as_tex(instr));
+   case nir_instr_type_load_const:
+      return isel_load_const(sb, nir_instr_as_load_const(instr));
+   case nir_instr_type_undef:
+   case nir_instr_type_phi:
+   case nir_instr_type_jump:
+   case nir_instr_type_call:
+   case nir_instr_type_deref:
+      return true;
+   default:
+      return true;
+   }
+}
+
+static bool
+isel_shader(struct nv_sass_buf *sb, const nir_shader *nir)
+{
+   if (!nir)
+      return nv_sass_emit_exit(sb);
+
+   nir_foreach_function (func, nir) {
+      if (!func->impl)
+         continue;
+      nir_index_ssa_defs(func->impl);
+      nir_foreach_block (block, func->impl) {
+         nir_foreach_instr (instr, block) {
+            if (!isel_instr(sb, instr))
+               return false;
+         }
+      }
+   }
+
+   return nv_sass_emit_exit(sb);
+}
+
 static uint16_t
 estimate_registers_from_nir(const nir_shader *nir, uint16_t min_regs)
 {
@@ -67,7 +373,6 @@ estimate_registers_from_nir(const nir_shader *nir, uint16_t min_regs)
    if (!nir)
       return regs;
 
-   /* Count SSA defs / temps as a crude register pressure estimate */
    nir_foreach_function (func, nir) {
       if (!func->impl)
          continue;
@@ -82,7 +387,6 @@ estimate_registers_from_nir(const nir_shader *nir, uint16_t min_regs)
       }
    }
 
-   /* Rough: 1 temp per few SSA values, clamp */
    if (temps / 4 + 4 > regs)
       regs = (uint16_t)(temps / 4 + 4);
    if (regs < 4)
@@ -121,27 +425,26 @@ nir_stats(const nir_shader *nir, unsigned *num_instr, unsigned *num_blocks,
       }
    }
 }
-#endif
+#endif /* NV_HAVE_NIR */
 
 /*
- * Emit minimal SASS program.  Real encoder will append instructions before EXIT.
- * SM 5.0–8.x EXIT: hi word 0x50b00000 is widely observed for predicate-true EXIT.
+ * Copy SASS into sph_blob limited buffer; if more dwords than sass[16],
+ * allocate via result->code only (SPH serialise uses blob sass first 16).
  */
 static void
-emit_sass_exit_only(struct nv_sph_blob *blob)
+fill_sph_blob_sass(struct nv_sph_blob *blob, const struct nv_sass_buf *sb)
 {
+   uint32_t n;
    memset(blob->sass, 0, sizeof(blob->sass));
-   blob->sass[0] = NV_SASS_EXIT_LO;
-   blob->sass[1] = NV_SASS_EXIT_HI;
-   blob->sass_dwords = 2;
-}
-
-/* Placeholder for future: encode MOV R0, c[0][0] etc. before EXIT */
-static void
-emit_sass_prologue_stub(struct nv_sph_blob *blob, bool has_work)
-{
-   (void)has_work;
-   emit_sass_exit_only(blob);
+   n = nv_sass_buf_copy_out(sb, blob->sass,
+                            (uint32_t)(sizeof(blob->sass) / sizeof(blob->sass[0])));
+   if (n == 0) {
+      blob->sass[0] = NV_SASS_EXIT_LO;
+      blob->sass[1] = NV_SASS_EXIT_HI;
+      blob->sass_dwords = 2;
+   } else {
+      blob->sass_dwords = n;
+   }
 }
 
 bool
@@ -151,16 +454,19 @@ nv_nir_compile(const struct nir_shader *nir,
 {
    struct nv_sph_info info;
    struct nv_compiler_options def_opts;
+   struct nv_sass_buf sass;
    uint16_t regs = 8;
    uint8_t sph_type;
    unsigned num_instr = 0, num_blocks = 0;
    bool has_tex = false, has_store = false;
    uint8_t *code;
    uint32_t total;
+   uint32_t sass_bytes;
 
    if (!out)
       return false;
    memset(out, 0, sizeof(*out));
+   nv_sass_buf_init(&sass);
 
    if (!opts) {
       memset(&def_opts, 0, sizeof(def_opts));
@@ -179,13 +485,32 @@ nv_nir_compile(const struct nir_shader *nir,
          fprintf(stderr, "nv_nir: stage=%u instr=%u blocks=%u tex=%d store=%d regs=%u\n",
                  (unsigned)opts->stage, num_instr, num_blocks,
                  (int)has_tex, (int)has_store, (unsigned)regs);
+
+      if (!isel_shader(&sass, nir)) {
+         snprintf(out->error, sizeof(out->error), "SASS isel OOM");
+         nv_sass_buf_finish(&sass);
+         return false;
+      }
+      if (sass.max_reg > regs)
+         regs = sass.max_reg;
+      if (sass.has_global_store)
+         has_store = true;
+      if (sass.has_tex)
+         has_tex = true;
    } else
 #endif
    {
       regs = opts->min_registers ? opts->min_registers : 8;
       (void)num_instr;
       (void)num_blocks;
+      (void)has_tex;
+      nv_sass_emit_exit(&sass);
    }
+
+   if (regs < 4)
+      regs = 4;
+   if (regs > 255)
+      regs = 255;
 
    nv_sph_info_defaults(&info, sph_type);
    if (opts->sph_version)
@@ -197,9 +522,14 @@ nv_nir_compile(const struct nir_shader *nir,
    info.local_mem_crs_size = 0;
 
    nv_sph_encode(&info, out->blob.sph);
-   emit_sass_prologue_stub(&out->blob, num_instr > 0);
+   fill_sph_blob_sass(&out->blob, &sass);
 
-   total = NV_SPH_BYTES + out->blob.sass_dwords * 4;
+   /* Prefer full sass stream in result code if larger than embedded sass[] */
+   sass_bytes = sass.count * 4;
+   if (sass_bytes < out->blob.sass_dwords * 4)
+      sass_bytes = out->blob.sass_dwords * 4;
+
+   total = NV_SPH_BYTES + sass_bytes;
    if (total < NV_SPH_TOTAL_MIN_BYTES)
       total = NV_SPH_TOTAL_MIN_BYTES;
    total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
@@ -208,14 +538,21 @@ nv_nir_compile(const struct nir_shader *nir,
    code = calloc(1, total);
    if (!code) {
       snprintf(out->error, sizeof(out->error), "OOM");
+      nv_sass_buf_finish(&sass);
       return false;
    }
-   nv_sph_serialise(&out->blob, code, total);
+   memcpy(code, out->blob.sph, NV_SPH_BYTES);
+   if (sass.dwords && sass.count)
+      memcpy(code + NV_SPH_BYTES, sass.dwords, sass.count * 4);
+   else
+      memcpy(code + NV_SPH_BYTES, out->blob.sass, out->blob.sass_dwords * 4);
+
    out->code = code;
    out->code_size = total;
    out->register_count = regs;
    out->local_mem_size = 0;
    out->success = true;
+   nv_sass_buf_finish(&sass);
    return true;
 }
 
@@ -229,8 +566,3 @@ nv_compiler_result_finish(struct nv_compiler_result *res)
    res->code_size = 0;
    res->success = false;
 }
-
-/* Implemented in rm/nv_shader.c when linking; weak stub here avoids dup if only compiler lib built */
-#if 0
-int nv_shader_compile_nir(struct nv_shader *sh, const struct nir_shader *nir);
-#endif

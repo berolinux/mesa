@@ -10,6 +10,8 @@
 
 /* Optional NIR compiler (linked when idep_nvidia_compiler available) */
 
+#include "util/ralloc.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -80,6 +82,12 @@ nv_shader_destroy(struct nv_shader *sh)
 {
    if (!sh)
       return;
+
+   if (sh->owns_nir && sh->nir) {
+      /* NIR is ralloc-allocated (vk_spirv_to_nir / nir_shader_clone). */
+      ralloc_free(sh->nir);
+      sh->nir = NULL;
+   }
 
    if (sh->code_bo) {
       nv_rm_bo_unmap(sh->code_bo);

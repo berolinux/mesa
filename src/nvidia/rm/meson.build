@@ -12,11 +12,11 @@ libnvidia_rm = static_library(
   'nvidia_rm',
   files('nv_rm.c', 'nv_channel.c', 'nv_shader.c', 'nv_fence.c', 'nv_tex.c'),
   include_directories : [
-    inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     include_directories('../common'),
   ],
   c_args : [no_override_init_args, nv_rm_c_args],
-  dependencies : nv_rm_deps,
+  dependencies : [nv_rm_deps, idep_mesautil],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )
