@@ -1241,6 +1241,45 @@ nv_rbsp_se(struct nv_rbsp_reader *r)
  * Handles baseline/main/high profile_idc paths conservatively; skips VUI/HRD.
  * Returns 0 on success, -1 on failure.
  */
+/**
+ * H.264 scaling_list(sizeOfScalingList): SE deltas until 16 or 64 coefficients
+ * (ITU-T H.264 7.3.2.1.1.1).  Used by SPS/PPS scaling matrix present flags.
+ */
+static inline void
+nv_h264_rbsp_skip_scaling_list(struct nv_rbsp_reader *r, unsigned size_of_list)
+{
+   unsigned j, last = 8, next = 8;
+   if (!r)
+      return;
+   if (size_of_list > 64)
+      size_of_list = 64;
+   for (j = 0; j < size_of_list; j++) {
+      if (next)
+         next = (uint32_t)((int32_t)last + nv_rbsp_se(r)) & 0xffu;
+      last = next ? next : last;
+   }
+}
+
+/**
+ * Skip seq/pic scaling matrix tables: for each list index, if present flag,
+ * consume scaling_list(16) for i<6 else scaling_list(64).
+ * n_lists: 8 (4:2:0) or 12 (4:4:4) for SPS; PPS uses 6 or 2+6*transform_8x8.
+ */
+static inline void
+nv_h264_rbsp_skip_scaling_matrices(struct nv_rbsp_reader *r, unsigned n_lists)
+{
+   unsigned i;
+   if (!r)
+      return;
+   if (n_lists > 12)
+      n_lists = 12;
+   for (i = 0; i < n_lists; i++) {
+      if (!nv_rbsp_u(r, 1))
+         continue; /* scaling_list_present_flag[i] == 0 */
+      nv_h264_rbsp_skip_scaling_list(r, (i < 6) ? 16u : 64u);
+   }
+}
+
 static inline int
 nv_h264_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
                       struct nv_nvdec_h264_pic_setup *ps)
@@ -1278,17 +1317,8 @@ nv_h264_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
       (void)nv_rbsp_ue(&r); /* bit_depth_chroma_minus8 */
       (void)nv_rbsp_u(&r, 1); /* qpprime_y_zero_transform_bypass_flag */
       if (nv_rbsp_u(&r, 1)) { /* seq_scaling_matrix_present_flag */
-         unsigned i, n = (chroma_format_idc != 3) ? 8u : 12u;
-         for (i = 0; i < n; i++) {
-            if (nv_rbsp_u(&r, 1)) {
-               unsigned j, last = 8, next = 8, size = (i < 6) ? 16u : 64u;
-               for (j = 0; j < size; j++) {
-                  if (next)
-                     next = (uint32_t)((int32_t)last + nv_rbsp_se(&r)) & 0xffu;
-                  last = next ? next : last;
-               }
-            }
-         }
+         unsigned n = (chroma_format_idc != 3) ? 8u : 12u;
+         nv_h264_rbsp_skip_scaling_matrices(&r, n);
       }
    }
    log2_max_frame_num_minus4 = nv_rbsp_ue(&r);
@@ -1394,11 +1424,10 @@ nv_h264_parse_pps_nal(const uint8_t *nal, uint32_t nal_size,
    /* More RBSP data: transform_8x8 + second chroma offset (High profile) */
    if (r.bit_pos / 8 < r.size) {
       transform_8x8_mode_flag = nv_rbsp_u(&r, 1);
-      if (nv_rbsp_u(&r, 1)) { /* pic_scaling_matrix_present */
-         unsigned i;
-         for (i = 0; i < 8; i++)
-            if (nv_rbsp_u(&r, 1))
-               ; /* skip scaling list content — approximate */
+      if (nv_rbsp_u(&r, 1)) { /* pic_scaling_matrix_present_flag */
+         /* 6 lists always; +6 more (8x8) when transform_8x8_mode_flag */
+         unsigned n = transform_8x8_mode_flag ? 12u : 6u;
+         nv_h264_rbsp_skip_scaling_matrices(&r, n);
       }
       second_chroma_qp_index_offset = nv_rbsp_se(&r);
    }
