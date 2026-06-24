@@ -1557,61 +1557,132 @@ nv_hevc_rbsp_skip_scaling_list_data(struct nv_rbsp_reader *r)
    }
 }
 
+/* Host-side short_term_ref_pic_set table for correct inter-RPS RBSP walks */
+#define NV_HEVC_MAX_ST_RPS   64
+#define NV_HEVC_MAX_RPS_PICS 16
+
+struct nv_hevc_st_rps_entry {
+   uint8_t num_negative_pics;
+   uint8_t num_positive_pics;
+   uint8_t used_by_curr_s0[NV_HEVC_MAX_RPS_PICS];
+   uint8_t used_by_curr_s1[NV_HEVC_MAX_RPS_PICS];
+   /* POC deltas not stored — only counts matter for NumDeltaPocs */
+};
+
+struct nv_hevc_st_rps_table {
+   struct nv_hevc_st_rps_entry e[NV_HEVC_MAX_ST_RPS];
+   unsigned count;
+};
+
+static inline unsigned
+nv_hevc_st_rps_num_delta_pocs(const struct nv_hevc_st_rps_table *t, unsigned idx)
+{
+   if (!t || idx >= t->count || idx >= NV_HEVC_MAX_ST_RPS)
+      return 0;
+   return (unsigned)t->e[idx].num_negative_pics +
+          (unsigned)t->e[idx].num_positive_pics;
+}
+
 /**
- * Walk/skip one short_term_ref_pic_set(stRpsIdx) per H.265 7.3.7 so the RBSP
- * position reaches long_term_ref_pics_present_flag correctly.  Does not store
- * RPS contents (NVDEC gets refs via DPB/pipe_desc); inter_ref_pic_set_prediction
- * branches are fully consumed.
+ * Parse one short_term_ref_pic_set(stRpsIdx) per H.265 7.3.7 into table slot
+ * stRpsIdx (when table non-NULL) so inter_ref_pic_set_prediction reads the
+ * exact NumDeltaPocs(RefRpsIdx) flag pairs.  NVDEC still gets refs via DPB;
+ * this only keeps RBSP alignment for LT/temporal_mvp/strong_intra.
  *
  * stRpsIdx: index in SPS loop (0 .. num_short_term_ref_pic_sets-1)
- * num_st_rps_total: total SPS short-term sets (for delta_idx bounds)
+ * num_st_rps_total: total SPS short-term sets (for delta_idx in slice RPS only)
  */
+static inline void
+nv_hevc_rbsp_parse_short_term_ref_pic_set(struct nv_rbsp_reader *r,
+                                          unsigned stRpsIdx,
+                                          unsigned num_st_rps_total,
+                                          struct nv_hevc_st_rps_table *table)
+{
+   uint32_t inter_ref_pic_set_prediction_flag = 0;
+   uint32_t num_negative_pics = 0, num_positive_pics = 0;
+   unsigned i;
+   struct nv_hevc_st_rps_entry *slot = NULL;
+
+   if (!r)
+      return;
+   if (table && stRpsIdx < NV_HEVC_MAX_ST_RPS) {
+      slot = &table->e[stRpsIdx];
+      memset(slot, 0, sizeof(*slot));
+      if (stRpsIdx + 1 > table->count)
+         table->count = stRpsIdx + 1;
+   }
+
+   if (stRpsIdx != 0)
+      inter_ref_pic_set_prediction_flag = nv_rbsp_u(r, 1);
+
+   if (inter_ref_pic_set_prediction_flag) {
+      uint32_t delta_idx_minus1 = 0;
+      unsigned RefRpsIdx;
+      unsigned num_delta_pocs;
+      if (stRpsIdx == num_st_rps_total)
+         delta_idx_minus1 = nv_rbsp_ue(r);
+      (void)nv_rbsp_u(r, 1);  /* delta_rps_sign */
+      (void)nv_rbsp_ue(r);    /* abs_delta_rps_minus1 */
+      RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1);
+      if (RefRpsIdx >= NV_HEVC_MAX_ST_RPS)
+         RefRpsIdx = 0;
+      num_delta_pocs = table ? nv_hevc_st_rps_num_delta_pocs(table, RefRpsIdx)
+                             : 0;
+      /* Fallback if table missing/empty: still drain a modest number of flags */
+      if (!num_delta_pocs)
+         num_delta_pocs = 16;
+      if (num_delta_pocs > 32)
+         num_delta_pocs = 32;
+      /* used_by_curr_pic_flag[j] + optional use_delta_flag[j] for j=0..NumDeltaPocs */
+      for (i = 0; i <= num_delta_pocs && i < 33; i++) {
+         uint32_t used = nv_rbsp_u(r, 1);
+         if (!used)
+            (void)nv_rbsp_u(r, 1); /* use_delta_flag */
+         if (r->bit_pos / 8 >= r->size)
+            break;
+      }
+      /* Predicted set: approximate counts from reference (for later predictors) */
+      if (slot && table && RefRpsIdx < table->count) {
+         *slot = table->e[RefRpsIdx];
+      }
+   } else {
+      num_negative_pics = nv_rbsp_ue(r);
+      num_positive_pics = nv_rbsp_ue(r);
+      if (num_negative_pics > NV_HEVC_MAX_RPS_PICS)
+         num_negative_pics = NV_HEVC_MAX_RPS_PICS;
+      if (num_positive_pics > NV_HEVC_MAX_RPS_PICS)
+         num_positive_pics = NV_HEVC_MAX_RPS_PICS;
+      if (slot) {
+         slot->num_negative_pics = (uint8_t)num_negative_pics;
+         slot->num_positive_pics = (uint8_t)num_positive_pics;
+      }
+      for (i = 0; i < num_negative_pics; i++) {
+         (void)nv_rbsp_ue(r); /* delta_poc_s0_minus1 */
+         {
+            uint32_t u = nv_rbsp_u(r, 1);
+            if (slot && i < NV_HEVC_MAX_RPS_PICS)
+               slot->used_by_curr_s0[i] = (uint8_t)u;
+         }
+      }
+      for (i = 0; i < num_positive_pics; i++) {
+         (void)nv_rbsp_ue(r); /* delta_poc_s1_minus1 */
+         {
+            uint32_t u = nv_rbsp_u(r, 1);
+            if (slot && i < NV_HEVC_MAX_RPS_PICS)
+               slot->used_by_curr_s1[i] = (uint8_t)u;
+         }
+      }
+   }
+}
+
+/** Walk one ST-RPS without storing (legacy name; uses NULL table). */
 static inline void
 nv_hevc_rbsp_skip_short_term_ref_pic_set(struct nv_rbsp_reader *r,
                                          unsigned stRpsIdx,
                                          unsigned num_st_rps_total)
 {
-   uint32_t inter_ref_pic_set_prediction_flag = 0;
-   uint32_t num_negative_pics, num_positive_pics;
-   unsigned i;
-   (void)num_st_rps_total;
-   if (!r)
-      return;
-   if (stRpsIdx != 0)
-      inter_ref_pic_set_prediction_flag = nv_rbsp_u(r, 1);
-   if (inter_ref_pic_set_prediction_flag) {
-      if (stRpsIdx == num_st_rps_total)
-         (void)nv_rbsp_ue(r); /* delta_idx_minus1 (slice header only normally) */
-      (void)nv_rbsp_u(r, 1);  /* delta_rps_sign */
-      (void)nv_rbsp_ue(r);    /* abs_delta_rps_minus1 */
-      /* used_by_curr_pic_flag[j] + use_delta_flag[j] for each pic in RefRpsIdx
-       * set; without storing prior sets we approximate with a bounded walk:
-       * read up to 32 (flag, optional flag) pairs — sufficient to drain common
-       * bitstreams; pathological over-read is bounded by RBSP length checks. */
-      for (i = 0; i < 32; i++) {
-         uint32_t used = nv_rbsp_u(r, 1);
-         if (!used)
-            (void)nv_rbsp_u(r, 1); /* use_delta_flag */
-         /* Stop heuristic: if we've consumed past stream, nv_rbsp_u returns 0 */
-         if (r->bit_pos / 8 >= r->size)
-            break;
-      }
-   } else {
-      num_negative_pics = nv_rbsp_ue(r);
-      num_positive_pics = nv_rbsp_ue(r);
-      if (num_negative_pics > 16)
-         num_negative_pics = 16;
-      if (num_positive_pics > 16)
-         num_positive_pics = 16;
-      for (i = 0; i < num_negative_pics; i++) {
-         (void)nv_rbsp_ue(r); /* delta_poc_s0_minus1 */
-         (void)nv_rbsp_u(r, 1); /* used_by_curr_pic_s0_flag */
-      }
-      for (i = 0; i < num_positive_pics; i++) {
-         (void)nv_rbsp_ue(r); /* delta_poc_s1_minus1 */
-         (void)nv_rbsp_u(r, 1); /* used_by_curr_pic_s1_flag */
-      }
-   }
+   nv_hevc_rbsp_parse_short_term_ref_pic_set(r, stRpsIdx, num_st_rps_total,
+                                             NULL);
 }
 
 /**
@@ -1693,12 +1764,16 @@ nv_hevc_parse_sps_nal(const uint8_t *nal, uint32_t nal_size,
       pcm_loop_filter_disabled = nv_rbsp_u(&r, 1);
    }
    num_short_term_ref_pic_sets = nv_rbsp_ue(&r);
-   /* Walk short_term_ref_pic_set[i] so LT / temporal_mvp / strong_intra align */
+   /* Parse short_term_ref_pic_set[i] with host RPS table for inter-RPS walks */
    {
+      struct nv_hevc_st_rps_table st_rps;
       unsigned st_i;
-      for (st_i = 0; st_i < num_short_term_ref_pic_sets && st_i < 64; st_i++)
-         nv_hevc_rbsp_skip_short_term_ref_pic_set(&r, st_i,
-                                                  num_short_term_ref_pic_sets);
+      memset(&st_rps, 0, sizeof(st_rps));
+      for (st_i = 0; st_i < num_short_term_ref_pic_sets && st_i < NV_HEVC_MAX_ST_RPS;
+           st_i++)
+         nv_hevc_rbsp_parse_short_term_ref_pic_set(&r, st_i,
+                                                   num_short_term_ref_pic_sets,
+                                                   &st_rps);
    }
    if (nv_rbsp_u(&r, 1)) { /* long_term_ref_pics_present_flag */
       num_long_term_ref_pics_sps = nv_rbsp_ue(&r);
