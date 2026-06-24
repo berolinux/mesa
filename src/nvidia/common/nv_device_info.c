@@ -368,6 +368,17 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
       0x0000c36fu, 0x0000c36eu, 0x0000c06fu, 0x0000b06fu, 0x0000a26fu,
       0x0000a16fu, 0x0000a06fu,
    };
+   /* pass9 vdpau/nvcuvid/cuda: C9B0..C3B0 (NVDEC); also B8B0/B6B0/B0B0 headers */
+   static const uint32_t ladder_nvdec[] = {
+      0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u, 0x0000c6b0u, 0x0000c5b0u,
+      0x0000c4b0u, 0x0000c3b0u, 0x0000c1b0u, 0x0000b8b0u, 0x0000b6b0u,
+      0x0000b0b0u,
+   };
+   /* pass9 glcore/egl/vksc: C8B7 heavy (18–29×); C9B7/C7B7 present; encode lib thin */
+   static const uint32_t ladder_nvenc[] = {
+      0x0000c9b7u, 0x0000c8b7u, 0x0000c7b7u, 0x0000c1b7u, 0x0000c0b7u,
+      0x0000b4b7u,
+   };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;
 
@@ -387,6 +398,14 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
    case 2:
       lad = ladder_copy;
       lad_n = sizeof(ladder_copy) / sizeof(ladder_copy[0]);
+      break;
+   case 3: /* nvdec — tick89 / pass9 video ladder */
+      lad = ladder_nvdec;
+      lad_n = sizeof(ladder_nvdec) / sizeof(ladder_nvdec[0]);
+      break;
+   case 4: /* nvenc */
+      lad = ladder_nvenc;
+      lad_n = sizeof(ladder_nvenc) / sizeof(ladder_nvenc[0]);
       break;
    case 5:
       lad = ladder_gpfifo;

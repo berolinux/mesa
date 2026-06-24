@@ -29,10 +29,20 @@ extern "C" {
 #define NV_VIDEO_CLASS_NVDEC_AMPERE_C1   0x0000C1B0
 #define NV_VIDEO_CLASS_NVDEC_ADA_C4      0x0000C4B0
 #define NV_VIDEO_CLASS_NVDEC_HOPPER_C7   0x0000C7B0
+/* pass9 rodata: C9B0/C8B0/C6B0/C5B0/C3B0 also appear (try via class ladder) */
+#define NV_VIDEO_CLASS_NVDEC_C9B0        0x0000C9B0
+#define NV_VIDEO_CLASS_NVDEC_C8B0        0x0000C8B0
+#define NV_VIDEO_CLASS_NVDEC_C6B0        0x0000C6B0
+#define NV_VIDEO_CLASS_NVDEC_C5B0        0x0000C5B0
+#define NV_VIDEO_CLASS_NVDEC_C3B0        0x0000C3B0
 
 #define NV_VIDEO_CLASS_NVENC_PASCAL_B4B7 0x0000B4B7
 #define NV_VIDEO_CLASS_NVENC_TURING_C0B7 0x0000C0B7
 #define NV_VIDEO_CLASS_NVENC_AMPERE_C1B7 0x0000C1B7
+/* pass9: C8B7 dominant in gl/egl/vksc; C9B7/C7B7 present */
+#define NV_VIDEO_CLASS_NVENC_C9B7        0x0000C9B7
+#define NV_VIDEO_CLASS_NVENC_C8B7        0x0000C8B7
+#define NV_VIDEO_CLASS_NVENC_C7B7        0x0000C7B7
 
 #define NV_NVDEC_SET_OBJECT              0x0000
 #define NV_NVDEC_NOP                     0x0100
@@ -68,9 +78,14 @@ extern "C" {
 static inline uint32_t
 nv_video_pick_nvdec_class(uint8_t sm_version)
 {
+   /* Prefer newest class in pass9 ladder; RmAlloc ladder tries alternates. */
    if (sm_version >= 0x90)
-      return NV_VIDEO_CLASS_NVDEC_HOPPER_C7;
+      return NV_VIDEO_CLASS_NVDEC_C9B0;
    if (sm_version >= 0x89)
+      return NV_VIDEO_CLASS_NVDEC_C8B0;
+   if (sm_version >= 0x87)
+      return NV_VIDEO_CLASS_NVDEC_HOPPER_C7;
+   if (sm_version >= 0x86)
       return NV_VIDEO_CLASS_NVDEC_ADA_C4;
    if (sm_version >= 0x80)
       return NV_VIDEO_CLASS_NVDEC_AMPERE_C1;
@@ -84,8 +99,10 @@ nv_video_pick_nvdec_class(uint8_t sm_version)
 static inline uint32_t
 nv_video_pick_nvenc_class(uint8_t sm_version)
 {
+   if (sm_version >= 0x90)
+      return NV_VIDEO_CLASS_NVENC_C9B7;
    if (sm_version >= 0x80)
-      return NV_VIDEO_CLASS_NVENC_AMPERE_C1B7;
+      return NV_VIDEO_CLASS_NVENC_C8B7;
    if (sm_version >= 0x70)
       return NV_VIDEO_CLASS_NVENC_TURING_C0B7;
    return NV_VIDEO_CLASS_NVENC_PASCAL_B4B7;

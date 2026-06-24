@@ -10,6 +10,7 @@
 #include "nv_push.h"
 #include "nv_qmd.h"
 #include "nv_rm.h"
+#include "nv_video_methods.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -172,6 +173,12 @@ nv_channel_try_schedule(struct nv_channel *ch)
 #ifndef NV_CH_FALLBACK_3D
 #define NV_CH_FALLBACK_3D       0x0000c997u  /* pass8: C997 in glcore ladder */
 #endif
+#ifndef NV_CH_FALLBACK_NVDEC
+#define NV_CH_FALLBACK_NVDEC    0x0000c7b0u  /* pass9: C7B0 hopper-ish / vdpau C9B0..C4B0 */
+#endif
+#ifndef NV_CH_FALLBACK_NVENC
+#define NV_CH_FALLBACK_NVENC    0x0000c8b7u  /* pass9: C8B7 dominant in glcore/egl/vksc */
+#endif
 
 int
 nv_channel_add_userd_slot(struct nv_channel *ch, volatile void *userd_map)
@@ -251,6 +258,32 @@ nv_channel_resolve_class_3d(const struct nv_channel *ch, uint32_t explicit_class
    if (ch && ch->info && ch->info->class_3d)
       return ch->info->class_3d;
    return NV_CH_FALLBACK_3D;
+}
+
+uint32_t
+nv_channel_resolve_class_nvdec(const struct nv_channel *ch,
+                               uint32_t explicit_class)
+{
+   if (explicit_class)
+      return explicit_class;
+   if (ch && ch->class_nvdec_bound)
+      return ch->class_nvdec_bound;
+   if (ch && ch->info && ch->info->class_nvdec)
+      return ch->info->class_nvdec;
+   return NV_CH_FALLBACK_NVDEC;
+}
+
+uint32_t
+nv_channel_resolve_class_nvenc(const struct nv_channel *ch,
+                               uint32_t explicit_class)
+{
+   if (explicit_class)
+      return explicit_class;
+   if (ch && ch->class_nvenc_bound)
+      return ch->class_nvenc_bound;
+   if (ch && ch->info && ch->info->class_nvenc)
+      return ch->info->class_nvenc;
+   return NV_CH_FALLBACK_NVENC;
 }
 
 struct nv_channel *
@@ -628,6 +661,18 @@ nv_channel_destroy(struct nv_channel *ch)
          if (hp)
             nv_rm_free_object(ch->rm, hp, ch->h_obj_3d);
       }
+      if (ch->h_obj_nvdec) {
+         uint32_t hp = ch->h_obj_nvdec_parent ? ch->h_obj_nvdec_parent
+                                              : ch->h_channel;
+         if (hp)
+            nv_rm_free_object(ch->rm, hp, ch->h_obj_nvdec);
+      }
+      if (ch->h_obj_nvenc) {
+         uint32_t hp = ch->h_obj_nvenc_parent ? ch->h_obj_nvenc_parent
+                                              : ch->h_channel;
+         if (hp)
+            nv_rm_free_object(ch->rm, hp, ch->h_obj_nvenc);
+      }
       if (ch->h_channel) {
          uint32_t h_parent = ch->h_channel_group ? ch->h_channel_group : h_dev;
          nv_rm_free_object(ch->rm, h_parent, ch->h_channel);
@@ -733,15 +778,18 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    (void)ch;
    return -ENOSYS;
 #else
-   uint32_t cc, ccomp, c3;
+   uint32_t cc, ccomp, c3, cdec, cenc;
    /* Newest-first ladders (610.43.02 binary RE + OGKM); prefer refined/bound first */
    uint32_t copy_alts[12];
    uint32_t compute_alts[12];
    uint32_t t3d_alts[12];
-   unsigned n_copy = 12, n_comp = 12, n_3d = 12;
+   uint32_t nvdec_alts[12];
+   uint32_t nvenc_alts[12];
+   unsigned n_copy = 12, n_comp = 12, n_3d = 12, n_dec = 12, n_enc = 12;
    int any_ok = 0;
    int last_fail = 0;
    unsigned ai;
+   bool want_video;
 
    if (!ch || !ch->rm || !ch->h_channel)
       return -EINVAL;
@@ -753,10 +801,14 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    cc = 0;
    ccomp = 0;
    c3 = 0;
+   cdec = 0;
+   cenc = 0;
    if (ch->info) {
       cc = ch->info->class_copy;
       ccomp = ch->info->class_compute;
       c3 = ch->info->class_3d;
+      cdec = ch->info->class_nvdec;
+      cenc = ch->info->class_nvenc;
    }
    if (!cc)
       cc = NV_CH_FALLBACK_COPY;
@@ -764,6 +816,10 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
       ccomp = NV_CH_FALLBACK_COMPUTE;
    if (!c3)
       c3 = NV_CH_FALLBACK_3D;
+   if (!cdec)
+      cdec = NV_CH_FALLBACK_NVDEC;
+   if (!cenc)
+      cenc = NV_CH_FALLBACK_NVENC;
 
    n_copy = sizeof(copy_alts) / sizeof(copy_alts[0]);
    nv_device_info_fill_class_ladder(2, cc, copy_alts, &n_copy);
@@ -771,6 +827,16 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
    nv_device_info_fill_class_ladder(1, ccomp, compute_alts, &n_comp);
    n_3d = sizeof(t3d_alts) / sizeof(t3d_alts[0]);
    nv_device_info_fill_class_ladder(0, c3, t3d_alts, &n_3d);
+   n_dec = sizeof(nvdec_alts) / sizeof(nvdec_alts[0]);
+   nv_device_info_fill_class_ladder(3, cdec, nvdec_alts, &n_dec);
+   n_enc = sizeof(nvenc_alts) / sizeof(nvenc_alts[0]);
+   nv_device_info_fill_class_ladder(4, cenc, nvenc_alts, &n_enc);
+
+   /* Video engines: try when classlist/info says present, or NVDEC/NVENC engine type */
+   want_video = (ch->info && (ch->info->has_video_decode || ch->info->has_video_encode)) ||
+                (ch->engine_type == NV2080_ENGINE_TYPE_NVDEC0) ||
+                (ch->engine_type == NV2080_ENGINE_TYPE_NVENC0) ||
+                (ch->engine_type == NV2080_ENGINE_TYPE_NVENC1);
 
    if (!ch->h_obj_copy) {
       uint32_t tried[16];
@@ -862,6 +928,61 @@ nv_channel_ensure_engine_objects(struct nv_channel *ch)
       }
    } else {
       any_ok = 1;
+   }
+
+   /* tick89: best-effort NVDEC/NVENC RmAlloc (non-fatal if GPU lacks engines) */
+   if (want_video && !ch->h_obj_nvdec) {
+      uint32_t tried[16];
+      unsigned nt = 0;
+      for (ai = 0; ai < n_dec; ai++) {
+         uint32_t cl = nvdec_alts[ai];
+         uint32_t h = 0;
+         unsigned t;
+         int r;
+         if (!cl)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cl)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 16)
+            tried[nt++] = cl;
+         r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_nvdec_parent);
+         if (r == 0 && h) {
+            ch->h_obj_nvdec = h;
+            ch->class_nvdec_bound = cl;
+            any_ok = 1;
+            break;
+         }
+      }
+   }
+
+   if (want_video && !ch->h_obj_nvenc) {
+      uint32_t tried[16];
+      unsigned nt = 0;
+      for (ai = 0; ai < n_enc; ai++) {
+         uint32_t cl = nvenc_alts[ai];
+         uint32_t h = 0;
+         unsigned t;
+         int r;
+         if (!cl)
+            continue;
+         for (t = 0; t < nt; t++)
+            if (tried[t] == cl)
+               break;
+         if (t < nt)
+            continue;
+         if (nt < 16)
+            tried[nt++] = cl;
+         r = nv_channel_try_alloc_engine(ch, cl, &h, &ch->h_obj_nvenc_parent);
+         if (r == 0 && h) {
+            ch->h_obj_nvenc = h;
+            ch->class_nvenc_bound = cl;
+            any_ok = 1;
+            break;
+         }
+      }
    }
 
    /*

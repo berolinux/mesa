@@ -49,12 +49,18 @@ struct nv_channel {
    uint32_t h_obj_copy;            /* DMA copy class (e.g. AMPERE_DMA_COPY_A) */
    uint32_t h_obj_compute;         /* compute class */
    uint32_t h_obj_3d;              /* 3D class */
+   uint32_t h_obj_nvdec;           /* NVDEC video decode (tick89; optional) */
+   uint32_t h_obj_nvenc;           /* NVENC video encode (tick89; optional) */
    uint32_t h_obj_copy_parent;     /* RM parent used for alloc (for correct free) */
    uint32_t h_obj_compute_parent;
    uint32_t h_obj_3d_parent;
+   uint32_t h_obj_nvdec_parent;
+   uint32_t h_obj_nvenc_parent;
    uint32_t class_copy_bound;      /* class ID used for h_obj_copy alloc (0 if none) */
    uint32_t class_compute_bound;
    uint32_t class_3d_bound;
+   uint32_t class_nvdec_bound;
+   uint32_t class_nvenc_bound;
    int engine_alloc_rc;            /* 0 ok, negative if all engine allocs failed */
    uint32_t engine_type;
    uint32_t gpfifo_class;
@@ -138,6 +144,10 @@ uint32_t nv_channel_resolve_class_compute(const struct nv_channel *ch,
                                           uint32_t explicit_class);
 uint32_t nv_channel_resolve_class_3d(const struct nv_channel *ch,
                                      uint32_t explicit_class);
+uint32_t nv_channel_resolve_class_nvdec(const struct nv_channel *ch,
+                                        uint32_t explicit_class);
+uint32_t nv_channel_resolve_class_nvenc(const struct nv_channel *ch,
+                                        uint32_t explicit_class);
 
 /** Begin recording methods into the pushbuffer; returns pointer to write at */
 uint32_t *
