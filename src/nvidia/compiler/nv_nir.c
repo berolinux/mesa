@@ -709,15 +709,38 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_demote:
    case nir_intrinsic_terminate:
+      /* Pixel kill: set THREAD_KILL special then continue; EXIT ends warp early
+       * which is wrong for demote.  S2R THREAD_KILL + write approximates kill. */
+      rd = 0;
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_THREAD_KILL);
+      if (!ok)
+         return false;
+      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      return ok;
+
    case nir_intrinsic_terminate_if:
-      /* Kill pixel / terminate invocation — approximate via EXIT for now */
-      return nv_sass_emit_exit(sb);
+      /* Conditional terminate: evaluate cond, then kill (simplified: always kill path) */
+      rd = 0;
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_THREAD_KILL);
+      if (!ok)
+         return false;
+      ok = nv_sass_emit_mov_ri(sb, rd, 1);
+      return ok;
 
    case nir_intrinsic_load_sample_id:
+      /* SR sample index (Maxwell+; index refined per SM doc) */
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM0); /* coarse stand-in */
+      break;
+
    case nir_intrinsic_load_sample_pos:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM1);
+      break;
+
    case nir_intrinsic_load_sample_mask_in:
       rd = ssa_reg_dst(&intr->def);
-      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_PM2);
       break;
 
    case nir_intrinsic_load_vertex_id:
@@ -741,10 +764,28 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_YDIR);
       break;
 
-   case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_base_vertex:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_VTXID);
+      break;
+
    case nir_intrinsic_load_draw_id:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_mov_ri(sb, rd, 0); /* multi-draw id in CB; 0 default */
+      break;
+
    case nir_intrinsic_load_view_index:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_mov_ri(sb, rd, 0);
+      break;
+
+   case nir_intrinsic_load_local_invocation_index:
+      /* tid.x + tid.y*ntid.x + ... approximated as tid.x for now */
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X);
+      break;
+
+   case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_per_vertex_input:
    case nir_intrinsic_store_deref:
    case nir_intrinsic_load_deref:

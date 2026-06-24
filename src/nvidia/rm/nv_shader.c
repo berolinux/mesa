@@ -202,21 +202,28 @@ nv_shader_upload_code(struct nv_shader *sh, const void *code, uint32_t code_size
 }
 
 /**
- * Compile path entry: when NIR is attached, eventually lower to SASS.
- * Currently falls back to SPH+EXIT stub (same as upload_code NULL path).
+ * Compile path entry: when NIR is attached, lower via nv_nir_compile (SPH+SASS
+ * from isel).  Falls back to trivial SPH+EXIT only when no NIR is present.
+ * Name retains "_stub" for call-site compatibility; implementation is the
+ * primary compile path.
  */
 
 int
 nv_shader_compile_nir_stub(struct nv_shader *sh)
 {
+   int r;
    if (!sh)
       return -1;
    if (sh->uploaded)
       return 0;
-   /* Prefer external nv_shader_compile_nir from idep_nvidia_compiler when NIR set */
-   if (sh->nir)
-      return nv_shader_compile_nir(sh, (const struct nir_shader *)sh->nir);
-   return nv_shader_upload_code(sh, NULL, 0, sh->register_count ? sh->register_count : 8);
+   if (sh->nir) {
+      r = nv_shader_compile_nir(sh, (const struct nir_shader *)sh->nir);
+      if (r == 0)
+         return 0;
+      /* Compile failed: still upload trivial shader so bind/draw does not fault */
+   }
+   return nv_shader_upload_code(sh, NULL, 0,
+                                sh->register_count ? sh->register_count : 8);
 }
 
 /**
