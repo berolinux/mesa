@@ -127,6 +127,9 @@ struct nvrm_cmd_buffer {
    struct nv_rm_bo *push_const_bo; /* GPU CB for VkCmdPushConstants upload */
    void *push_const_map;      /* CPU map of push_const_bo (optional mirror) */
    uint32_t push_const_bo_size;
+   struct nv_rm_bo *indirect_shadow_bo; /* host-mappable CE target for indirect draws */
+   void *indirect_shadow_map;
+   uint32_t indirect_shadow_bo_size;
    uint32_t lmem_bo_size;     /* allocated size of lmem_bo */
    uint32_t lmem_local_req;   /* max per-thread local (from bound compute shader) */
    bool lmem_programmed;      /* SET_SHADER_LOCAL_MEMORY* already emitted */
@@ -142,6 +145,7 @@ struct nvrm_cmd_buffer {
    bool in_render_pass;
    uint32_t render_width;
    uint32_t render_height;
+   uint32_t render_color_count; /* active MRT count in current pass */
    /* Default local workgroup size when pipeline does not specify */
    uint32_t compute_local_x, compute_local_y, compute_local_z;
    /* Bound descriptor sets (graphics + compute share slots; bind point tracked) */
@@ -236,6 +240,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nvrm_BeginCommandBuffer(VkCommandBuffer commandBu
 VKAPI_ATTR VkResult VKAPI_CALL nvrm_EndCommandBuffer(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                                                     const VkDependencyInfo *pDependencyInfo);
+VKAPI_ATTR void VKAPI_CALL nvrm_CmdClearAttachments(VkCommandBuffer commandBuffer,
+                                                   uint32_t attachmentCount,
+                                                   const VkClearAttachment *pAttachments,
+                                                   uint32_t rectCount,
+                                                   const VkClearRect *pRects);
 VKAPI_ATTR void VKAPI_CALL nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image,
                                                    VkImageLayout imageLayout,
                                                    const VkClearColorValue *pColor,

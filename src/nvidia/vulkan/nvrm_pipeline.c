@@ -338,6 +338,36 @@ vk_format_to_ct_format(VkFormat fmt)
    case VK_FORMAT_R32_UINT:
    case VK_FORMAT_R32_SINT:
       return NVC597_SET_COLOR_TARGET_FORMAT_V_R32;
+   case VK_FORMAT_R8_UNORM:
+   case VK_FORMAT_R8_UINT:
+   case VK_FORMAT_R8_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R8;
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16_SFLOAT:
+   case VK_FORMAT_R16_UINT:
+   case VK_FORMAT_R16_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R16;
+   case VK_FORMAT_R16G16_UNORM:
+   case VK_FORMAT_R16G16_SFLOAT:
+   case VK_FORMAT_R16G16_UINT:
+   case VK_FORMAT_R16G16_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R16_G16;
+   case VK_FORMAT_R32G32_SFLOAT:
+   case VK_FORMAT_R32G32_UINT:
+   case VK_FORMAT_R32G32_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32;
+   case VK_FORMAT_R8G8_UNORM:
+   case VK_FORMAT_R8G8_UINT:
+   case VK_FORMAT_R8G8_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R8_G8;
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+   case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_A2B10G10R10;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_RF11_GF11_BF10;
+   case VK_FORMAT_R8G8B8A8_UINT:
+   case VK_FORMAT_R8G8B8A8_SINT:
+      return NVC597_SET_COLOR_TARGET_FORMAT_V_R8_G8_B8_A8;
    default:
       return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
    }
@@ -1906,6 +1936,7 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
    cmd->render_width = w;
    cmd->render_height = h;
    cmd->in_render_pass = true;
+   cmd->render_color_count = pRenderingInfo->colorAttachmentCount;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2057,11 +2088,48 @@ nvrm_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
  * Path A: indirect BO is host-mappable — read each command at record time and
  * emit normal instanced draws (correct and matches compute indirect path A).
  *
- * Path B: GPU-only BO — emit a single draw with conservative defaults; a full
- * GPU indirect path would need a 3D class indirect method or a CE-patched
- * method stream.  We still honour drawCount by emitting drawCount draws with
- * the same fallback params so the command stream length is representative.
+ * Path B: GPU-only BO — CE-copy indirect records into cmd->indirect_shadow_bo
+ * (host-mappable), then read counts from the shadow.  Requires the shadow to
+ * have been populated by a prior submit when the indirect BO was written on
+ * the GPU; at pure record time without GPU execution the shadow may be stale
+ * (zero counts).  Still better than always emitting zero when map fails.
  */
+
+/* Path B: if indirect BO is not host-mappable, CE-copy into indirect_shadow_bo
+ * and return a CPU pointer into the shadow map (or NULL if shadow unavailable).
+ * Emits CE methods into the command buffer; caller must not unmap shadow BO. */
+static const uint32_t *
+nvrm_indirect_path_b_shadow(struct nvrm_cmd_buffer *cmd,
+                            struct nvrm_buffer *buf,
+                            VkDeviceSize offset,
+                            uint32_t need_bytes,
+                            void **unmap_cookie)
+{
+   const struct nv_device_info *info;
+   uint64_t src_addr, dst_addr;
+   uint32_t class_copy;
+   uint32_t copy_size;
+
+   *unmap_cookie = NULL;
+   if (!cmd || !buf || !buf->bo || !cmd->indirect_shadow_bo ||
+       !cmd->indirect_shadow_map || !need_bytes)
+      return NULL;
+
+   copy_size = need_bytes;
+   if (copy_size > cmd->indirect_shadow_bo_size)
+      copy_size = cmd->indirect_shadow_bo_size;
+
+   info = cmd->device ? cmd->device->info : NULL;
+   class_copy = info ? info->class_copy : 0;
+   src_addr = nv_rm_bo_gpu_offset(buf->bo) + (uint64_t)offset;
+   dst_addr = nv_rm_bo_gpu_offset(cmd->indirect_shadow_bo);
+
+   nv_copy_indirect_to_shadow(&cmd->push, class_copy, src_addr, dst_addr,
+                              copy_size);
+   /* Shadow is persistently mapped; no unmap on caller side */
+   return (const uint32_t *)cmd->indirect_shadow_map;
+}
+
 static const uint32_t *
 nvrm_try_map_indirect_u32(struct nvrm_buffer *buf, VkDeviceSize offset,
                           uint32_t need_bytes, void **unmap_cookie)
@@ -2107,6 +2175,9 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
 
    base = nvrm_try_map_indirect_u32(buf, offset,
                                     rec_stride * drawCount, &unmap);
+   if (!base && buf)
+      base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
+                                         rec_stride * drawCount, &unmap);
    for (d = 0; d < drawCount; d++) {
       uint32_t vertex_count = 0, instance_count = 1;
       uint32_t first_vertex = 0, first_instance = 0;
@@ -2156,6 +2227,9 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    if (buf)
       base = nvrm_try_map_indirect_u32(buf, offset,
                                        rec_stride * drawCount, &unmap);
+   if (!base && buf)
+      base = nvrm_indirect_path_b_shadow(cmd, buf, offset,
+                                         rec_stride * drawCount, &unmap);
    for (d = 0; d < drawCount; d++) {
       uint32_t index_count = 0, instance_count = 1;
       uint32_t first_index = 0, first_instance = 0;

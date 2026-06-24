@@ -107,6 +107,23 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
             memset(cmd->push_const_map, 0, NVRM_PUSH_CONST_BO_SIZE);
       }
    }
+
+   /* Host-mappable shadow for indirect draw path B (CE copies GPU-only IB) */
+   if (!cmd->indirect_shadow_bo && cmd->device && cmd->device->rm) {
+      memset(&req, 0, sizeof(req));
+      req.size = 4096; /* many indirect draw records (16/20 B each) */
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      cmd->indirect_shadow_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
+      if (cmd->indirect_shadow_bo) {
+         cmd->indirect_shadow_bo_size = 4096;
+         cmd->indirect_shadow_map = nv_rm_bo_map(cmd->indirect_shadow_bo);
+      }
+   }
+
    cmd->push_dw_used = 0;
    cmd->compute_init_done = false;
    cmd->lmem_programmed = false;
@@ -178,9 +195,63 @@ nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image,
    if (!cmd->push_map)
       return;
 
-   /* Colour-only CLEAR_SURFACE via NVC597 methods (render targets must be
-    * programmed separately; this records the clear values + CLEAR_SURFACE). */
-   nv_3d_push_clear(&cmd->push, class_3d, 0x10 /* PIPE_CLEAR_COLOR0 */, c, 0.0f, 0);
+   /* Colour clear: if inside a multi-RT render pass, clear all active MRTs
+    * with the same colour; otherwise target 0 only. */
+   {
+      unsigned buffers = 0x10;
+      unsigned mrt = cmd->render_color_count ? cmd->render_color_count : 1;
+      unsigned i;
+      for (i = 0; i < mrt && i < 8; i++)
+         buffers |= (0x10u << i);
+      if (mrt > 1)
+         nv_3d_push_clear_multi(&cmd->push, class_3d, buffers, c, 0.0f, 0, mrt);
+      else
+         nv_3d_push_clear(&cmd->push, class_3d, 0x10, c, 0.0f, 0);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+nvrm_CmdClearAttachments(VkCommandBuffer commandBuffer,
+                         uint32_t attachmentCount,
+                         const VkClearAttachment *pAttachments,
+                         uint32_t rectCount,
+                         const VkClearRect *pRects)
+{
+   VK_FROM_HANDLE(nvrm_cmd_buffer, cmd, commandBuffer);
+   const struct nv_device_info *info = cmd->device ? cmd->device->info : NULL;
+   uint32_t class_3d = info ? info->class_3d : 0;
+   uint32_t a;
+
+   (void)rectCount;
+   (void)pRects;
+
+   if (!cmd->push_map || !pAttachments || !attachmentCount)
+      return;
+
+   if (class_3d)
+      nv_3d_set_object(&cmd->push, class_3d);
+   else
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+
+   for (a = 0; a < attachmentCount; a++) {
+      const VkClearAttachment *att = &pAttachments[a];
+      if (att->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+         const uint32_t *c = att->clearValue.color.uint32;
+         unsigned ti = att->colorAttachment & 7u;
+         nv_3d_emit_clear_surface_mrt(&cmd->push, ti, c, true, true, true, true);
+      }
+      if (att->aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+         unsigned buffers = 0;
+         if (att->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+            buffers |= 0x100;
+         if (att->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+            buffers |= 0x200;
+         nv_3d_emit_clear_surface(&cmd->push, buffers, NULL,
+                                  att->clearValue.depthStencil.depth,
+                                  att->clearValue.depthStencil.stencil);
+      }
+   }
+   nv_push_wfi(&cmd->push);
 }
 
 /* Bind a pre-uploaded nv_shader to the graphics pipeline (helper for pipeline

@@ -89,6 +89,7 @@ nvrm_init_entrypoints(void)
    NVRM_SET(CmdCopyBufferToImage2, nvrm_CmdCopyBufferToImage2);
    NVRM_SET(CmdCopyImageToBuffer2, nvrm_CmdCopyImageToBuffer2);
    NVRM_SET(CmdClearColorImage, nvrm_CmdClearColorImage);
+   NVRM_SET(CmdClearAttachments, nvrm_CmdClearAttachments);
    NVRM_SET(CmdPipelineBarrier2, nvrm_CmdPipelineBarrier2);
    NVRM_SET(QueueSubmit2, nvrm_QueueSubmit2);
    NVRM_SET(QueuePresentKHR, nvrm_QueuePresent2);
