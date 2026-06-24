@@ -2,7 +2,7 @@
 
 libnvidia_compiler = static_library(
   'nvidia_compiler',
-  files('nv_nir.c', 'nv_nir_shader.c', 'nv_sass.c'),
+  files('nv_nir.c', 'nv_nir_shader.c', 'nv_sass.c', 'nv_ra.c'),
   include_directories : [
     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     include_directories('../../compiler'),

@@ -16,6 +16,7 @@
 
 #include "nv_nir.h"
 #include "nv_sass.h"
+#include "nv_ra.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,23 +61,30 @@ stage_to_sph_type(enum nv_compiler_stage stage)
 
 #if NV_HAVE_NIR
 
-/* Trivial RA: map SSA index to hardware register 1..N (R0 reserved for RZ-like) */
+/* Active RA context for the shader being compiled (set in isel_shader). */
+static struct nv_ra_context *nv_isel_ra;
+
 static uint8_t
 ssa_reg(nir_def *def)
 {
    if (!def)
-      return 0;
-   unsigned idx = def->index + 1;
-   if (idx > 254)
-      idx = 254;
-   return (uint8_t)idx;
+      return NV_RA_HW_RZ;
+   if (nv_isel_ra)
+      return nv_ra_reg_for_def(nv_isel_ra, def);
+   /* Fallback without RA: identity on SSA index */
+   {
+      unsigned idx = def->index + 1;
+      if (idx > 254)
+         idx = 254;
+      return (uint8_t)idx;
+   }
 }
 
 static uint8_t
 src_reg(nir_src *src)
 {
    if (!src || !src->ssa)
-      return 0;
+      return NV_RA_HW_RZ;
    return ssa_reg(src->ssa);
 }
 
@@ -457,10 +465,22 @@ isel_instr(struct nv_sass_buf *sb, nir_instr *instr)
 }
 
 static bool
-isel_shader(struct nv_sass_buf *sb, const nir_shader *nir)
+isel_shader(struct nv_sass_buf *sb, const nir_shader *nir,
+            struct nv_ra_context *ra)
 {
-   if (!nir)
+   struct nv_ra_context *prev_ra = nv_isel_ra;
+
+   if (!nir) {
+      nv_isel_ra = prev_ra;
       return nv_sass_emit_exit(sb);
+   }
+
+   if (ra) {
+      nv_ra_allocate(ra, nir);
+      nv_isel_ra = ra;
+   } else {
+      nv_isel_ra = NULL;
+   }
 
    nir_foreach_function (func, nir) {
       if (!func->impl)
@@ -468,12 +488,15 @@ isel_shader(struct nv_sass_buf *sb, const nir_shader *nir)
       nir_index_ssa_defs(func->impl);
       nir_foreach_block (block, func->impl) {
          nir_foreach_instr (instr, block) {
-            if (!isel_instr(sb, instr))
+            if (!isel_instr(sb, instr)) {
+               nv_isel_ra = prev_ra;
                return false;
+            }
          }
       }
    }
 
+   nv_isel_ra = prev_ra;
    return nv_sass_emit_exit(sb);
 }
 
@@ -568,6 +591,7 @@ nv_nir_compile(const struct nir_shader *nir,
    struct nv_sph_info info;
    struct nv_compiler_options def_opts;
    struct nv_sass_buf sass;
+   struct nv_ra_context ra;
    uint16_t regs = 8;
    uint8_t sph_type;
    unsigned num_instr = 0, num_blocks = 0;
@@ -580,6 +604,7 @@ nv_nir_compile(const struct nir_shader *nir,
       return false;
    memset(out, 0, sizeof(*out));
    nv_sass_buf_init(&sass);
+   nv_ra_context_init(&ra);
 
    if (!opts) {
       memset(&def_opts, 0, sizeof(def_opts));
@@ -599,11 +624,13 @@ nv_nir_compile(const struct nir_shader *nir,
                  (unsigned)opts->stage, num_instr, num_blocks,
                  (int)has_tex, (int)has_store, (unsigned)regs);
 
-      if (!isel_shader(&sass, nir)) {
+      if (!isel_shader(&sass, nir, &ra)) {
          snprintf(out->error, sizeof(out->error), "SASS isel OOM");
          nv_sass_buf_finish(&sass);
+         nv_ra_context_finish(&ra);
          return false;
       }
+      regs = nv_ra_register_count(&ra, opts->min_registers ? opts->min_registers : 8);
       if (sass.max_reg > regs)
          regs = sass.max_reg;
       if (sass.has_global_store)
@@ -652,6 +679,7 @@ nv_nir_compile(const struct nir_shader *nir,
    if (!code) {
       snprintf(out->error, sizeof(out->error), "OOM");
       nv_sass_buf_finish(&sass);
+      nv_ra_context_finish(&ra);
       return false;
    }
    memcpy(code, out->blob.sph, NV_SPH_BYTES);
@@ -666,6 +694,7 @@ nv_nir_compile(const struct nir_shader *nir,
    out->local_mem_size = 0;
    out->success = true;
    nv_sass_buf_finish(&sass);
+   nv_ra_context_finish(&ra);
    return true;
 }
 
