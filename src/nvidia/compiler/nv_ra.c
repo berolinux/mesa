@@ -50,11 +50,38 @@ nv_ra_register_count(const struct nv_ra_context *ra, uint16_t min_regs)
    uint16_t n = min_regs ? min_regs : 8;
    if (ra && ra->max_hw_reg > n)
       n = ra->max_hw_reg;
+   /* Reserve R254 as spill temp when any spill occurred */
+   if (ra && ra->had_spill && n < NV_RA_SPILL_TMP_REG + 1)
+      n = NV_RA_SPILL_TMP_REG + 1;
    if (n < 4)
       n = 4;
    if (n > 255)
       n = 255;
    return n;
+}
+
+bool
+nv_ra_def_spilled(const struct nv_ra_context *ra, const struct nir_def *def)
+{
+   unsigned idx;
+   if (!ra || !def)
+      return false;
+   idx = def->index;
+   if (idx >= NV_RA_MAX_SSA || !ra->live[idx].active)
+      return false;
+   return ra->live[idx].spilled;
+}
+
+uint16_t
+nv_ra_def_spill_slot(const struct nv_ra_context *ra, const struct nir_def *def)
+{
+   unsigned idx;
+   if (!ra || !def)
+      return 0xffff;
+   idx = def->index;
+   if (idx >= NV_RA_MAX_SSA || !ra->live[idx].active || !ra->live[idx].spilled)
+      return 0xffff;
+   return ra->live[idx].spill_slot;
 }
 
 #if NV_RA_HAVE_NIR
@@ -137,19 +164,7 @@ scan_instr(struct nv_ra_context *ra, nir_instr *instr, uint32_t pt)
    }
 }
 
-/* Compare SSA indices by live range start (then index) for linear-scan order. */
-static int
-cmp_ssa_by_start(const void *a, const void *b, void *arg)
-{
-   const struct nv_ra_context *ra = arg;
-   unsigned ia = *(const unsigned *)a;
-   unsigned ib = *(const unsigned *)b;
-   if (ra->live[ia].start != ra->live[ib].start)
-      return (int)ra->live[ia].start - (int)ra->live[ib].start;
-   return (int)ia - (int)ib;
-}
-
-/* qsort_r style not portable; simple insertion sort on order[] (num_ssa small). */
+/* Insertion sort on order[] by live range start (then SSA index). */
 static void
 sort_ssa_by_start(struct nv_ra_context *ra, unsigned *order, unsigned n)
 {
@@ -174,8 +189,7 @@ assign_registers(struct nv_ra_context *ra)
 {
    /* Linear scan in live-range start order: at each interval, expire ended
     * ranges (free their regs) then assign lowest free hw reg; if pressure
-    * exceeds HW_LAST, mark spill and assign a spill slot (compiler may emit
-    * LDG/STG to local/spill mem in a later pass). */
+    * would touch R254 (spill temp), mark spill slot instead. */
    unsigned i, k;
    unsigned order[NV_RA_MAX_SSA];
    unsigned n_active = 0;
@@ -214,19 +228,17 @@ assign_registers(struct nv_ra_context *ra)
          }
       }
 
-      /* Find lowest free register */
-      for (pick = NV_RA_HW_FIRST; pick <= NV_RA_HW_LAST; pick++) {
+      /* Find lowest free register strictly below spill temp */
+      for (pick = NV_RA_HW_FIRST; pick < NV_RA_SPILL_TMP_REG; pick++) {
          if (!used[pick])
             break;
       }
 
-      if (pick > NV_RA_HW_LAST) {
-         /* Spill: keep a pseudo-reg id for isel (RZ stand-in + spill flag) */
+      if (pick >= NV_RA_SPILL_TMP_REG) {
          ra->live[idx].spilled = true;
          ra->live[idx].spill_slot = ra->spill_count++;
-         ra->live[idx].hw_reg = NV_RA_HW_RZ; /* force isel via spill path later */
+         ra->live[idx].hw_reg = NV_RA_HW_RZ;
          ra->had_spill = true;
-         /* Still track as active for liveness completeness */
          if (n_active_list < 256)
             active_list[n_active_list++] = idx;
          continue;
@@ -240,7 +252,8 @@ assign_registers(struct nv_ra_context *ra)
       if (n_active_list < 256)
          active_list[n_active_list++] = idx;
    }
-   (void)cmp_ssa_by_start;
+   if (ra->had_spill && ra->max_hw_reg < NV_RA_SPILL_TMP_REG + 1)
+      ra->max_hw_reg = NV_RA_SPILL_TMP_REG + 1;
 }
 
 bool

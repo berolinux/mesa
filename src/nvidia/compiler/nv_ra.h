@@ -62,6 +62,34 @@ nv_ra_had_spill(const struct nv_ra_context *ra)
    return ra && ra->had_spill;
 }
 
+/** Spill slot count (each slot is 4 bytes in the per-thread local spill area). */
+static inline uint16_t
+nv_ra_spill_count(const struct nv_ra_context *ra)
+{
+   return ra ? ra->spill_count : 0;
+}
+
+/** Bytes of local memory needed for spill slots (aligned to 16B). */
+static inline uint32_t
+nv_ra_spill_local_bytes(const struct nv_ra_context *ra)
+{
+   uint32_t n = ra ? (uint32_t)ra->spill_count * 4u : 0;
+   return (n + 15u) & ~15u;
+}
+
+/** True if this SSA def was spilled (hw_reg may be RZ; use spill path). */
+bool nv_ra_def_spilled(const struct nv_ra_context *ra, const struct nir_def *def);
+
+/** Spill slot index for a spilled def (0..spill_count-1); 0xffff if not spilled. */
+uint16_t nv_ra_def_spill_slot(const struct nv_ra_context *ra,
+                              const struct nir_def *def);
+
+/**
+ * Scratch HW register reserved for spill/reload temporaries (last usable GPR
+ * below RZ).  Isel uses this for address/data around LDG/STG of spill slots.
+ */
+#define NV_RA_SPILL_TMP_REG  254
+
 #ifdef __cplusplus
 }
 #endif
