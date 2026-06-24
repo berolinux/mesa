@@ -137,41 +137,110 @@ scan_instr(struct nv_ra_context *ra, nir_instr *instr, uint32_t pt)
    }
 }
 
+/* Compare SSA indices by live range start (then index) for linear-scan order. */
+static int
+cmp_ssa_by_start(const void *a, const void *b, void *arg)
+{
+   const struct nv_ra_context *ra = arg;
+   unsigned ia = *(const unsigned *)a;
+   unsigned ib = *(const unsigned *)b;
+   if (ra->live[ia].start != ra->live[ib].start)
+      return (int)ra->live[ia].start - (int)ra->live[ib].start;
+   return (int)ia - (int)ib;
+}
+
+/* qsort_r style not portable; simple insertion sort on order[] (num_ssa small). */
+static void
+sort_ssa_by_start(struct nv_ra_context *ra, unsigned *order, unsigned n)
+{
+   unsigned i, j;
+   for (i = 1; i < n; i++) {
+      unsigned key = order[i];
+      j = i;
+      while (j > 0) {
+         unsigned prev = order[j - 1];
+         if (ra->live[prev].start < ra->live[key].start ||
+             (ra->live[prev].start == ra->live[key].start && prev < key))
+            break;
+         order[j] = prev;
+         j--;
+      }
+      order[j] = key;
+   }
+}
+
 static void
 assign_registers(struct nv_ra_context *ra)
 {
-   /* Greedy: for each SSA in index order, pick lowest hw reg not overlapping
-    * an already-assigned live range that interferes. */
-   unsigned i, j;
-   uint8_t next_fresh = NV_RA_HW_FIRST;
+   /* Linear scan in live-range start order: at each interval, expire ended
+    * ranges (free their regs) then assign lowest free hw reg; if pressure
+    * exceeds HW_LAST, mark spill and assign a spill slot (compiler may emit
+    * LDG/STG to local/spill mem in a later pass). */
+   unsigned i, k;
+   unsigned order[NV_RA_MAX_SSA];
+   unsigned n_active = 0;
+   bool used[256];
+   unsigned active_list[256];
+   unsigned n_active_list = 0;
 
+   n_active = 0;
    for (i = 0; i < ra->num_ssa && i < NV_RA_MAX_SSA; i++) {
-      bool used[256];
-      uint8_t pick = 0;
       if (!ra->live[i].active)
          continue;
-      memset(used, 0, sizeof(used));
-      for (j = 0; j < i; j++) {
-         if (!ra->live[j].active || !ra->live[j].hw_reg)
-            continue;
-         /* interfere if ranges overlap */
-         if (ra->live[i].start <= ra->live[j].end &&
-             ra->live[j].start <= ra->live[i].end)
-            used[ra->live[j].hw_reg] = true;
+      order[n_active++] = i;
+   }
+   if (!n_active)
+      return;
+   sort_ssa_by_start(ra, order, n_active);
+
+   memset(used, 0, sizeof(used));
+   n_active_list = 0;
+
+   for (k = 0; k < n_active; k++) {
+      unsigned idx = order[k];
+      uint32_t cur_start = ra->live[idx].start;
+      uint8_t pick;
+      unsigned a;
+
+      /* Expire intervals that ended before cur_start */
+      for (a = 0; a < n_active_list; ) {
+         unsigned aid = active_list[a];
+         if (ra->live[aid].end < cur_start && ra->live[aid].hw_reg &&
+             !ra->live[aid].spilled) {
+            used[ra->live[aid].hw_reg] = false;
+            active_list[a] = active_list[--n_active_list];
+         } else {
+            a++;
+         }
       }
+
+      /* Find lowest free register */
       for (pick = NV_RA_HW_FIRST; pick <= NV_RA_HW_LAST; pick++) {
          if (!used[pick])
             break;
       }
-      if (pick > NV_RA_HW_LAST)
-         pick = (uint8_t)((i % NV_RA_HW_LAST) + NV_RA_HW_FIRST);
-      ra->live[i].hw_reg = pick;
+
+      if (pick > NV_RA_HW_LAST) {
+         /* Spill: keep a pseudo-reg id for isel (RZ stand-in + spill flag) */
+         ra->live[idx].spilled = true;
+         ra->live[idx].spill_slot = ra->spill_count++;
+         ra->live[idx].hw_reg = NV_RA_HW_RZ; /* force isel via spill path later */
+         ra->had_spill = true;
+         /* Still track as active for liveness completeness */
+         if (n_active_list < 256)
+            active_list[n_active_list++] = idx;
+         continue;
+      }
+
+      ra->live[idx].hw_reg = pick;
+      ra->live[idx].spilled = false;
+      used[pick] = true;
       if (pick + 1 > ra->max_hw_reg)
          ra->max_hw_reg = (uint16_t)(pick + 1);
-      if (pick >= next_fresh)
-         next_fresh = (uint8_t)(pick + 1);
+      if (n_active_list < 256)
+         active_list[n_active_list++] = idx;
    }
-   (void)next_fresh;
+   (void)cmp_ssa_by_start;
 }
 
 bool
@@ -182,6 +251,8 @@ nv_ra_allocate(struct nv_ra_context *ra, const struct nir_shader *nir)
    if (!ra)
       return false;
    nv_ra_context_init(ra);
+   ra->spill_count = 0;
+   ra->had_spill = false;
    if (!nir) {
       ra->ok = true;
       return true;
