@@ -120,6 +120,33 @@ extern "C" {
 #define NV_QMD_CB_SLOT_STRIDE       64
 #define NV_QMD_MAX_CBS              8
 
+
+/** Align shared memory to 256B (QMD SM config chunk size). */
+static inline uint32_t
+nv_qmd_align_shared_mem(uint32_t bytes)
+{
+   if (!bytes)
+      return 0;
+   return (bytes + 255u) & ~255u;
+}
+
+/** Estimate barrier count from workgroup size (conservative; NIR barrier uses BAR.SYNC 0). */
+static inline uint32_t
+nv_qmd_default_barrier_count(uint32_t cta_x, uint32_t cta_y, uint32_t cta_z)
+{
+   uint32_t threads = cta_x * cta_y * cta_z;
+   if (!threads)
+      return 1;
+   /* At least 1 barrier slot; more for large workgroups (warp count / 2, min 1 max 16) */
+   {
+      uint32_t warps = (threads + 31u) / 32u;
+      uint32_t bc = warps > 1 ? (warps / 2) : 1;
+      if (bc < 1) bc = 1;
+      if (bc > 16) bc = 16;
+      return bc;
+   }
+}
+
 struct nv_qmd_desc {
    uint64_t program_addr;       /* GPU VA of shader code (SPH+SASS object) */
    uint32_t program_offset;     /* usually 0 for uploaded object start */
@@ -189,7 +216,7 @@ nv_qmd_encode(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
    regs = d->register_count ? d->register_count : 16;
    if (regs > 255)
       regs = 255;
-   shared = d->shared_mem_size;
+   shared = nv_qmd_align_shared_mem(d->shared_mem_size);
    if (shared > 0xffffu)
       shared = 0xffffu;
 
@@ -258,8 +285,11 @@ nv_qmd_encode(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
               d->local_mem_high & 0xffffffu);
    nv_qmd_set(qmd, NV_QMD_F_SHADER_LOCAL_MEMORY_CRS_SIZE,
               d->local_mem_crs & 0xffffffu);
-   if (d->barrier_count)
-      nv_qmd_set(qmd, NV_QMD_F_BARRIER_COUNT, d->barrier_count & 0x1fu);
+   {
+      uint32_t bc = d->barrier_count ? d->barrier_count
+                     : nv_qmd_default_barrier_count(cta_x, cta_y, cta_z);
+      nv_qmd_set(qmd, NV_QMD_F_BARRIER_COUNT, bc & 0x1fu);
+   }
    if (d->sass_version)
       nv_qmd_set(qmd, NV_QMD_F_SASS_VERSION, d->sass_version);
 
