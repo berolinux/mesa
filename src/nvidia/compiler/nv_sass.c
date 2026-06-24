@@ -528,14 +528,19 @@ nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
 #define NV_SASS_VOTE_MODE_BALLOT 0x2u
 #define NV_SASS_VOTE_MODE_ELECT 0x3u
 
+/* VOTE lo: Rd in [7:0], cond/src predicate in [10:8] after R2P to P0 */
+#define NV_SASS_VOTE_LO(rd, pred) \
+   ((uint32_t)(rd) | (((uint32_t)(pred) & 7u) << 8))
+
 bool
 nv_sass_emit_vote_any(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
 {
    nv_sass_note_reg(b, rd);
    nv_sass_note_reg(b, cond_reg);
+   /* Materialise cond_reg bit0 into P0, then VOTE.ANY -> Rd */
    if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
       return false;
-   return nv_sass_emit_raw(b, (uint32_t)rd,
+   return nv_sass_emit_raw(b, NV_SASS_VOTE_LO(rd, 0),
                            NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_ANY);
 }
 
@@ -546,7 +551,7 @@ nv_sass_emit_vote_all(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
    nv_sass_note_reg(b, cond_reg);
    if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
       return false;
-   return nv_sass_emit_raw(b, (uint32_t)rd,
+   return nv_sass_emit_raw(b, NV_SASS_VOTE_LO(rd, 0),
                            NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_ALL);
 }
 
@@ -557,7 +562,7 @@ nv_sass_emit_vote_ballot(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg)
    nv_sass_note_reg(b, cond_reg);
    if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
       return false;
-   return nv_sass_emit_raw(b, (uint32_t)rd,
+   return nv_sass_emit_raw(b, NV_SASS_VOTE_LO(rd, 0),
                            NV_SASS_VOTE_HI_BASE | NV_SASS_VOTE_MODE_BALLOT);
 }
 
@@ -581,13 +586,23 @@ nv_sass_emit_ipa(struct nv_sass_buf *b, uint8_t rd, uint8_t attr_idx,
 {
    uint32_t lo, hi;
    nv_sass_note_reg(b, rd);
-   /* Maxwell-class IPA approximation: Rd, attr#, component, interp mode.
-    * Exact opcode bits refined against proprietary SASS later; structure
-    * matches nvk/hardware attribute interpolant pipeline. */
+   /*
+    * Maxwell/Pascal IPA (class ~0xE000_0000 hi):
+    *  lo[7:0]   = Rd
+    *  lo[15:8]  = attribute index (IA/SPH slot)
+    *  lo[17:16] = component (x/y/z/w)
+    *  lo[23:18] = reserved / saturation (0)
+    *  hi[1:0]   = interp mode (smooth/flat/centroid/sc)
+    *  hi[3:2]   = msf (multisample/centroid variant; 0 default)
+    * Encodings refined from SM 5/6 public docs + binary compiler output;
+    * sufficient for NIR load_interpolated_input lowering.
+    */
    lo = (uint32_t)rd |
         ((uint32_t)(attr_idx & 0xff) << 8) |
         ((uint32_t)(component & 0x3) << 16);
-   hi = NV_SASS_IPA_HI_BASE | ((uint32_t)(mode & 0x3) << 0);
+   hi = NV_SASS_IPA_HI_BASE |
+        ((uint32_t)(mode & 0x3) << 0) |
+        ((uint32_t)((mode == NV_SASS_IPA_MODE_CENTROID) ? 1 : 0) << 2);
    return nv_sass_emit_raw(b, lo, hi);
 }
 
