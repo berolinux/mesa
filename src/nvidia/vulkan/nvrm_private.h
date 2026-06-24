@@ -324,6 +324,13 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nvrm_GetInstanceProcAddr(VkInstance ins
                                                                   const char *pName);
 VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
                                                              VkPhysicalDeviceProperties2 *pProperties);
+VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
+                                                           VkPhysicalDeviceFeatures2 *pFeatures);
+VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice,
+                                                          VkPhysicalDeviceFeatures *pFeatures);
+VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
+                                                                   VkFormat format,
+                                                                   VkFormatProperties2 *pFormatProperties);
 VKAPI_ATTR void VKAPI_CALL nvrm_GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice,
                                                                         uint32_t *pQueueFamilyPropertyCount,
                                                                         VkQueueFamilyProperties2 *pQueueFamilyProperties);

@@ -699,6 +699,12 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
          nv_3d_emit_provoking_vertex(push, true);  /* last vertex typical */
       if (blend && blend->logicop_enable)
          nv_3d_emit_logic_op(push, true, blend->logicop_func);
+      /* depth_clamp: pipe sets depth_clip_near/far false when clamping */
+      nv_3d_emit_depth_clamp_enable(push,
+         rs->depth_clamp || (!rs->depth_clip_near && !rs->depth_clip_far));
+      nv_3d_emit_viewport_z_clip_range(push, rs->clip_halfz);
+      if (rs->line_width > 0.0f)
+         nv_3d_emit_line_width(push, rs->line_width);
    }
    /* Dynamic blend constants from set_blend_color */
    nv_3d_emit_blend_constants(push, ctx->blend_color[0], ctx->blend_color[1],

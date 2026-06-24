@@ -149,6 +149,23 @@ extern "C" {
 #define NVC597_SET_VIEWPORT_OFFSET_Y(j)         (0x0a10 + (j) * 32)
 #define NVC597_SET_VIEWPORT_OFFSET_Z(j)         (0x0a14 + (j) * 32)
 
+/* Viewport clip volume (clc597/cl9097): per-viewport XY clip + Z range */
+#define NVC597_SET_VIEWPORT_CLIP_HORIZONTAL(j)  (0x0c00 + (j) * 16)
+#define NVC597_SET_VIEWPORT_CLIP_VERTICAL(j)    (0x0c04 + (j) * 16)
+#define NVC597_SET_VIEWPORT_CLIP_MIN_Z(j)       (0x0c08 + (j) * 16)
+#define NVC597_SET_VIEWPORT_CLIP_MAX_Z(j)       (0x0c0c + (j) * 16)
+#define NVC597_SET_VIEWPORT_Z_CLIP              0x0d7c
+#define NVC597_SET_VIEWPORT_Z_CLIP_RANGE_NEGATIVE_W_TO_POSITIVE_W 0x0
+#define NVC597_SET_VIEWPORT_Z_CLIP_RANGE_ZERO_TO_POSITIVE_W       0x1
+/* SET_VIEWPORT_CLIP_CONTROL @ 0x193c — depth clamp vs clip at pixel Z */
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL        0x193c
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_MIN_Z_ZERO_MAX_Z_ONE_TRUE  (1u << 0)
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_PIXEL_MIN_Z_CLAMP          (1u << 3)
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_PIXEL_MAX_Z_CLAMP          (1u << 4)
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_Z_CLIP_RANGE_SHIFT         16
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_Z_CLIP_RANGE_ZERO_ONE      (2u << 16)
+#define NVC597_SET_VIEWPORT_CLIP_CONTROL_Z_CLIP_RANGE_MINUS_INF_PLUS_INF (3u << 16)
+
 #define NVC597_SET_SCISSOR_ENABLE(j)            (0x0e00 + (j) * 16)
 #define NVC597_SET_SCISSOR_HORIZONTAL(j)        (0x0e04 + (j) * 16)
 #define NVC597_SET_SCISSOR_VERTICAL(j)          (0x0e08 + (j) * 16)
@@ -1480,14 +1497,61 @@ nv_3d_emit_alpha_to_coverage(struct nv_push *p, bool enable)
    nv_push_method(p, NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL, enable ? 1 : 0);
 }
 
-/** Depth clamp: when enabled, disable depth clip (hardware clip enable inverse) */
+/**
+ * Depth clamp via SET_VIEWPORT_CLIP_CONTROL (clc597 0x193c).
+ * When clamp_enable: PIXEL_MIN/MAX_Z use CLAMP (bits 3/4) so fragments outside
+ * [minZ,maxZ] are clamped instead of discarded.  When disabled: CLIP (bits clear).
+ * Also program viewport 0 clip Z range to full [0,1] so clamp has a valid range.
+ */
 static inline void
 nv_3d_emit_depth_clamp_enable(struct nv_push *p, bool clamp_enable)
 {
-   /* On Maxwell+ SET_VIEWPORT_CLIP_CONTROL / depth range; approximate via
-    * ZCULL bounds always-pass when clamp is on.  Full clip control refined later. */
-   (void)clamp_enable;
-   nv_push_method(p, NVC597_SET_ZCULL_BOUNDS, clamp_enable ? 0u : 0u);
+   union { float f; uint32_t u; } z0, z1;
+   uint32_t ctrl;
+
+   z0.f = 0.0f;
+   z1.f = 1.0f;
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MIN_Z(0), z0.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MAX_Z(0), z1.u);
+
+   ctrl = NVC597_SET_VIEWPORT_CLIP_CONTROL_MIN_Z_ZERO_MAX_Z_ONE_TRUE |
+          NVC597_SET_VIEWPORT_CLIP_CONTROL_Z_CLIP_RANGE_ZERO_ONE;
+   if (clamp_enable)
+      ctrl |= NVC597_SET_VIEWPORT_CLIP_CONTROL_PIXEL_MIN_Z_CLAMP |
+              NVC597_SET_VIEWPORT_CLIP_CONTROL_PIXEL_MAX_Z_CLAMP;
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_CONTROL, ctrl);
+   /* ZCULL: leave bounds neutral; clip control owns pixel Z behavior */
+   nv_push_method(p, NVC597_SET_ZCULL_BOUNDS, 0);
+}
+
+/** Program viewport clip rectangle + Z range for slot (used with multi-viewport). */
+static inline void
+nv_3d_set_viewport_clip(struct nv_push *p, unsigned slot,
+                        uint16_t x0, uint16_t width,
+                        uint16_t y0, uint16_t height,
+                        float min_z, float max_z)
+{
+   union { float f; uint32_t u; } zmin, zmax;
+   if (slot >= 16)
+      slot = 0;
+   zmin.f = min_z;
+   zmax.f = max_z;
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_HORIZONTAL(slot),
+                  (uint32_t)x0 | ((uint32_t)width << 16));
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_VERTICAL(slot),
+                  (uint32_t)y0 | ((uint32_t)height << 16));
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MIN_Z(slot), zmin.u);
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MAX_Z(slot), zmax.u);
+}
+
+/** Vulkan/GL depth clip range: 0=[-W,+W] (GL), 1=[0,+W] (D3D/Vulkan default). */
+static inline void
+nv_3d_emit_viewport_z_clip_range(struct nv_push *p, bool zero_to_one)
+{
+   nv_push_method(p, NVC597_SET_VIEWPORT_Z_CLIP,
+                  zero_to_one
+                     ? NVC597_SET_VIEWPORT_Z_CLIP_RANGE_ZERO_TO_POSITIVE_W
+                     : NVC597_SET_VIEWPORT_Z_CLIP_RANGE_NEGATIVE_W_TO_POSITIVE_W);
 }
 
 /**

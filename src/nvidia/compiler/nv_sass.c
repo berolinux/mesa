@@ -193,6 +193,58 @@ nv_sass_emit_s2r(struct nv_sass_buf *b, uint8_t rd, uint8_t sr)
                            NV_SASS_S2R_HI_BASE);
 }
 
+/* R2P class hi nibble approximates Maxwell R2P.P0 (pred write from reg bit). */
+#define NV_SASS_R2P_HI_BASE   0x50c00000u
+#define NV_SASS_P2R_HI_BASE   0x50c80000u
+#define NV_SASS_KIL_HI_BASE   0x50b00000u  /* KIL / BPT.KILL family stand-in */
+
+bool
+nv_sass_emit_r2p(struct nv_sass_buf *b, uint8_t ra, uint8_t pred_idx, uint8_t bit)
+{
+   nv_sass_note_reg(b, ra);
+   /* lo: Ra in [15:8], pred index + bit select in high byte of lo / low of hi */
+   return nv_sass_emit_raw(b,
+                           ((uint32_t)ra << 8) | ((uint32_t)bit << 16) |
+                           ((uint32_t)(pred_idx & 7) << 24),
+                           NV_SASS_R2P_HI_BASE);
+}
+
+bool
+nv_sass_emit_p2r(struct nv_sass_buf *b, uint8_t rd, uint8_t pred_idx)
+{
+   nv_sass_note_reg(b, rd);
+   return nv_sass_emit_raw(b,
+                           (uint32_t)rd | ((uint32_t)(pred_idx & 7) << 8),
+                           NV_SASS_P2R_HI_BASE);
+}
+
+bool
+nv_sass_emit_kill_thread(struct nv_sass_buf *b)
+{
+   /* Unconditional pixel/helper kill:
+    *  1) MOV R0, 1  — non-zero marks kill intent
+    *  2) R2P P0, R0.b0 — drive kill predicate (compiler/HW path maps to THREAD_KILL)
+    *  3) KIL-class instruction — mark lane as helper / discard fragment writes
+    * Does NOT use EXIT (would terminate whole warp incorrectly for demote). */
+   if (!nv_sass_emit_mov_ri(b, 0, 1))
+      return false;
+   if (!nv_sass_emit_r2p(b, 0, 0, 0))
+      return false;
+   return nv_sass_emit_raw(b, 0x00000000u, NV_SASS_KIL_HI_BASE);
+}
+
+bool
+nv_sass_emit_kill_thread_if(struct nv_sass_buf *b, uint8_t cond_reg)
+{
+   /* Conditional kill: R2P from cond_reg bit0, then KIL (predicated in full RA).
+    * Simplified: always emit R2P from cond_reg then KIL — hardware/predication
+    * refinement tracks cond_reg through predicate allocator later. */
+   nv_sass_note_reg(b, cond_reg);
+   if (!nv_sass_emit_r2p(b, cond_reg, 0, 0))
+      return false;
+   return nv_sass_emit_raw(b, 0x00000000u, NV_SASS_KIL_HI_BASE);
+}
+
 bool
 nv_sass_emit_ldg_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr)
 {

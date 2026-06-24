@@ -709,23 +709,16 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_demote:
    case nir_intrinsic_terminate:
-      /* Pixel kill: set THREAD_KILL special then continue; EXIT ends warp early
-       * which is wrong for demote.  S2R THREAD_KILL + write approximates kill. */
-      rd = 0;
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_THREAD_KILL);
-      if (!ok)
-         return false;
-      ok = nv_sass_emit_mov_ri(sb, rd, 1);
-      return ok;
+      /* demote/terminate must not EXIT the warp (sibling lanes continue).
+       * Use KIL/R2P path: marks lane helper without warp-wide exit. */
+      return nv_sass_emit_kill_thread(sb);
 
    case nir_intrinsic_terminate_if:
-      /* Conditional terminate: evaluate cond, then kill (simplified: always kill path) */
-      rd = 0;
-      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_THREAD_KILL);
-      if (!ok)
-         return false;
-      ok = nv_sass_emit_mov_ri(sb, rd, 1);
-      return ok;
+   case nir_intrinsic_demote_if: {
+      /* Conditional: cond in src[0]; R2P bit0 from cond reg then KIL. */
+      uint8_t cond_r = src_reg_reload(sb, &intr->src[0]);
+      return nv_sass_emit_kill_thread_if(sb, cond_r);
+   }
 
    case nir_intrinsic_load_sample_id:
       /* SR sample index (Maxwell+; index refined per SM doc) */

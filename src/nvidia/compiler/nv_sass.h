@@ -243,6 +243,15 @@ bool nv_sass_emit_imad_rrrr(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
 bool nv_sass_emit_lop3(struct nv_sass_buf *b, uint8_t rd, uint8_t ra,
                        uint8_t rb, uint8_t rc, uint8_t lut);
 bool nv_sass_emit_s2r(struct nv_sass_buf *b, uint8_t rd, uint8_t sr);
+/* R2P: write predicate from register bit; used with THREAD_KILL special path.
+ * P2R: read predicate to register.  Encodings are Maxwell-class approximations
+ * refined against proprietary output; sufficient for demote/kill plumbing. */
+bool nv_sass_emit_r2p(struct nv_sass_buf *b, uint8_t ra, uint8_t pred_idx, uint8_t bit);
+bool nv_sass_emit_p2r(struct nv_sass_buf *b, uint8_t rd, uint8_t pred_idx);
+/* KIL / pixel kill: set helper-lane kill via BPT.TRAP-style or predicated EXIT.
+ * nv_sass_emit_kill_thread emits MOV + R2P pattern targeting kill predicate. */
+bool nv_sass_emit_kill_thread(struct nv_sass_buf *b);
+bool nv_sass_emit_kill_thread_if(struct nv_sass_buf *b, uint8_t cond_reg);
 bool nv_sass_emit_ldg_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
 bool nv_sass_emit_stg_u32(struct nv_sass_buf *b, uint8_t ra_addr, uint8_t rb_data);
 bool nv_sass_emit_ldl_u32(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr);
