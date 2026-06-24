@@ -634,16 +634,34 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
                                depth_en, depth_wr, depth_fn, stencil_en,
                                cull, front_ccw, fill, smooth);
    if (zsa && stencil_en) {
-      const struct pipe_stencil_state *st = &zsa->stencil[0];
-      /* pipe_stencil_state has no ref; GL/Vulkan set it via separate state */
-      nv_3d_emit_stencil_state(push, true,
-                               st->func, st->valuemask, st->writemask,
-                               0 /* stencil ref set elsewhere */,
-                               st->fail_op, st->zfail_op, st->zpass_op);
+      const struct pipe_stencil_state *sf = &zsa->stencil[0];
+      const struct pipe_stencil_state *sb = &zsa->stencil[1];
+      bool two_sided = sb->enabled;
+      /* pipe_stencil_state has no ref; set via separate stencil_ref state */
+      nv_3d_emit_stencil_state_full(push, true, two_sided,
+         sf->func, sf->valuemask, sf->writemask, 0,
+         sf->fail_op, sf->zfail_op, sf->zpass_op,
+         two_sided ? sb->func : sf->func,
+         two_sided ? sb->valuemask : sf->valuemask,
+         two_sided ? sb->writemask : sf->writemask, 0,
+         two_sided ? sb->fail_op : sf->fail_op,
+         two_sided ? sb->zfail_op : sf->zfail_op,
+         two_sided ? sb->zpass_op : sf->zpass_op);
    }
-   if (rs && rs->offset_tri) {
-      nv_3d_emit_depth_bias(push, true, rs->offset_units, rs->offset_clamp,
-                            rs->offset_scale);
+   if (rs) {
+      if (rs->offset_tri)
+         nv_3d_emit_depth_bias(push, true, rs->offset_units, rs->offset_clamp,
+                               rs->offset_scale);
+      if (rs->rasterizer_discard)
+         nv_3d_emit_rasterizer_discard(push, true);
+      if (rs->point_size > 0.0f)
+         nv_3d_emit_point_size(push, rs->point_size);
+      if (rs->flatshade_first)
+         nv_3d_emit_provoking_vertex(push, false); /* first vertex */
+      else if (rs->flatshade)
+         nv_3d_emit_provoking_vertex(push, true);  /* last vertex typical */
+      if (blend && blend->logicop_enable)
+         nv_3d_emit_logic_op(push, true, blend->logicop_func);
    }
    if (ctx->fb.samples > 1)
       nv_3d_emit_msaa(push, ctx->fb.samples, false);
