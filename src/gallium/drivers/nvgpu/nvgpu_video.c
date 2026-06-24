@@ -401,6 +401,95 @@ nvgpu_video_apply_h265_picture_desc(struct nvgpu_video_codec *dec,
    return true;
 }
 
+/**
+ * Apply pipe_av1_picture_desc sequence/frame + ref[16] DPB into session av1_ps.
+ * Maps first 8 refs to NVDEC 8-frame DPB; film_grain_target is recorded via
+ * output override when present.
+ */
+static bool
+nvgpu_video_apply_av1_picture_desc(struct nvgpu_video_codec *dec,
+                                   struct pipe_picture_desc *picture)
+{
+   const struct pipe_av1_picture_desc *av1;
+   unsigned i;
+
+   if (!dec || !picture)
+      return false;
+   if (u_reduce_video_profile(dec->base.profile) != PIPE_VIDEO_FORMAT_AV1)
+      return false;
+
+   av1 = (const struct pipe_av1_picture_desc *)picture;
+
+   nv_nvdec_av1_apply_seq_frame(&dec->session.av1_ps,
+      av1->picture_parameter.frame_width
+         ? av1->picture_parameter.frame_width
+         : av1->picture_parameter.max_width,
+      av1->picture_parameter.frame_height
+         ? av1->picture_parameter.frame_height
+         : av1->picture_parameter.max_height,
+      av1->picture_parameter.profile,
+      av1->picture_parameter.bit_depth_idx,
+      av1->picture_parameter.seq_info_fields.use_128x128_superblock,
+      av1->picture_parameter.seq_info_fields.enable_cdef,
+      av1->picture_parameter.seq_info_fields.mono_chrome,
+      av1->picture_parameter.seq_info_fields.subsampling_x,
+      av1->picture_parameter.seq_info_fields.subsampling_y,
+      av1->picture_parameter.seq_info_fields.enable_order_hint,
+      av1->picture_parameter.order_hint_bits_minus_1,
+      av1->picture_parameter.seq_info_fields.enable_jnt_comp,
+      av1->picture_parameter.seq_info_fields.ref_frame_mvs,
+      av1->picture_parameter.seq_info_fields.film_grain_params_present,
+      av1->picture_parameter.pic_info_fields.frame_type,
+      av1->picture_parameter.pic_info_fields.show_frame,
+      av1->picture_parameter.pic_info_fields.error_resilient_mode,
+      av1->picture_parameter.pic_info_fields.disable_cdf_update,
+      av1->picture_parameter.pic_info_fields.allow_screen_content_tools,
+      av1->picture_parameter.pic_info_fields.force_integer_mv,
+      av1->picture_parameter.pic_info_fields.use_superres,
+      av1->picture_parameter.superres_scale_denominator
+         ? av1->picture_parameter.superres_scale_denominator : 8,
+      av1->picture_parameter.pic_info_fields.allow_high_precision_mv,
+      av1->picture_parameter.pic_info_fields.allow_warped_motion,
+      av1->picture_parameter.primary_ref_frame,
+      av1->picture_parameter.order_hint,
+      av1->picture_parameter.base_qindex,
+      av1->picture_parameter.tile_cols,
+      av1->picture_parameter.tile_rows,
+      av1->picture_parameter.film_grain_info.film_grain_info_fields.apply_grain);
+
+   nv_nvdec_av1_set_ref_frame_idx(&dec->session.av1_ps,
+                                  av1->picture_parameter.ref_frame_idx);
+
+   for (i = 0; i < 8; i++) {
+      uint64_t luma = 0, chroma = 0;
+      uint32_t lp = 0, cp = 0;
+      /* pipe has 16 ref slots; NVDEC AV1 DPB is 8 — use first 8 non-null */
+      if (av1->ref[i]) {
+         nvgpu_video_buffer_planes(av1->ref[i], &luma, &chroma, &lp, &cp);
+         if (lp)
+            dec->session.av1_ps.dpb_luma_pitch = lp;
+         if (cp)
+            dec->session.av1_ps.dpb_chroma_pitch = cp;
+      }
+      nv_nvdec_session_set_av1_dpb(&dec->session, i, luma, chroma);
+   }
+
+   /* Optional film-grain output target overrides normal output when set */
+   if (av1->film_grain_target) {
+      uint64_t luma = 0, chroma = 0;
+      uint32_t lp = 0, cp = 0;
+      nvgpu_video_buffer_planes(av1->film_grain_target, &luma, &chroma,
+                                &lp, &cp);
+      if (luma)
+         nv_nvdec_session_set_output(&dec->session, luma, chroma,
+                                     lp ? lp : dec->session.output_luma_pitch,
+                                     cp ? cp : dec->session.output_chroma_pitch);
+   }
+
+   dec->session.av1_ps_valid = true;
+   return true;
+}
+
 static void
 nvgpu_video_apply_picture_desc(struct nvgpu_video_codec *dec,
                                struct pipe_picture_desc *picture)
@@ -409,7 +498,9 @@ nvgpu_video_apply_picture_desc(struct nvgpu_video_codec *dec,
       return;
    if (nvgpu_video_apply_h264_picture_desc(dec, picture))
       return;
-   (void)nvgpu_video_apply_h265_picture_desc(dec, picture);
+   if (nvgpu_video_apply_h265_picture_desc(dec, picture))
+      return;
+   (void)nvgpu_video_apply_av1_picture_desc(dec, picture);
 }
 
 static void
