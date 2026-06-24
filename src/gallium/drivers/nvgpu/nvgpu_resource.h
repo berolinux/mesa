@@ -16,6 +16,7 @@ struct nvgpu_resource {
    struct threaded_resource b;
    struct nv_rm_bo *bo;
    uint64_t gpu_offset;
+   void *cpu_ptr;      /* optional host mirror for indirect reads */
    uint32_t rm_handle;
    enum pipe_format internal_format;
    uint32_t row_pitch;      /* bytes; 32B-aligned logical pitch */

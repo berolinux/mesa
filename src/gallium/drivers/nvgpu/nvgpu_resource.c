@@ -168,6 +168,8 @@ nvgpu_resource_create(struct pipe_screen *pscreen,
    }
 
    res->gpu_offset = nv_rm_bo_gpu_offset(res->bo);
+   /* Host mirror for indirect draw path A (may be NULL if BO not CPU-mapped) */
+   res->cpu_ptr = res->bo ? nv_rm_bo_map(res->bo) : NULL;
    res->rm_handle = nv_rm_bo_handle(res->bo);
    return &res->b.b;
 }

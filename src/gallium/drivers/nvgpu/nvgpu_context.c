@@ -889,11 +889,63 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          nv_3d_set_primitive_restart(&push, false, 0);
 
       if (indirect && indirect->buffer) {
-         /* Indirect: emit zero-count draw until GPU indirect class is wired */
-         if (info->index_size)
-            nv_3d_emit_draw_index_buffer_instanced(&push, topo, 0, 0, 0, 1, 0);
-         else
-            nv_3d_emit_draw_vertex_array_instanced(&push, topo, 0, 0, 1, 0);
+         /* Indirect path A: try host-map indirect resource and emit real draws.
+          * Multi-draw indirect uses indirect->draw_count; single indirect uses 1. */
+         struct nvgpu_resource *ibuf = nvgpu_resource(indirect->buffer);
+         uint32_t draw_count = indirect->draw_count ? indirect->draw_count : 1;
+         uint32_t ind_stride = indirect->stride ? indirect->stride :
+            (info->index_size ? 20u : 16u);
+         const uint32_t *ind_base = NULL;
+         unsigned di;
+         void *ind_map = NULL;
+
+         if (ibuf && indirect->buffer->width0) {
+            /* Best-effort: pipe_transfer / direct map not always available;
+             * use resource data pointer if driver stored CPU mirror. */
+            ind_map = ibuf->cpu_ptr;
+            if (ind_map)
+               ind_base = (const uint32_t *)((const uint8_t *)ind_map +
+                                             indirect->offset);
+         }
+
+         if (info->index_size && info->has_user_indices == false &&
+             info->index.resource) {
+            struct nvgpu_resource *ib = nvgpu_resource(info->index.resource);
+            uint64_t ib_addr = ib ? ib->gpu_offset : 0;
+            uint64_t ib_size = info->index.resource->width0;
+            nv_3d_set_index_buffer(&push, ib_addr, ib_size, info->index_size);
+         }
+
+         for (di = 0; di < draw_count; di++) {
+            uint32_t vertex_count = 0, instance_count = 1;
+            uint32_t first_vertex = 0, first_instance = 0;
+            uint32_t index_count = 0, first_index = 0;
+            int32_t vertex_offset = 0;
+            if (ind_base) {
+               const uint32_t *rec = (const uint32_t *)((const uint8_t *)ind_base +
+                                                        (size_t)di * ind_stride);
+               if (info->index_size) {
+                  index_count = rec[0];
+                  instance_count = rec[1] ? rec[1] : 1;
+                  first_index = rec[2];
+                  vertex_offset = (int32_t)rec[3];
+                  first_instance = rec[4];
+               } else {
+                  vertex_count = rec[0];
+                  instance_count = rec[1] ? rec[1] : 1;
+                  first_vertex = rec[2];
+                  first_instance = rec[3];
+               }
+            }
+            if (info->index_size)
+               nv_3d_emit_draw_index_buffer_instanced(&push, topo, first_index,
+                                                      index_count, vertex_offset,
+                                                      instance_count, first_instance);
+            else
+               nv_3d_emit_draw_vertex_array_instanced(&push, topo, first_vertex,
+                                                      vertex_count, instance_count,
+                                                      first_instance);
+         }
       } else if (info->index_size && info->has_user_indices == false &&
           info->index.resource) {
          struct nvgpu_resource *ib = nvgpu_resource(info->index.resource);

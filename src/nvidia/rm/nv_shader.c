@@ -218,3 +218,35 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
       return nv_shader_compile_nir(sh, (const struct nir_shader *)sh->nir);
    return nv_shader_upload_code(sh, NULL, 0, sh->register_count ? sh->register_count : 8);
 }
+
+/**
+ * Emit SET_PIPELINE_SHADER / program address / register count for an uploaded
+ * shader (nvidia-3d nv3dLoadProgram pattern).  program_region_base is set once
+ * per channel via SET_PROGRAM_REGION when non-zero; pass 0 for subsequent binds.
+ * const_shader_slot: CB selector index for compiler constants (-1 = skip).
+ */
+void
+nv_shader_emit_bind(struct nv_push *p, const struct nv_shader *sh,
+                    uint64_t program_region_base, int const_shader_slot)
+{
+   uint64_t code_addr;
+   uint32_t regs;
+
+   if (!p || !sh || !sh->uploaded)
+      return;
+
+   code_addr = sh->code_gpu_addr;
+   regs = sh->register_count ? sh->register_count : 8;
+
+   if (program_region_base)
+      nv_3d_set_program_region(p, program_region_base);
+
+   nv_3d_load_pipeline_shader(p, sh->pipeline_stage, sh->pipeline_type,
+                              code_addr, regs, sh->bind_group);
+
+   if (const_shader_slot >= 0 && sh->const_gpu_addr && sh->const_size) {
+      /* Constant buffer bind via selector is done by caller with CB methods;
+       * here we only have the GPU address recorded on the shader object. */
+      (void)const_shader_slot;
+   }
+}
