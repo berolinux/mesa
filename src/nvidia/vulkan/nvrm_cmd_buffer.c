@@ -9,27 +9,47 @@
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
 #include "nv_shader.h"
+#include "nv_sph.h"
 #include "nv_tex.h"
 #include "nv_qmd.h"
 #include "nv_rm.h"
 
-/* Lazy-init device meta blit VS/FS (SPH+EXIT until TEX sample shaders exist). */
+/* Lazy-init device meta blit VS/FS with SPH+SASS TEX/S2R programs (not EXIT-only). */
 static bool
 nvrm_device_ensure_meta_blit(struct nvrm_device *dev)
 {
+   uint8_t sph_buf[512];
+   struct nv_sph_blob blob;
+
    if (!dev || !dev->rm)
       return false;
    if (dev->meta_blit_ready && dev->meta_blit_vs && dev->meta_blit_fs)
       return true;
    if (!dev->meta_blit_vs) {
       dev->meta_blit_vs = nv_shader_create(dev->rm, NV_SHADER_KIND_VERTEX);
-      if (dev->meta_blit_vs)
-         (void)nv_shader_compile_nir_stub(dev->meta_blit_vs);
+      if (dev->meta_blit_vs) {
+         nv_sph_build_meta_blit_vs(&blob);
+         if (blob.total_bytes <= sizeof(sph_buf)) {
+            nv_sph_serialise(&blob, sph_buf, sizeof(sph_buf));
+            (void)nv_shader_upload_code(dev->meta_blit_vs, sph_buf,
+                                        blob.total_bytes, 16);
+         } else {
+            (void)nv_shader_compile_nir_stub(dev->meta_blit_vs);
+         }
+      }
    }
    if (!dev->meta_blit_fs) {
       dev->meta_blit_fs = nv_shader_create(dev->rm, NV_SHADER_KIND_FRAGMENT);
-      if (dev->meta_blit_fs)
-         (void)nv_shader_compile_nir_stub(dev->meta_blit_fs);
+      if (dev->meta_blit_fs) {
+         nv_sph_build_meta_blit_fs(&blob);
+         if (blob.total_bytes <= sizeof(sph_buf)) {
+            nv_sph_serialise(&blob, sph_buf, sizeof(sph_buf));
+            (void)nv_shader_upload_code(dev->meta_blit_fs, sph_buf,
+                                        blob.total_bytes, 16);
+         } else {
+            (void)nv_shader_compile_nir_stub(dev->meta_blit_fs);
+         }
+      }
    }
    if (!dev->tex_pool)
       dev->tex_pool = nv_tex_pool_create(dev->rm, 256);
