@@ -641,6 +641,12 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
                                0 /* stencil ref set elsewhere */,
                                st->fail_op, st->zfail_op, st->zpass_op);
    }
+   if (rs && rs->offset_tri) {
+      nv_3d_emit_depth_bias(push, true, rs->offset_units, rs->offset_clamp,
+                            rs->offset_scale);
+   }
+   if (ctx->fb.samples > 1)
+      nv_3d_emit_msaa(push, ctx->fb.samples, false);
 }
 
 /* Upload FS sampler views into tex pool as pitch 2D headers (slot = view index). */
