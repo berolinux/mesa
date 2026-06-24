@@ -6,6 +6,9 @@
  */
 
 #include "nvrm_private.h"
+#include "nv_3d_methods.h"
+#include "nv_copy_methods.h"
+#include "nv_shader.h"
 
 #define NVRM_CMD_PUSH_DWORDS (32 * 1024)
 
@@ -76,6 +79,31 @@ nvrm_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage image,
    /* Colour-only CLEAR_SURFACE via NVC597 methods (render targets must be
     * programmed separately; this records the clear values + CLEAR_SURFACE). */
    nv_3d_push_clear(&cmd->push, class_3d, 0x10 /* PIPE_CLEAR_COLOR0 */, c, 0.0f, 0);
+}
+
+/* Bind a pre-uploaded nv_shader to the graphics pipeline (helper for pipeline
+ * bind once shader modules compile to machine code). */
+void
+nvrm_cmd_bind_graphics_shader(struct nvrm_cmd_buffer *cmd,
+                              const struct nv_shader *sh,
+                              uint64_t program_region_base)
+{
+   if (!cmd || !cmd->push_map || !sh)
+      return;
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   nv_shader_emit_bind(&cmd->push, sh, program_region_base, -1);
+}
+
+/* Record a host semaphore release at the end of the command buffer segment
+ * (queue submit path can wait via nv_fence_wait on the same sema BO). */
+void
+nvrm_cmd_emit_host_sema_release(struct nvrm_cmd_buffer *cmd,
+                                uint64_t sema_gpu_addr, uint32_t payload)
+{
+   if (!cmd || !cmd->push_map || !sema_gpu_addr)
+      return;
+   nv_push_wfi(&cmd->push);
+   nv_push_host_semaphore_release(&cmd->push, sema_gpu_addr, payload);
 }
 
 VKAPI_ATTR void VKAPI_CALL
