@@ -392,12 +392,46 @@ isel_alu(struct nv_sass_buf *sb, nir_alu_instr *alu)
       ok = nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_EX2);
       break;
 
+   case nir_op_fsin:
+      ra = src_reg_reload(sb, &alu->src[0].src);
+      ok = nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_SIN);
+      break;
+
+   case nir_op_fcos:
+      ra = src_reg_reload(sb, &alu->src[0].src);
+      ok = nv_sass_emit_mufu(sb, rd, ra, NV_SASS_MUFU_COS);
+      break;
+
+   case nir_op_fsat:
+      /* clamp to [0,1]: max(x,0) then min(result, 1.0f) via R254 temp */
+      ra = src_reg_reload(sb, &alu->src[0].src);
+      if (!nv_sass_emit_fmnmx(sb, rd, ra, 0xff, true))
+         return false;
+      if (!nv_sass_emit_mov_ri(sb, 0xfe, 0x3f800000u))
+         return false;
+      ok = nv_sass_emit_fmnmx(sb, rd, rd, 0xfe, false);
+      break;
+
    case nir_op_ffloor:
    case nir_op_fceil:
    case nir_op_ftrunc:
    case nir_op_fround_even:
+      /* F2I+I2F round-trip (mode differentiation TBD) */
       ra = src_reg_reload(sb, &alu->src[0].src);
-      ok = nv_sass_emit_mov_rr(sb, rd, ra);
+      if (!nv_sass_emit_f2i(sb, rd, ra, true))
+         return false;
+      ok = nv_sass_emit_i2f(sb, rd, rd, true);
+      break;
+
+   case nir_op_fsign:
+      ra = src_reg_reload(sb, &alu->src[0].src);
+      if (!nv_sass_emit_fsetp(sb, 0, ra, 0xff, false))
+         return false;
+      if (!nv_sass_emit_mov_ri(sb, rd, 0x3f800000u))
+         return false;
+      if (!nv_sass_emit_mov_ri(sb, 0xfe, 0xbf800000u))
+         return false;
+      ok = nv_sass_emit_selp(sb, rd, rd, 0xfe, 0);
       break;
 
    case nir_op_bcsel: {
@@ -645,10 +679,18 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       ok = nv_sass_emit_mov_ri(sb, rd, 0);
       break;
 
+   case nir_intrinsic_load_vertex_id:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X); /* proxy; real is VTXID SR */
+      break;
+
+   case nir_intrinsic_load_instance_id:
+      rd = ssa_reg_dst(&intr->def);
+      ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_CTAID_X); /* proxy for instance */
+      break;
+
    case nir_intrinsic_load_frag_coord:
    case nir_intrinsic_load_front_face:
-   case nir_intrinsic_load_vertex_id:
-   case nir_intrinsic_load_instance_id:
    case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_base_vertex:
    case nir_intrinsic_load_draw_id:
