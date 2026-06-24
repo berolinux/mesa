@@ -158,23 +158,16 @@ nvgpu_set_vertex_buffers(struct pipe_context *pctx, unsigned num_buffers,
 
 static void
 nvgpu_set_constant_buffer(struct pipe_context *pctx,
-                          enum pipe_shader_type shader, uint index,
-                          bool take_ownership,
+                          mesa_shader_stage shader, uint index,
                           const struct pipe_constant_buffer *cb)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    struct pipe_constant_buffer *dst;
 
-   if (shader >= PIPE_SHADER_TYPES || index >= PIPE_MAX_CONSTANT_BUFFERS)
+   if (shader >= NVGPU_SHADER_STAGES || index >= PIPE_MAX_CONSTANT_BUFFERS)
       return;
    dst = &ctx->cb[shader][index];
-   if (take_ownership) {
-      pipe_resource_reference(&dst->buffer, NULL);
-      if (cb) *dst = *cb;
-      else memset(dst, 0, sizeof(*dst));
-   } else {
-      util_copy_constant_buffer(dst, cb, false);
-   }
+   util_copy_constant_buffer(dst, cb);
 }
 
 #define NVGPU_BIND_STATE(name, field) \
@@ -392,18 +385,22 @@ nvgpu_emit_framebuffer(struct nvgpu_context *ctx, struct nv_push *push)
    for (i = 0; i < PIPE_MAX_COLOR_BUFS && i < 8; i++) {
       struct nv_3d_surface s;
       memset(&s, 0, sizeof(s));
-      if (fb->cbufs[i]) {
-         struct pipe_surface *psurf = fb->cbufs[i];
+      if (fb->cbufs[i].texture) {
+         const struct pipe_surface *psurf = &fb->cbufs[i];
          struct nvgpu_resource *res = nvgpu_resource(psurf->texture);
-         unsigned stride = util_format_get_stride(psurf->format, psurf->width);
+         unsigned tw = psurf->texture->width0;
+         unsigned th = psurf->texture->height0;
+         unsigned stride = util_format_get_stride(psurf->format, tw);
          stride = align(stride, 128);
+         if (res && res->row_pitch)
+            stride = res->row_pitch;
          s.enabled = true;
          s.gpu_addr = res ? res->gpu_offset : 0;
-         s.width = psurf->width;
-         s.height = psurf->height;
+         s.width = tw;
+         s.height = th;
          s.format = nv_3d_color_format_from_pipe((unsigned)psurf->format);
-         s.block_linear = res ? !res->linear : false;
-         s.array_pitch = stride * psurf->height;
+         s.block_linear = res ? res->blocklinear : false;
+         s.array_pitch = stride * th;
          n_cbufs++;
       }
       nv_3d_set_color_target(push, i, &s);
@@ -414,17 +411,17 @@ nvgpu_emit_framebuffer(struct nvgpu_context *ctx, struct nv_push *push)
       nv_3d_set_ct_select(push, n_cbufs, targets);
    }
 
-   if (fb->zsbuf) {
-      struct pipe_surface *zs = fb->zsbuf;
+   if (fb->zsbuf.texture) {
+      const struct pipe_surface *zs = &fb->zsbuf;
       struct nvgpu_resource *res = nvgpu_resource(zs->texture);
       struct nv_3d_surface s;
       memset(&s, 0, sizeof(s));
       s.enabled = true;
       s.gpu_addr = res ? res->gpu_offset : 0;
-      s.width = zs->width;
-      s.height = zs->height;
+      s.width = zs->texture->width0;
+      s.height = zs->texture->height0;
       s.format = nv_3d_zt_format_from_pipe((unsigned)zs->format);
-      s.block_linear = res ? !res->linear : false;
+      s.block_linear = res ? res->blocklinear : false;
       nv_3d_set_zeta_target(push, &s);
    }
 
@@ -479,7 +476,7 @@ nvgpu_emit_vertex_state(struct nvgpu_context *ctx, struct nv_push *push)
       addr = (res ? res->gpu_offset : 0) + vb->buffer_offset;
       size = vb->buffer.resource->width0 > vb->buffer_offset
              ? (uint32_t)(vb->buffer.resource->width0 - vb->buffer_offset) : 0;
-      stride = vb->stride ? vb->stride : 12;
+      stride = 12; /* default; refined from velems when available */
       nv_3d_set_vertex_stream(push, i, addr, size, stride);
       stream_emitted[i] = true;
       if (i > max_stream)
@@ -501,7 +498,7 @@ nvgpu_emit_vertex_state(struct nvgpu_context *ctx, struct nv_push *push)
             uint64_t addr = (res ? res->gpu_offset : 0) + vb->buffer_offset;
             uint32_t size = vb->buffer.resource->width0 > vb->buffer_offset
                ? (uint32_t)(vb->buffer.resource->width0 - vb->buffer_offset) : 0;
-            uint32_t stride = vb->stride ? vb->stride : 12;
+            uint32_t stride = 12;
             nv_3d_set_vertex_stream(push, stream, addr, size, stride);
             stream_emitted[stream] = true;
          }
@@ -608,9 +605,9 @@ nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
    if (!ctx->tex_pool)
       return;
 
-   n = ctx->num_samplers[PIPE_SHADER_FRAGMENT];
+   n = ctx->num_samplers[MESA_SHADER_FRAGMENT];
    for (i = 0; i < n && i < PIPE_MAX_SAMPLERS; i++) {
-      struct pipe_sampler_view *sv = ctx->samplers[PIPE_SHADER_FRAGMENT][i];
+      struct pipe_sampler_view *sv = ctx->samplers[MESA_SHADER_FRAGMENT][i];
       struct nvgpu_resource *res;
       struct nv_tex_desc desc;
       struct nv_tex_entry ent;
@@ -658,7 +655,17 @@ nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
             desc.mag_filt = NV_TEX_SAMP_FILT_NEAREST;
       }
 
-      nv_tex_encode_pitch_2d(&desc, &ent);
+      /* Blocklinear textures use TEXHEAD_BL; linear/pitch use TEXHEAD_PITCH */
+      if (res && res->blocklinear && !res->linear) {
+         desc.blocklinear = true;
+         desc.gobs_width = res->gobs_width;
+         desc.gobs_height = res->gobs_height ? res->gobs_height : NV_TEX_GOBS_SIXTEEN;
+         desc.gobs_depth = res->gobs_depth;
+         desc.gpu_addr &= ~0x1ffull;
+         if (res->row_pitch)
+            desc.pitch = res->row_pitch;
+      }
+      nv_tex_encode_2d(&desc, &ent);
       nv_tex_pool_set_entry(ctx->tex_pool, (int)i, &ent);
    }
 
@@ -699,12 +706,12 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
       nv_shader_emit_bind(push, fs->nvsh, region_once ? region : 0, -1);
 
    /* Application constant buffers: bind CB0 for VS/FS if present */
-   if (ctx->cb[PIPE_SHADER_VERTEX][0].buffer) {
+   if (ctx->cb[MESA_SHADER_VERTEX][0].buffer) {
       struct nvgpu_resource *res =
-         nvgpu_resource(ctx->cb[PIPE_SHADER_VERTEX][0].buffer);
+         nvgpu_resource(ctx->cb[MESA_SHADER_VERTEX][0].buffer);
       uint64_t addr = (res ? res->gpu_offset : 0) +
-                      ctx->cb[PIPE_SHADER_VERTEX][0].buffer_offset;
-      uint32_t sz = ctx->cb[PIPE_SHADER_VERTEX][0].buffer_size;
+                      ctx->cb[MESA_SHADER_VERTEX][0].buffer_offset;
+      uint32_t sz = ctx->cb[MESA_SHADER_VERTEX][0].buffer_size;
       if (!sz && res)
          sz = (uint32_t)res->b.b.width0;
       if (sz) {
@@ -712,12 +719,12 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
          nv_3d_bind_group_constant_buffer(push, NV_3D_BIND_GROUP_VERTEX, 0, true);
       }
    }
-   if (ctx->cb[PIPE_SHADER_FRAGMENT][0].buffer) {
+   if (ctx->cb[MESA_SHADER_FRAGMENT][0].buffer) {
       struct nvgpu_resource *res =
-         nvgpu_resource(ctx->cb[PIPE_SHADER_FRAGMENT][0].buffer);
+         nvgpu_resource(ctx->cb[MESA_SHADER_FRAGMENT][0].buffer);
       uint64_t addr = (res ? res->gpu_offset : 0) +
-                      ctx->cb[PIPE_SHADER_FRAGMENT][0].buffer_offset;
-      uint32_t sz = ctx->cb[PIPE_SHADER_FRAGMENT][0].buffer_size;
+                      ctx->cb[MESA_SHADER_FRAGMENT][0].buffer_offset;
+      uint32_t sz = ctx->cb[MESA_SHADER_FRAGMENT][0].buffer_size;
       if (!sz && res)
          sz = (uint32_t)res->b.b.width0;
       if (sz) {
@@ -756,12 +763,15 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
 
 static void
 nvgpu_clear(struct pipe_context *pctx, unsigned buffers,
+            uint32_t color_clear_mask, uint8_t stencil_clear_mask,
             const struct pipe_scissor_state *scissor_state,
             const union pipe_color_union *color,
             double depth, unsigned stencil)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    (void)scissor_state;
+   (void)color_clear_mask;
+   (void)stencil_clear_mask;
    nvgpu_emit_clear_methods(ctx, buffers, color, depth, stencil);
 }
 
@@ -860,12 +870,20 @@ nvgpu_resource_copy_region(struct pipe_context *pctx,
       unsigned dst_stride = align(util_format_get_stride(dst->format, dst->width0), 128);
       uint32_t w = (uint32_t)src_box->width;
       uint32_t h = (uint32_t)src_box->height;
-      bool src_bl = !sres->linear;
-      bool dst_bl = !dres->linear;
+      bool src_bl = sres->blocklinear && !sres->linear;
+      bool dst_bl = dres->blocklinear && !dres->linear;
       unsigned layer = src_box->z;
+      uint32_t bl_h = sres->gobs_height ? sres->gobs_height : 4;
 
       if (!w || !h)
          return;
+
+      if (sres->row_pitch)
+         src_stride = sres->row_pitch;
+      if (dres->row_pitch)
+         dst_stride = dres->row_pitch;
+      if (sres->bpp)
+         bpp = sres->bpp;
 
       saddr = sres->gpu_offset;
       daddr = dres->gpu_offset;
@@ -882,17 +900,26 @@ nvgpu_resource_copy_region(struct pipe_context *pctx,
 
       if (!nvgpu_push_start(ctx, &push, 128))
          return;
+      if (class_copy)
+         nv_copy_set_object(&push, class_copy);
+      else
+         nv_push_set_subch(&push, NV_PUSH_SUBCH_COPY);
       if (src_bl || dst_bl) {
-         nv_copy_push_image_2d_bl(&push, class_copy, saddr, daddr,
+         nv_copy_emit_image_2d_bl(&push, saddr, daddr,
                                   w, h, bpp, src_stride, dst_stride,
                                   src_bl ? (uint32_t)src_box->x : 0,
                                   src_bl ? (uint32_t)src_box->y : 0,
                                   dst_bl ? (uint32_t)dstx : 0,
                                   dst_bl ? (uint32_t)dsty : 0,
-                                  src_bl, dst_bl);
+                                  src_bl, dst_bl,
+                                  sres->gobs_width, bl_h,
+                                  dres->gobs_width,
+                                  dres->gobs_height ? dres->gobs_height : 4);
+         nv_push_wfi(&push);
       } else {
-         nv_copy_push_image_2d(&push, class_copy, saddr, daddr,
+         nv_copy_emit_image_2d(&push, saddr, daddr,
                                w * bpp, src_stride, dst_stride, h);
+         nv_push_wfi(&push);
       }
       nvgpu_push_finish(ctx, &push, true);
       return;
@@ -957,7 +984,7 @@ nvgpu_destroy_context(struct pipe_context *pctx)
    for (i = 0; i < ctx->num_vb; i++)
       pipe_vertex_buffer_unreference(&ctx->vb[i]);
 
-   for (s = 0; s < PIPE_SHADER_TYPES; s++) {
+   for (s = 0; s < NVGPU_SHADER_STAGES; s++) {
       unsigned c;
       for (c = 0; c < PIPE_MAX_CONSTANT_BUFFERS; c++)
          pipe_resource_reference(&ctx->cb[s][c].buffer, NULL);
@@ -981,18 +1008,16 @@ nvgpu_destroy_context(struct pipe_context *pctx)
 
 static void
 nvgpu_set_sampler_views(struct pipe_context *pctx,
-                        enum pipe_shader_type shader,
+                        mesa_shader_stage shader,
                         unsigned start, unsigned num,
                         unsigned unbind_num_trailing_slots,
-                        bool take_ownership,
                         struct pipe_sampler_view **views)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    unsigned i;
    (void)unbind_num_trailing_slots;
-   (void)take_ownership;
 
-   if (shader >= PIPE_SHADER_TYPES)
+   if (shader >= NVGPU_SHADER_STAGES)
       return;
    for (i = 0; i < num; i++) {
       unsigned slot = start + i;
@@ -1039,12 +1064,12 @@ nvgpu_create_sampler_state(struct pipe_context *pctx,
 
 static void
 nvgpu_bind_sampler_states(struct pipe_context *pctx,
-                          enum pipe_shader_type shader,
+                          mesa_shader_stage shader,
                           unsigned start, unsigned num, void **states)
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    unsigned i;
-   if (shader != PIPE_SHADER_FRAGMENT)
+   if (shader != MESA_SHADER_FRAGMENT)
       return;
    for (i = 0; i < num; i++) {
       unsigned slot = start + i;
@@ -1085,8 +1110,8 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 
    ctx->base.buffer_map = nvgpu_transfer_map;
    ctx->base.texture_map = nvgpu_transfer_map;
-   ctx->base.transfer_map = nvgpu_transfer_map;
-   ctx->base.transfer_unmap = nvgpu_transfer_unmap;
+   ctx->base.buffer_unmap = nvgpu_transfer_unmap;
+   ctx->base.texture_unmap = nvgpu_transfer_unmap;
    ctx->base.buffer_subdata = u_default_buffer_subdata;
    ctx->base.texture_subdata = u_default_texture_subdata;
 

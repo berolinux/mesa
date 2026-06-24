@@ -7,6 +7,7 @@
 
 #include "pipe/p_screen.h"
 #include "util/u_dynarray.h"
+#include "util/slab.h"
 
 struct nv_rm_device;
 struct nv_device_info;

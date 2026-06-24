@@ -3,9 +3,12 @@
  * SPDX-License-Identifier: MIT
  *
  * Gallium pipe_screen for NVIDIA GPUs via the proprietary kernel module RM.
+ * Mesa tip stores capabilities in pipe_screen::{caps,shader_caps,compute_caps}.
  */
 
 #include "nvgpu_screen.h"
+#include "nvgpu_public.h"
+#include "compiler/shader_enums.h"
 #include "nvgpu_context.h"
 #include "nvgpu_resource.h"
 
@@ -21,17 +24,20 @@
 #include "frontend/drm_driver.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <xf86drm.h>
 
 static const char *
 nvgpu_get_vendor(struct pipe_screen *pscreen)
 {
+   (void)pscreen;
    return "NVIDIA (open Mesa)";
 }
 
 static const char *
 nvgpu_get_device_vendor(struct pipe_screen *pscreen)
 {
+   (void)pscreen;
    return "NVIDIA Corporation";
 }
 
@@ -44,274 +50,188 @@ nvgpu_get_name(struct pipe_screen *pscreen)
    return "NVIDIA GPU";
 }
 
-static int
-nvgpu_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
+static void
+nvgpu_init_shader_caps(struct nvgpu_screen *screen)
 {
-   struct nvgpu_screen *screen = nvgpu_screen(pscreen);
-   const struct nv_device_info *info = screen->info;
+   mesa_shader_stage s;
 
-   switch (param) {
-   case PIPE_CAP_NPOT_TEXTURES:
-   case PIPE_CAP_MIXED_FRAMEBUFFER_SIZES:
-   case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
-   case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_OCCLUSION_QUERY:
-   case PIPE_CAP_TEXTURE_MULTISAMPLE:
-   case PIPE_CAP_TEXTURE_SWIZZLE:
-   case PIPE_CAP_DEPTH_CLIP_DISABLE:
-   case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
-   case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
-   case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
-   case PIPE_CAP_TGSI_TEXCOORD:
-   case PIPE_CAP_TEXTURE_BARRIER:
-   case PIPE_CAP_COMPUTE:
-   case PIPE_CAP_SEAMLESS_CUBE_MAP:
-   case PIPE_CAP_CUBE_MAP_ARRAY:
-   case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
-   case PIPE_CAP_QUERY_TIMESTAMP:
-   case PIPE_CAP_QUERY_TIME_ELAPSED:
-   case PIPE_CAP_CONDITIONAL_RENDER:
-   case PIPE_CAP_TEXTURE_QUERY_LOD:
-   case PIPE_CAP_SAMPLE_SHADING:
-   case PIPE_CAP_DRAW_INDIRECT:
-   case PIPE_CAP_MULTI_DRAW_INDIRECT:
-   case PIPE_CAP_TIMER_QUERY:
-   case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
-   case PIPE_CAP_TEXTURE_MIRROR_CLAMP_TO_EDGE:
-   case PIPE_CAP_TGSI_VS_LAYER_VIEWPORT:
-   case PIPE_CAP_TGSI_TES_LAYER_VIEWPORT:
-   case PIPE_CAP_QUERY_PIPELINE_STATISTICS:
-   case PIPE_CAP_TEXTURE_BORDER_COLOR_QUIRK:
-   case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
-      return 1;
+   for (s = MESA_SHADER_VERTEX; s < MESA_SHADER_STAGES; s++) {
+      struct pipe_shader_caps *sc =
+         (struct pipe_shader_caps *)&screen->base.shader_caps[s];
 
-   case PIPE_CAP_MAX_RENDER_TARGETS:
-      return 8;
-   case PIPE_CAP_MAX_DUAL_SOURCE_RENDER_TARGETS:
-      return 1;
-   case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
-      return 16384;
-   case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
-      return 12; /* 2048 */
-   case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
-      return 15;
-   case PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS:
-      return 2048;
-   case PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS:
-      return 4;
-   case PIPE_CAP_MAX_STREAM_OUTPUT_SEPARATE_COMPONENTS:
-   case PIPE_CAP_MAX_STREAM_OUTPUT_INTERLEAVED_COMPONENTS:
-      return 128;
-   case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
-      return 1024;
-   case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
-      return 1024;
-   case PIPE_CAP_MAX_VERTEX_ATTRIB_STRIDE:
-      return 2048;
-   case PIPE_CAP_MAX_VIEWPORTS:
-      return 16;
-   case PIPE_CAP_ENDIANNESS:
-      return PIPE_ENDIAN_LITTLE;
-   case PIPE_CAP_MIN_TEXTURE_GATHER_OFFSET:
-      return -32;
-   case PIPE_CAP_MAX_TEXTURE_GATHER_OFFSET:
-      return 31;
-   case PIPE_CAP_VENDOR_ID:
-      return 0x10de;
-   case PIPE_CAP_DEVICE_ID:
-      return info ? (int)info->pci_device_id : 0xffff;
-   case PIPE_CAP_VIDEO_MEMORY:
-      if (info)
-         return (int)(info->vram_size_bytes / (1024 * 1024));
-      return 0;
-   case PIPE_CAP_UMA:
-      return 0;
-   case PIPE_CAP_ACCELERATED:
-      return 1;
-   case PIPE_CAP_GRAPHICS:
-      return info ? info->has_graphics : 1;
-   case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
-      return 64;
-   case PIPE_CAP_MAX_TEXEL_BUFFER_ELEMENTS_UINT:
-      return 134217728;
-   case PIPE_CAP_MAX_CONSTANT_BUFFER_SIZE_UINT:
-      return 65536;
-   case PIPE_CAP_MAX_TEXTURE_BUFFER_SIZE_UINT:
-      return 134217728;
-   case PIPE_CAP_MAX_SHADER_BUFFER_SIZE_UINT:
-      return 1 << 27;
-   case PIPE_CAP_MAX_VARYINGS:
-      return 31;
-   case PIPE_CAP_PREFERRED_FOR_TEXTURE_UPLOAD:
-      return 1;
-   case PIPE_CAP_SHAREABLE_SHADERS:
-      return 1;
-   case PIPE_CAP_PCI_GROUP:
-      return info ? (int)info->pci_domain : 0;
-   case PIPE_CAP_PCI_BUS:
-      return info ? (int)info->pci_bus : 0;
-   case PIPE_CAP_PCI_DEVICE:
-      return info ? (int)info->pci_dev : 0;
-   case PIPE_CAP_PCI_FUNCTION:
-      return info ? (int)info->pci_func : 0;
-   default:
-      return u_pipe_screen_get_param_defaults(pscreen, param);
-   }
-}
+      memset(sc, 0, sizeof(*sc));
 
-static float
-nvgpu_get_paramf(struct pipe_screen *pscreen, enum pipe_capf param)
-{
-   switch (param) {
-   case PIPE_CAPF_MIN_LINE_WIDTH:
-   case PIPE_CAPF_MIN_LINE_WIDTH_AA:
-   case PIPE_CAPF_MIN_POINT_SIZE:
-   case PIPE_CAPF_MIN_POINT_SIZE_AA:
-      return 1.0f;
-   case PIPE_CAPF_MAX_LINE_WIDTH:
-   case PIPE_CAPF_MAX_LINE_WIDTH_AA:
-      return 10.0f;
-   case PIPE_CAPF_MAX_POINT_SIZE:
-   case PIPE_CAPF_MAX_POINT_SIZE_AA:
-      return 2048.0f;
-   case PIPE_CAPF_MAX_TEXTURE_ANISOTROPY:
-      return 16.0f;
-   case PIPE_CAPF_MAX_TEXTURE_LOD_BIAS:
-      return 15.0f;
-   case PIPE_CAPF_MIN_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_MAX_CONSERVATIVE_RASTER_DILATE:
-   case PIPE_CAPF_CONSERVATIVE_RASTER_DILATE_GRANULARITY:
-      return 0.0f;
-   }
-   return 0.0f;
-}
-
-static int
-nvgpu_get_shader_param(struct pipe_screen *pscreen,
-                       enum pipe_shader_type shader,
-                       enum pipe_shader_cap param)
-{
-   switch (shader) {
-   case PIPE_SHADER_VERTEX:
-   case PIPE_SHADER_FRAGMENT:
-   case PIPE_SHADER_COMPUTE:
-      break;
-   case PIPE_SHADER_GEOMETRY:
-   case PIPE_SHADER_TESS_CTRL:
-   case PIPE_SHADER_TESS_EVAL:
-      /* Advertise with conservative limits; compiler will refine later */
-      break;
-   default:
-      return 0;
-   }
-
-   switch (param) {
-   case PIPE_SHADER_CAP_MAX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_ALU_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INSTRUCTIONS:
-   case PIPE_SHADER_CAP_MAX_TEX_INDIRECTIONS:
-      return 16384;
-   case PIPE_SHADER_CAP_MAX_CONTROL_FLOW_DEPTH:
-      return 8;
-   case PIPE_SHADER_CAP_MAX_INPUTS:
-      return shader == PIPE_SHADER_VERTEX ? 32 : 32;
-   case PIPE_SHADER_CAP_MAX_OUTPUTS:
-      return 32;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
-      return 65536;
-   case PIPE_SHADER_CAP_MAX_CONST_BUFFERS:
-      return 16;
-   case PIPE_SHADER_CAP_MAX_TEMPS:
-      return 256;
-   case PIPE_SHADER_CAP_INDIRECT_INPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_OUTPUT_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_TEMP_ADDR:
-   case PIPE_SHADER_CAP_INDIRECT_CONST_ADDR:
-      return 1;
-   case PIPE_SHADER_CAP_INTEGERS:
-      return 1;
-   case PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS:
-   case PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS:
-      return 32;
-   case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
-      return 16;
-   case PIPE_SHADER_CAP_MAX_SHADER_IMAGES:
-      return 16;
-   case PIPE_SHADER_CAP_SUPPORTED_IRS:
-      return (1 << PIPE_SHADER_IR_NIR);
-   default:
-      return 0;
-   }
-}
-
-static int
-nvgpu_get_compute_param(struct pipe_screen *pscreen,
-                        enum pipe_shader_ir ir_type,
-                        enum pipe_compute_cap param,
-                        void *ret)
-{
-   struct nvgpu_screen *screen = nvgpu_screen(pscreen);
-   const struct nv_device_info *info = screen->info;
-
-   switch (param) {
-   case PIPE_COMPUTE_CAP_ADDRESS_BITS:
-      if (ret) *(uint32_t *)ret = 64;
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_IR_TARGET:
-      if (ret) snprintf((char *)ret, 8, "nv");
-      return 3;
-   case PIPE_COMPUTE_CAP_GRID_DIMENSION:
-      if (ret) *(uint64_t *)ret = 3;
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_GRID_SIZE:
-      if (ret) {
-         uint64_t *v = ret;
-         v[0] = 2147483647; v[1] = 65535; v[2] = 65535;
+      switch (s) {
+      case MESA_SHADER_VERTEX:
+      case MESA_SHADER_TESS_CTRL:
+      case MESA_SHADER_TESS_EVAL:
+      case MESA_SHADER_GEOMETRY:
+      case MESA_SHADER_FRAGMENT:
+      case MESA_SHADER_COMPUTE:
+         break;
+      default:
+         continue;
       }
-      return 3 * sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE:
-      if (ret) {
-         uint64_t *v = ret;
-         v[0] = 1024; v[1] = 1024; v[2] = 64;
-      }
-      return 3 * sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK:
-      if (ret) *(uint64_t *)ret = 1024;
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_GLOBAL_SIZE:
-      if (ret) *(uint64_t *)ret = info ? info->vram_size_bytes : (4ull << 30);
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_LOCAL_SIZE:
-      if (ret) *(uint64_t *)ret = 48 * 1024;
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_PRIVATE_SIZE:
-      if (ret) *(uint64_t *)ret = 512 * 1024;
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_INPUT_SIZE:
-      if (ret) *(uint64_t *)ret = 4096;
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_MEM_ALLOC_SIZE:
-      if (ret) *(uint64_t *)ret = info ? info->vram_size_bytes : (4ull << 30);
-      return sizeof(uint64_t);
-   case PIPE_COMPUTE_CAP_MAX_CLOCK_FREQUENCY:
-      if (ret) *(uint32_t *)ret = 1500;
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_MAX_COMPUTE_UNITS:
-      if (ret) *(uint32_t *)ret = info && info->tpc_count ? info->tpc_count : 1;
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_IMAGES_SUPPORTED:
-      if (ret) *(uint32_t *)ret = 1;
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_SUBGROUP_SIZES:
-      if (ret) *(uint32_t *)ret = 32; /* NVIDIA warp */
-      return sizeof(uint32_t);
-   case PIPE_COMPUTE_CAP_MAX_SUBGROUPS:
-      if (ret) *(uint32_t *)ret = info && info->max_warps_per_sm ?
-                                   info->max_warps_per_sm : 32;
-      return sizeof(uint32_t);
-   default:
-      return 0;
+
+      sc->max_instructions = 16384;
+      sc->max_alu_instructions = 16384;
+      sc->max_tex_instructions = 16384;
+      sc->max_tex_indirections = 8;
+      sc->max_control_flow_depth = 64;
+      sc->max_inputs = (s == MESA_SHADER_VERTEX) ? 32 : 32;
+      sc->max_outputs = (s == MESA_SHADER_FRAGMENT) ? 8 : 32;
+      sc->max_const_buffer0_size = 65536;
+      sc->max_const_buffers = PIPE_MAX_CONSTANT_BUFFERS;
+      sc->max_temps = 256;
+      sc->max_texture_samplers = PIPE_MAX_SAMPLERS;
+      sc->max_sampler_views = PIPE_MAX_SHADER_SAMPLER_VIEWS;
+      sc->max_shader_buffers = PIPE_MAX_SHADER_BUFFERS;
+      sc->max_shader_images = PIPE_MAX_SHADER_IMAGES;
+      sc->supported_irs = (1 << PIPE_SHADER_IR_NIR);
+      sc->cont_supported = true;
+      sc->indirect_temp_addr = true;
+      sc->indirect_const_addr = true;
+      sc->integers = true;
+      sc->int64_atomics = true;
+      sc->fp16 = true;
+      sc->int16 = true;
    }
+}
+
+static void
+nvgpu_init_compute_caps(struct nvgpu_screen *screen)
+{
+   struct pipe_compute_caps *cc =
+      (struct pipe_compute_caps *)&screen->base.compute_caps;
+   const struct nv_device_info *info = screen->info;
+   uint64_t vram = info ? info->vram_size_bytes : (4ull << 30);
+
+   memset(cc, 0, sizeof(*cc));
+   cc->address_bits = 64;
+   cc->grid_dimension = 3;
+   cc->max_grid_size[0] = 2147483647u;
+   cc->max_grid_size[1] = 65535u;
+   cc->max_grid_size[2] = 65535u;
+   cc->max_block_size[0] = 1024;
+   cc->max_block_size[1] = 1024;
+   cc->max_block_size[2] = 64;
+   cc->max_threads_per_block = 1024;
+   cc->max_local_size = 48 * 1024;
+   cc->max_clock_frequency = 1500;
+   cc->max_compute_units = info && info->tpc_count ? info->tpc_count : 1;
+   cc->max_subgroups = info && info->max_warps_per_sm ? info->max_warps_per_sm : 32;
+   cc->subgroup_sizes = 32; /* NVIDIA warp */
+   cc->max_variable_threads_per_block = 1024;
+   cc->max_mem_alloc_size = vram;
+   cc->max_global_size = vram;
+}
+
+static void
+nvgpu_init_screen_caps(struct nvgpu_screen *screen)
+{
+   struct pipe_caps *caps = (struct pipe_caps *)&screen->base.caps;
+
+   u_init_pipe_screen_caps(&screen->base, 1 /* accel */);
+
+   caps->graphics = true;
+   caps->npot_textures = true;
+   caps->anisotropic_filter = true;
+   caps->occlusion_query = true;
+   caps->query_time_elapsed = true;
+   caps->texture_shadow_map = true;
+   caps->texture_swizzle = true;
+   caps->texture_mirror_clamp = true;
+   caps->blend_equation_separate = true;
+   caps->primitive_restart = true;
+   caps->primitive_restart_fixed_index = true;
+   caps->indep_blend_enable = true;
+   caps->indep_blend_func = true;
+   caps->fs_coord_origin_upper_left = true;
+   caps->fs_coord_pixel_center_half_integer = true;
+   caps->depth_clip_disable = true;
+   caps->depth_clamp_enable = true;
+   caps->vs_instanceid = true;
+   caps->vertex_element_instance_divisor = true;
+   caps->mixed_colorbuffer_formats = true;
+   caps->seamless_cube_map = true;
+   caps->seamless_cube_map_per_texture = true;
+   caps->conditional_render = true;
+   caps->texture_barrier = true;
+   caps->compute = true;
+   caps->start_instance = true;
+   caps->query_timestamp = true;
+   caps->texture_multisample = true;
+   caps->cube_map_array = true;
+   caps->texture_buffer_objects = true;
+   caps->tgsi_texcoord = true;
+   caps->mixed_framebuffer_sizes = true;
+   caps->buffer_map_persistent_coherent = true;
+   caps->texture_query_lod = true;
+   caps->sample_shading = true;
+   caps->draw_indirect = true;
+   caps->fs_fine_derivative = true;
+   caps->conditional_render_inverted = true;
+   caps->clip_halfz = true;
+   caps->polygon_offset_clamp = true;
+   caps->texture_float_linear = true;
+   caps->texture_half_float_linear = true;
+   caps->depth_bounds_test = true;
+   caps->shareable_shaders = true;
+   caps->clear_scissored = true;
+   caps->multi_draw_indirect = true;
+   caps->fs_position_is_sysval = true;
+   caps->fs_face_is_integer_sysval = true;
+   caps->query_memory_info = true;
+   caps->framebuffer_no_attachment = true;
+   caps->cull_distance = true;
+   caps->doubles = true;
+   caps->int64 = true;
+   caps->shader_clock = true;
+   caps->fp16 = true;
+   caps->nir_samplers_as_deref = true;
+   caps->legacy_math_rules = true;
+   caps->native_fence_fd = false; /* until implemented */
+   caps->memobj = false;
+
+   caps->max_render_targets = 8;
+   caps->max_dual_source_render_targets = 1;
+   caps->max_texture_2d_size = 16384;
+   caps->max_texture_3d_levels = 12;   /* 2048 */
+   caps->max_texture_cube_levels = 15; /* 16384 */
+   caps->max_texture_array_layers = 2048;
+   caps->max_stream_output_buffers = 4;
+   caps->max_stream_output_separate_components = 128;
+   caps->max_stream_output_interleaved_components = 128;
+   caps->max_geometry_output_vertices = 1024;
+   caps->max_geometry_total_output_components = 1024;
+   caps->max_vertex_streams = 4;
+   caps->max_vertex_attrib_stride = 2048;
+   caps->max_viewports = 16;
+   caps->max_varyings = 32;
+   caps->glsl_feature_level = 460;
+   caps->glsl_feature_level_compatibility = 460;
+   caps->constant_buffer_offset_alignment = 256; /* NVIDIA CB prefers 256B */
+   caps->min_map_buffer_alignment = 64;
+   caps->shader_buffer_offset_alignment = 16;
+   caps->texture_buffer_offset_alignment = 16;
+   caps->max_texel_buffer_elements = 134217728;
+   caps->max_shader_buffer_size = 1u << 27;
+   caps->viewport_subpixel_bits = 8;
+   caps->rasterizer_subpixel_bits = 8;
+   caps->min_texel_offset = -8;
+   caps->max_texel_offset = 7;
+   caps->min_texture_gather_offset = -32;
+   caps->max_texture_gather_offset = 31;
+   caps->endianness = PIPE_ENDIAN_LITTLE;
+   caps->vendor_id = 0x10de; /* NVIDIA PCI vendor */
+   if (screen->info)
+      caps->device_id = screen->info->pci_device_id;
+   else
+      caps->device_id = 0;
+   caps->video_memory = screen->info ?
+      (unsigned)(screen->info->vram_size_bytes / (1024 * 1024)) : 0;
+   caps->uma = false;
+   (void)screen;
 }
 
 static bool
@@ -322,6 +242,14 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
                           unsigned storage_sample_count,
                           unsigned usage)
 {
+   const struct util_format_description *desc;
+
+   (void)pscreen;
+   (void)target;
+
+   if (format == PIPE_FORMAT_NONE)
+      return usage & PIPE_BIND_RENDER_TARGET;
+
    if (sample_count > 1) {
       if (sample_count != 2 && sample_count != 4 && sample_count != 8)
          return false;
@@ -330,10 +258,12 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
 
-   /* Conservative: accept all formats the util layer considers valid for the usage */
+   desc = util_format_description(format);
+   if (!desc)
+      return false;
+
    if (usage & PIPE_BIND_RENDER_TARGET) {
-      if (!util_format_is_rgba8_variant(format) &&
-          !util_format_is_rgbx8_variant(format) &&
+      if (!util_format_is_rgba8_variant(desc) &&
           format != PIPE_FORMAT_B8G8R8A8_UNORM &&
           format != PIPE_FORMAT_B8G8R8X8_UNORM &&
           format != PIPE_FORMAT_R16G16B16A16_FLOAT &&
@@ -359,10 +289,21 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
          return false;
    }
 
-   return true;
+   if (usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_VERTEX_BUFFER |
+                PIPE_BIND_INDEX_BUFFER | PIPE_BIND_CONSTANT_BUFFER |
+                PIPE_BIND_SHADER_BUFFER | PIPE_BIND_SHADER_IMAGE |
+                PIPE_BIND_STREAM_OUTPUT | PIPE_BIND_DISPLAY_TARGET |
+                PIPE_BIND_SCANOUT | PIPE_BIND_SHARED | PIPE_BIND_LINEAR))
+      return true;
+
+   if (usage & PIPE_BIND_RENDER_TARGET)
+      return true;
+   if (usage & PIPE_BIND_DEPTH_STENCIL)
+      return true;
+
+   return !!(usage & PIPE_BIND_SAMPLER_VIEW);
 }
 
-static void
 /* Fence: opaque handle is nv_fence*; wait on latest seq in the fence object. */
 static void
 nvgpu_fence_reference(struct pipe_screen *pscreen,
@@ -459,10 +400,6 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.get_name = nvgpu_get_name;
    screen->base.get_vendor = nvgpu_get_vendor;
    screen->base.get_device_vendor = nvgpu_get_device_vendor;
-   screen->base.get_param = nvgpu_get_param;
-   screen->base.get_paramf = nvgpu_get_paramf;
-   screen->base.get_shader_param = nvgpu_get_shader_param;
-   screen->base.get_compute_param = nvgpu_get_compute_param;
    screen->base.is_format_supported = nvgpu_is_format_supported;
    screen->base.context_create = nvgpu_context_create;
    screen->base.resource_create = nvgpu_resource_create;
@@ -471,6 +408,10 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.query_memory_info = nvgpu_query_memory_info;
    screen->base.fence_reference = nvgpu_fence_reference;
    screen->base.fence_finish = nvgpu_fence_finish;
+
+   nvgpu_init_shader_caps(screen);
+   nvgpu_init_compute_caps(screen);
+   nvgpu_init_screen_caps(screen);
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
 

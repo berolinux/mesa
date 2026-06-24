@@ -7,8 +7,15 @@
 
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
+#include "pipe/p_defines.h"
+#include "compiler/shader_enums.h"
 #include "util/u_blitter.h"
 #include "util/u_threaded_context.h"
+
+/* Mesa tip uses MESA_SHADER_STAGES; keep local alias for CB/sampler arrays. */
+#ifndef NVGPU_SHADER_STAGES
+#define NVGPU_SHADER_STAGES MESA_SHADER_STAGES
+#endif
 
 struct nvgpu_screen;
 struct nv_rm_bo;
@@ -50,7 +57,6 @@ struct nvgpu_context {
    uint32_t last_fence_seq;
 
    struct blitter_context *blitter;
-   struct pipe_debug_callback debug;
 
    /* Program region base for SET_PROGRAM_REGION (first uploaded shader BO) */
    uint64_t program_region_base;
@@ -73,9 +79,9 @@ struct nvgpu_context {
    void *velems;
    struct pipe_vertex_buffer vb[PIPE_MAX_ATTRIBS];
    unsigned num_vb;
-   struct pipe_constant_buffer cb[PIPE_SHADER_TYPES][PIPE_MAX_CONSTANT_BUFFERS];
-   struct pipe_sampler_view *samplers[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
-   unsigned num_samplers[PIPE_SHADER_TYPES];
+   struct pipe_constant_buffer cb[NVGPU_SHADER_STAGES][PIPE_MAX_CONSTANT_BUFFERS];
+   struct pipe_sampler_view *samplers[NVGPU_SHADER_STAGES][PIPE_MAX_SAMPLERS];
+   unsigned num_samplers[NVGPU_SHADER_STAGES];
    struct pipe_framebuffer_state fb;
    struct pipe_viewport_state viewport;
    struct pipe_scissor_state scissor;
