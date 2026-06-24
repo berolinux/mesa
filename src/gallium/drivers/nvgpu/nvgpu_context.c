@@ -139,6 +139,41 @@ nvgpu_set_scissor_states(struct pipe_context *pctx, unsigned start_slot,
 }
 
 static void
+nvgpu_set_stencil_ref(struct pipe_context *pctx,
+                      const struct pipe_stencil_ref ref)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   ctx->stencil_ref = ref;
+}
+
+static void
+nvgpu_set_blend_color(struct pipe_context *pctx,
+                      const struct pipe_blend_color *color)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   if (color) {
+      ctx->blend_color[0] = color->color[0];
+      ctx->blend_color[1] = color->color[1];
+      ctx->blend_color[2] = color->color[2];
+      ctx->blend_color[3] = color->color[3];
+   }
+}
+
+static void
+nvgpu_set_sample_mask(struct pipe_context *pctx, unsigned sample_mask)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   ctx->sample_mask = sample_mask;
+}
+
+static void
+nvgpu_set_min_samples(struct pipe_context *pctx, unsigned min_samples)
+{
+   (void)pctx;
+   (void)min_samples;
+}
+
+static void
 nvgpu_set_vertex_buffers(struct pipe_context *pctx, unsigned num_buffers,
                          const struct pipe_vertex_buffer *buffers)
 {
@@ -637,13 +672,15 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
       const struct pipe_stencil_state *sf = &zsa->stencil[0];
       const struct pipe_stencil_state *sb = &zsa->stencil[1];
       bool two_sided = sb->enabled;
-      /* pipe_stencil_state has no ref; set via separate stencil_ref state */
+      unsigned fref = ctx->stencil_ref.ref_value[0];
+      unsigned bref = ctx->stencil_ref.ref_value[1];
       nv_3d_emit_stencil_state_full(push, true, two_sided,
-         sf->func, sf->valuemask, sf->writemask, 0,
+         sf->func, sf->valuemask, sf->writemask, fref,
          sf->fail_op, sf->zfail_op, sf->zpass_op,
          two_sided ? sb->func : sf->func,
          two_sided ? sb->valuemask : sf->valuemask,
-         two_sided ? sb->writemask : sf->writemask, 0,
+         two_sided ? sb->writemask : sf->writemask,
+         two_sided ? bref : fref,
          two_sided ? sb->fail_op : sf->fail_op,
          two_sided ? sb->zfail_op : sf->zfail_op,
          two_sided ? sb->zpass_op : sf->zpass_op);
@@ -663,8 +700,13 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
       if (blend && blend->logicop_enable)
          nv_3d_emit_logic_op(push, true, blend->logicop_func);
    }
+   /* Dynamic blend constants from set_blend_color */
+   nv_3d_emit_blend_constants(push, ctx->blend_color[0], ctx->blend_color[1],
+                              ctx->blend_color[2], ctx->blend_color[3]);
    if (ctx->fb.samples > 1)
       nv_3d_emit_msaa(push, ctx->fb.samples, false);
+   if (ctx->sample_mask && ctx->sample_mask != ~0u)
+      nv_3d_emit_sample_mask(push, ctx->sample_mask);
 }
 
 /* Upload FS sampler views into tex pool as pitch 2D headers (slot = view index). */
@@ -1499,9 +1541,14 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.set_framebuffer_state = nvgpu_set_framebuffer_state;
    ctx->base.set_viewport_states = nvgpu_set_viewport_states;
    ctx->base.set_scissor_states = nvgpu_set_scissor_states;
+   ctx->base.set_stencil_ref = nvgpu_set_stencil_ref;
+   ctx->base.set_blend_color = nvgpu_set_blend_color;
+   ctx->base.set_sample_mask = nvgpu_set_sample_mask;
+   ctx->base.set_min_samples = nvgpu_set_min_samples;
    ctx->base.set_vertex_buffers = nvgpu_set_vertex_buffers;
    ctx->base.set_constant_buffer = nvgpu_set_constant_buffer;
    ctx->base.set_sampler_views = nvgpu_set_sampler_views;
+   ctx->sample_mask = ~0u;
 
    ctx->base.create_blend_state = nvgpu_create_blend_state;
    ctx->base.bind_blend_state = nvgpu_bind_blend_state;

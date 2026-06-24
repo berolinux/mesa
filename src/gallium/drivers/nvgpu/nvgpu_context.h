@@ -94,6 +94,9 @@ struct nvgpu_context {
    struct pipe_framebuffer_state fb;
    struct pipe_viewport_state viewport;
    struct pipe_scissor_state scissor;
+   struct pipe_stencil_ref stencil_ref;
+   float blend_color[4];
+   unsigned sample_mask;
 };
 
 static inline struct nvgpu_context *
