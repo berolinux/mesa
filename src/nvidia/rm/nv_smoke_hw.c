@@ -58,6 +58,39 @@ nv_smoke_hw_env_slices(void)
    return (uint32_t)v & NV_SMOKE_HW_ALL;
 }
 
+/** Verbose: dump GPFIFO/push for trace/diff on HW box (NV_SMOKE_HW_VERBOSE=1). */
+static void
+nv_smoke_hw_dump_channel_trace(struct nv_channel *ch, const char *tag)
+{
+   unsigned i, n;
+   uint32_t gp_get = 0, gp_put = 0, host_put = 0;
+   const char *t = tag ? tag : "nv_smoke_hw";
+
+   if (!ch || !nv_smoke_hw_env_verbose())
+      return;
+   nv_channel_userd_snapshot(ch, &gp_get, &gp_put, &host_put);
+   fprintf(stderr,
+           "%s: trace gpfifo_class=0x%x scheduled=%d tok=%s "
+           "USERD GPGet=%u GPPut=%u host_put=%u\n",
+           t, (unsigned)ch->gpfifo_class, ch->scheduled ? 1 : 0,
+           ch->has_work_submit_token ? "yes" : "no",
+           (unsigned)gp_get, (unsigned)gp_put, (unsigned)host_put);
+   if (ch->gpfifo_cpu && ch->gpfifo_entries) {
+      uint32_t slot = ch->gpfifo_put ? (ch->gpfifo_put - 1) % ch->gpfifo_entries : 0;
+      fprintf(stderr, "%s: GPFIFO last slot[%u]= %08x %08x "
+              "(w0=pbVA>>2, w1=hi+len@bits30:10)\n",
+              t, (unsigned)slot,
+              ch->gpfifo_cpu[slot * 2], ch->gpfifo_cpu[slot * 2 + 1]);
+   }
+   if (ch->push_cpu && ch->push_dw_used) {
+      n = ch->push_dw_used < 24u ? ch->push_dw_used : 24u;
+      fprintf(stderr, "%s: push[0..%u):", t, n);
+      for (i = 0; i < n; i++)
+         fprintf(stderr, " %08x", ch->push_cpu[i]);
+      fprintf(stderr, "\n");
+   }
+}
+
 void
 nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
 {
@@ -432,6 +465,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          }
          nv_channel_userd_snapshot(ch, &res.g1_userd_gp_get, &res.g1_userd_gp_put,
                                    &res.g1_host_gpfifo_put);
+         if (nv_smoke_hw_env_verbose())
+            nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g1");
          {
             uint16_t nst = 0xffff;
             uint32_t ninfo = 0;

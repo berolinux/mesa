@@ -18,9 +18,13 @@ extern "C" {
 #endif
 
 #define NVC6B5_NOP                      0x0100
+#define NVC6B5_PM_TRIGGER               0x0140
 #define NVC6B5_SET_SEMAPHORE_A          0x0240
 #define NVC6B5_SET_SEMAPHORE_B          0x0244
 #define NVC6B5_SET_SEMAPHORE_PAYLOAD    0x0248
+/* Phys mode only when LAUNCH_DMA SRC/DST_TYPE = PHYSICAL (clc6b5.h) */
+#define NVC6B5_SET_SRC_PHYS_MODE        0x0260
+#define NVC6B5_SET_DST_PHYS_MODE        0x0264
 #define NVC6B5_LAUNCH_DMA               0x0300
 #define NVC6B5_OFFSET_IN_UPPER          0x0400
 #define NVC6B5_OFFSET_IN_LOWER          0x0404
@@ -30,6 +34,15 @@ extern "C" {
 #define NVC6B5_PITCH_OUT                0x0414
 #define NVC6B5_LINE_LENGTH_IN           0x0418
 #define NVC6B5_LINE_COUNT               0x041c
+#define NVC6B5_SET_SRC_PHYS_MODE_TARGET_LOCAL_FB           0x0
+#define NVC6B5_SET_SRC_PHYS_MODE_TARGET_COHERENT_SYSMEM    0x1
+#define NVC6B5_SET_SRC_PHYS_MODE_TARGET_NONCOHERENT_SYSMEM 0x2
+#define NVC6B5_SET_DST_PHYS_MODE_TARGET_LOCAL_FB           0x0
+#define NVC6B5_SET_DST_PHYS_MODE_TARGET_COHERENT_SYSMEM    0x1
+#define NVC6B5_SET_DST_PHYS_MODE_TARGET_NONCOHERENT_SYSMEM 0x2
+/* LAUNCH_DMA SRC/DST_TYPE bits 12/13: 0=virtual (default), 1=physical */
+#define NVC6B5_LAUNCH_DMA_SRC_TYPE_PHYSICAL                (1u << 12)
+#define NVC6B5_LAUNCH_DMA_DST_TYPE_PHYSICAL                (1u << 13)
 #define NVC6B5_SET_DST_BLOCK_SIZE       0x070c
 #define NVC6B5_SET_DST_WIDTH            0x0710
 #define NVC6B5_SET_DST_HEIGHT           0x0714
@@ -86,12 +99,36 @@ extern "C" {
 /* Block size: log2 gobs in each dimension; 0 = one gob (8x8x1 for height fermi) */
 #define NVC6B5_BLOCK_SIZE_ONE_GOB_EACH  0x00001000  /* GOB_HEIGHT_FERMI_8 in bits 15:12 */
 
-/** SET_OBJECT for copy class on COPY subchannel. */
+/** SET_OBJECT for copy class on COPY subchannel (subch 4; 610 RE primary CE pipe). */
 static inline void
 nv_copy_set_object(struct nv_push *p, uint32_t class_copy)
 {
    nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
    nv_push_set_object(p, class_copy);
+}
+
+/**
+ * SET_OBJECT on an explicit subchannel (bring-up: try subch 4 then 0 if CE
+ * methods never complete but host sema on 0 works).
+ */
+static inline void
+nv_copy_set_object_subch(struct nv_push *p, uint32_t subch, uint32_t class_copy)
+{
+   nv_push_set_subch(p, subch & 7u);
+   nv_push_set_object(p, class_copy);
+}
+
+/**
+ * Optional phys-mode setup for non-virtual CE (sysmem sema/buffers).
+ * G1 default path uses virtual GPU VA only and does not need these methods.
+ */
+static inline void
+nv_copy_set_phys_modes(struct nv_push *p, uint32_t src_target, uint32_t dst_target)
+{
+   if (!p)
+      return;
+   nv_push_method(p, NVC6B5_SET_SRC_PHYS_MODE, src_target & 0x3u);
+   nv_push_method(p, NVC6B5_SET_DST_PHYS_MODE, dst_target & 0x3u);
 }
 
 /**

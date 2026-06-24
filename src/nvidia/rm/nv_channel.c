@@ -1148,12 +1148,13 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
 }
 
 static int
-g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
-                 uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
-                 uint32_t size_bytes, uint64_t sema_gpu_addr,
-                 volatile uint32_t *sema_cpu, uint32_t sema_payload,
-                 bool sema_reset, uint64_t wait_timeout_ns,
-                 bool check_notifier)
+g1_copy_sema_one_subch(struct nv_channel *ch, uint32_t cc, uint32_t subch,
+                       bool pipelined,
+                       uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                       uint32_t size_bytes, uint64_t sema_gpu_addr,
+                       volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                       bool sema_reset, uint64_t wait_timeout_ns,
+                       bool check_notifier)
 {
    struct nv_push push;
    uint32_t *map;
@@ -1172,7 +1173,8 @@ g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
       return -ENOMEM;
 
    nv_push_init(&push, map, need);
-   nv_copy_set_object(&push, cc);
+   /* subch 4 = NV_PUSH_SUBCH_COPY (610 RE primary); subch 0 = fallback */
+   nv_copy_set_object_subch(&push, subch, cc);
    if (pipelined)
       nv_copy_emit_buffer_copy_with_sema_pipelined(&push, src_gpu_addr,
                                                    dst_gpu_addr, size_bytes,
@@ -1184,6 +1186,29 @@ g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
+}
+
+static int
+g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
+                 uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                 uint32_t size_bytes, uint64_t sema_gpu_addr,
+                 volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                 bool sema_reset, uint64_t wait_timeout_ns,
+                 bool check_notifier)
+{
+   int r;
+
+   /* Prefer COPY subch 4 (binary RE); fall back to subch 0 if CE never completes */
+   r = g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_COPY, pipelined,
+                              src_gpu_addr, dst_gpu_addr, size_bytes,
+                              sema_gpu_addr, sema_cpu, sema_payload,
+                              sema_reset, wait_timeout_ns, check_notifier);
+   if (r == 0 || r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+      return r;
+   return g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_3D, pipelined,
+                                 src_gpu_addr, dst_gpu_addr, size_bytes,
+                                 sema_gpu_addr, sema_cpu, sema_payload,
+                                 sema_reset, wait_timeout_ns, check_notifier);
 }
 
 int
