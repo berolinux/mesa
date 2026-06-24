@@ -218,9 +218,8 @@ nv_sph_build_meta_blit_vs(struct nv_sph_blob *blob)
 }
 
 /**
- * Meta blit fragment shader: sample texture 0 at interpolated UV and write R0..R3.
- * S2R/IPA frag coords or fixed R0/R1 as UV, TEX R4, R0, tex0, MOV outputs, EXIT.
- * TEX binding index 0 matches nv_tex_pool slot programmed by CmdBlitImage2.
+ * Meta blit fragment shader: IPA smooth UV (attr 1), TEX sample tex0,
+ * MOV R0..R3 from TEX result, EXIT.  tex_idx 0 = CmdBlitImage2 pool slot.
  */
 static inline void
 nv_sph_build_meta_blit_fs(struct nv_sph_blob *blob)
@@ -230,16 +229,15 @@ nv_sph_build_meta_blit_fs(struct nv_sph_blob *blob)
       return;
    memset(blob, 0, sizeof(*blob));
    s = blob->sass;
-   /* S2R R0, FRAG_X ; S2R R1, FRAG_Y — UV from fragment position (normalized
-    * in viewport; TEX treats as 0..1 when viewport maps 0..w/h). */
-   s[0] = 0u | ((uint32_t)NV_SPH_SASS_SR_FRAG_X << 20);
-   s[1] = NV_SPH_SASS_S2R_HI;
-   s[2] = 1u | ((uint32_t)NV_SPH_SASS_SR_FRAG_Y << 20);
-   s[3] = NV_SPH_SASS_S2R_HI;
-   /* TEX R4, R0, tex_idx=0 — sample into R4..R7 (vec4 write group) */
-   s[4] = 4u | (0u << 8) | (0u << 24); /* Rd=4, Ra=0, tex=0 */
+   /* IPA R0/R1, attr=1, comp 0/1, smooth — UV interpolant from VS */
+   s[0] = 0u | (1u << 8) | (0u << 16);
+   s[1] = NV_SPH_SASS_IPA_HI;
+   s[2] = 1u | (1u << 8) | (1u << 16);
+   s[3] = NV_SPH_SASS_IPA_HI;
+   /* TEX R4, R0, tex0 */
+   s[4] = 4u | (0u << 8) | (0u << 24);
    s[5] = NV_SPH_SASS_TEX_HI;
-   /* MOV R0..R3 from R4..R7 (result to MRT0 via R0-R3 convention) */
+   /* MOV R0..R3 <- R4..R7 (MRT0) */
    s[6] = 0u | (4u << 8);
    s[7] = NV_SPH_SASS_MOV_HI;
    s[8] = 1u | (5u << 8);
