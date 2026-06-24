@@ -564,23 +564,40 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_local_invocation_id:
+      /* vec3: tid.x/y/z into rd..rd+2 */
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_TID_X);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_TID_Y);
+      if (ok && intr->def.num_components > 2)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 2), NV_SASS_SR_TID_Z);
       break;
 
    case nir_intrinsic_load_workgroup_id:
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_CTAID_X);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_CTAID_Y);
+      if (ok && intr->def.num_components > 2)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 2), NV_SASS_SR_CTAID_Z);
       break;
 
    case nir_intrinsic_load_num_workgroups:
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_NCTAID_X);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_NCTAID_Y);
+      if (ok && intr->def.num_components > 2)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 2), NV_SASS_SR_NCTAID_Z);
       break;
 
    case nir_intrinsic_load_workgroup_size:
       rd = ssa_reg_dst(&intr->def);
       ok = nv_sass_emit_s2r(sb, rd, NV_SASS_SR_NTID_X);
+      if (ok && intr->def.num_components > 1)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 1), NV_SASS_SR_NTID_Y);
+      if (ok && intr->def.num_components > 2)
+         ok = nv_sass_emit_s2r(sb, (uint8_t)(rd + 2), NV_SASS_SR_NTID_Z);
       break;
 
    case nir_intrinsic_load_subgroup_invocation:
@@ -1236,6 +1253,14 @@ nv_nir_compile(const struct nir_shader *nir,
    out->code_size = total;
    out->register_count = regs;
    out->local_mem_size = spill_local;
+   /* CTA shared: from NIR info when available (compute only) */
+   out->shared_mem_size = 0;
+#if NV_HAVE_NIR
+   if (nir && nir->info.stage == MESA_SHADER_COMPUTE)
+      out->shared_mem_size = (uint32_t)nir->info.shared_size;
+#else
+   (void)nir;
+#endif
    out->success = true;
    nv_sass_buf_finish(&sass);
    nv_ra_context_finish(&ra);

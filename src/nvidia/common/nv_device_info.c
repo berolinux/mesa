@@ -191,3 +191,78 @@ nv_device_info_select_classes(struct nv_device_info *info)
       info->has_video_encode = (info->class_nvenc != 0);
    }
 }
+
+void
+nv_device_info_refine_class_from_list(struct nv_device_info *info,
+                                     int engine_kind,
+                                     const uint32_t *class_list,
+                                     uint32_t count)
+{
+   uint32_t i, best = 0;
+   uint32_t lo = 0, hi = 0xffffffffu;
+
+   if (!info || !class_list || !count)
+      return;
+
+   /* Class ID bands (open-gpu-doc / class/cl* headers): 3D ~0x9000-0xC9A0,
+    * compute ~0x90C0-0xC9C0, DMA copy ~0x90B5-0xC8B5, NVDEC ~0xB0B0-0xC7B0,
+    * NVENC ~0x90B7-0xC4B7 — refine within band, prefer highest. */
+   switch (engine_kind) {
+   case 0: /* graphics / 3D */
+      lo = 0x00009097u;
+      hi = 0x0000c9a0u;
+      break;
+   case 1: /* compute */
+      lo = 0x000090c0u;
+      hi = 0x0000c9c0u;
+      break;
+   case 2: /* copy / dma */
+      lo = 0x000090b5u;
+      hi = 0x0000c8b5u;
+      break;
+   case 3: /* nvdec */
+      lo = 0x0000b0b0u;
+      hi = 0x0000c7b0u;
+      break;
+   case 4: /* nvenc */
+      lo = 0x000090b7u;
+      hi = 0x0000c4b7u;
+      break;
+   default:
+      return;
+   }
+
+   for (i = 0; i < count; i++) {
+      uint32_t c = class_list[i];
+      if (c < lo || c > hi)
+         continue;
+      if (c > best)
+         best = c;
+   }
+   if (!best)
+      return;
+
+   switch (engine_kind) {
+   case 0:
+      info->class_3d = best;
+      info->has_graphics = true;
+      break;
+   case 1:
+      info->class_compute = best;
+      info->has_compute = true;
+      break;
+   case 2:
+      info->class_copy = best;
+      info->class_m2mf = best;
+      break;
+   case 3:
+      info->class_nvdec = best;
+      info->has_video_decode = true;
+      break;
+   case 4:
+      info->class_nvenc = best;
+      info->has_video_encode = true;
+      break;
+   }
+   info->classes_from_rm = true;
+}

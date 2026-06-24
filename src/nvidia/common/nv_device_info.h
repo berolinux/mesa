@@ -83,11 +83,24 @@ struct nv_device_info {
    bool has_video_encode;
    bool is_tegra;
    bool gsp_mode;             /* GSP-RM firmware offload active */
+   bool classes_from_rm;      /* class IDs refined via GET_ENGINE_CLASSLIST */
 };
 
 enum nv_gpu_family nv_device_info_family_from_arch(uint32_t architecture);
 const char *nv_device_info_family_name(enum nv_gpu_family family);
 void nv_device_info_select_classes(struct nv_device_info *info);
+
+/**
+ * Refine class_3d / class_compute / class_copy from RM classlist entries.
+ * class_list/count: results of GET_ENGINE_CLASSLIST for one engine.
+ * engine_kind: 0=graphics/3d, 1=compute, 2=copy, 3=nvdec, 4=nvenc.
+ * Picks highest class in the family band; does not clear family defaults if
+ * no match.
+ */
+void nv_device_info_refine_class_from_list(struct nv_device_info *info,
+                                          int engine_kind,
+                                          const uint32_t *class_list,
+                                          uint32_t count);
 
 #ifdef __cplusplus
 }

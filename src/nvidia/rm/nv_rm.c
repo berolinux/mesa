@@ -142,6 +142,39 @@ nv_rm_device_open(int drm_fd, int gpu_index)
    }
 
    nv_device_info_select_classes(&dev->info);
+
+   /* Best-effort refine 3D/compute/copy/video classes via RM classlist */
+   {
+      uint32_t clist[128];
+      uint32_t n;
+      n = 128;
+      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
+                                             NV2080_ENGINE_TYPE_GRAPHICS,
+                                             clist, &n) == 0 && n)
+         nv_device_info_refine_class_from_list(&dev->info, 0, clist, n);
+      n = 128;
+      /* Compute often shares GR engine classlist; also try COPY0 for CE */
+      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
+                                             NV2080_ENGINE_TYPE_GRAPHICS,
+                                             clist, &n) == 0 && n)
+         nv_device_info_refine_class_from_list(&dev->info, 1, clist, n);
+      n = 128;
+      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
+                                             NV2080_ENGINE_TYPE_COPY0,
+                                             clist, &n) == 0 && n)
+         nv_device_info_refine_class_from_list(&dev->info, 2, clist, n);
+      n = 128;
+      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
+                                             NV2080_ENGINE_TYPE_NVDEC0,
+                                             clist, &n) == 0 && n)
+         nv_device_info_refine_class_from_list(&dev->info, 3, clist, n);
+      n = 128;
+      if (nvidia_rm_gpu_get_engine_classlist(dev->nvdev,
+                                             NV2080_ENGINE_TYPE_NVENC0,
+                                             clist, &n) == 0 && n)
+         nv_device_info_refine_class_from_list(&dev->info, 4, clist, n);
+   }
+
    dev->valid = true;
 
    /* Best-effort: allocate private VASpace + usermode doorbell now so

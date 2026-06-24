@@ -1305,6 +1305,11 @@ nvgpu_destroy_context(struct pipe_context *pctx)
       nv_tex_pool_destroy(ctx->tex_pool);
    if (ctx->lmem_bo)
       nv_rm_bo_free(ctx->lmem_bo);
+   if (ctx->qmd_bo) {
+      if (ctx->qmd_map)
+         nv_rm_bo_unmap(ctx->qmd_bo);
+      nv_rm_bo_free(ctx->qmd_bo);
+   }
    if (ctx->indirect_shadow_bo) {
       if (ctx->indirect_shadow_map)
          nv_rm_bo_unmap(ctx->indirect_shadow_bo);
@@ -1578,13 +1583,31 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    desc.cta_z = cta_z;
    desc.register_count = regs;
    desc.shared_mem_size = nv_qmd_align_shared_mem(
-      cs && cs->nvsh ? 0 : 0); /* shared from NIR when tracked */
+      (cs && cs->nvsh && cs->nvsh->shared_mem_size) ? cs->nvsh->shared_mem_size
+                                                    : 0);
    desc.barrier_count = nv_qmd_default_barrier_count(cta_x, cta_y, cta_z);
    desc.sass_version = sass_ver;
    desc.sm_global_caching = true;
    desc.invalidate_caches = true;
    if (cs && cs->nvsh && cs->nvsh->local_mem_size)
       desc.local_mem_low = cs->nvsh->local_mem_size;
+
+   /* Dedicated QMD BO (host-mapped) for materialize + CE indirect patch */
+   if (!ctx->qmd_bo && ctx->screen && ctx->screen->rm) {
+      struct nv_rm_bo_req req;
+      memset(&req, 0, sizeof(req));
+      req.size = 4096; /* room for several QMDs / alignment */
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      ctx->qmd_bo = nv_rm_bo_alloc(ctx->screen->rm, &req);
+      if (ctx->qmd_bo) {
+         ctx->qmd_bo_size = 4096;
+         ctx->qmd_map = nv_rm_bo_map(ctx->qmd_bo);
+      }
+   }
 
    /* Ensure compute LMEM BO exists and program SET_SHADER_LOCAL_MEMORY* once */
    if (!ctx->lmem_bo && ctx->screen && ctx->screen->rm) {
@@ -1621,36 +1644,31 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    }
 
    if (indirect_gpu_only && indirect_gpu) {
-      /* Path B: placeholder QMD in push BO tail is unavailable; inline QMD
-       * upload with grid 1x1x1 then CE-patch from indirect GPU address.
-       * Without a dedicated qmd_bo we still encode and launch with host grid
-       * fallback when CE patch target is missing. */
+      /* Path B: materialize placeholder QMD, CE-patch grid from indirect GPU addr */
+      uint64_t qmd_addr = 0;
+      void *qmd_host = ctx->qmd_map;
       nv_qmd_prepare_indirect_placeholder(qmd_tmp, &desc, 0, 0);
+      if (ctx->qmd_bo)
+         qmd_addr = nv_rm_bo_gpu_offset(ctx->qmd_bo);
+      if (qmd_host)
+         memcpy(qmd_host, qmd_tmp, NV_QMD_BYTES);
       if (class_copy)
          nv_copy_set_object(&push, class_copy);
-      /* No stable QMD GPU address without scratch BO: fall back to direct
-       * dispatch with grid=1 (safe) unless push BO can host QMD. */
-      if (ctx->push_bo) {
-         uint64_t qmd_addr = nv_rm_bo_gpu_offset(ctx->push_bo);
-         void *qmd_host = nv_rm_bo_map(ctx->push_bo);
-         if (qmd_host) {
-            memcpy(qmd_host, qmd_tmp, NV_QMD_BYTES);
-            nv_rm_bo_unmap(ctx->push_bo);
-         }
-         if (qmd_addr) {
-            nv_copy_patch_qmd_grid_from_indirect(&push, class_copy,
-                                                 indirect_gpu, qmd_addr);
-            if (class_compute)
-               nv_compute_set_object(&push, class_compute);
-            else
-               nv_push_set_subch(&push, NV_PUSH_SUBCH_COMPUTE);
-            nv_compute_emit_inline_qmd_launch(&push, qmd_addr, qmd_tmp, true);
-         } else {
-            nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
-         }
+      if (qmd_addr) {
+         nv_copy_patch_qmd_grid_from_indirect(&push, class_copy,
+                                              indirect_gpu, qmd_addr);
+         if (class_compute)
+            nv_compute_set_object(&push, class_compute);
+         else
+            nv_push_set_subch(&push, NV_PUSH_SUBCH_COMPUTE);
+         nv_compute_emit_inline_qmd_launch(&push, qmd_addr, qmd_tmp, true);
       } else {
          nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
       }
+   } else if (ctx->qmd_bo && ctx->qmd_map) {
+      uint64_t qmd_addr = nv_rm_bo_gpu_offset(ctx->qmd_bo);
+      nv_compute_emit_dispatch_materialized(&push, &desc, qmd_addr,
+                                            ctx->qmd_map, class_compute);
    } else {
       nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
    }

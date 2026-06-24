@@ -43,6 +43,7 @@ struct nv_shader {
    uint32_t const_size;
    uint32_t register_count;       /* SET_PIPELINE_REGISTER_COUNT */
    uint32_t local_mem_size;       /* per-thread local/spill bytes (QMD local_mem_low) */
+   uint32_t shared_mem_size;      /* CTA shared memory bytes (QMD shared_mem) */
    uint32_t bind_group;           /* SET_PIPELINE_BINDING group */
    uint32_t pipeline_stage;       /* NV_3D_PIPE_STAGE_* */
    uint32_t pipeline_type;        /* NVC597_SET_PIPELINE_SHADER_TYPE_* */

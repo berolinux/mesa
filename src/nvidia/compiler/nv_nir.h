@@ -44,6 +44,7 @@ struct nv_compiler_result {
    uint32_t code_size;
    uint32_t register_count;
    uint32_t local_mem_size;
+   uint32_t shared_mem_size;
    bool success;
    char error[256];
 };

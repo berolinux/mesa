@@ -82,6 +82,10 @@ struct nvgpu_context {
    struct nv_rm_bo *lmem_bo;
    uint32_t lmem_bo_size;
    bool lmem_programmed;
+   /* Dedicated QMD scratch (256B aligned) for indirect compute / SEND_PCAS */
+   struct nv_rm_bo *qmd_bo;
+   void *qmd_map;
+   uint32_t qmd_bo_size;
 
    /* Bound state (minimal) */
    void *fs;
