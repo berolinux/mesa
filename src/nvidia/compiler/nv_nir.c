@@ -632,18 +632,39 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       break;
    }
 
-   case nir_intrinsic_load_interpolated_input:
-   case nir_intrinsic_load_input: {
-      /* Attribute fetch approximation: MOV from fixed R slot by location */
+   case nir_intrinsic_load_interpolated_input: {
+      /* IPA: interpolate attribute at pixel barycentrics.
+       * base = attribute index, component = .xyzw lane; src[0] is bary SSA
+       * (mode refined via interp_mode/interpolation info in later passes). */
       uint32_t loc = 0;
+      uint32_t comp = 0;
+      uint8_t mode = NV_SASS_IPA_MODE_SMOOTH;
       rd = ssa_reg_dst(&intr->def);
       if (nir_intrinsic_has_base(intr))
          loc = nir_intrinsic_base(intr);
-      else if (nir_intrinsic_has_component(intr))
-         loc = nir_intrinsic_component(intr);
-      /* R1..R15 reserved as input attribute temps in early isel */
-      ra = (uint8_t)(1 + (loc & 0x0f));
-      ok = nv_sass_emit_mov_rr(sb, rd, ra);
+      if (nir_intrinsic_has_component(intr))
+         comp = nir_intrinsic_component(intr);
+      (void)intr->src[0]; /* barycentric inputs consumed by IPA hardware path */
+      ok = nv_sass_emit_interp_input(sb, rd, (uint8_t)(loc & 0xff),
+                                     (uint8_t)(comp & 0x3), mode);
+      break;
+   }
+
+   case nir_intrinsic_load_input: {
+      /* Flat / non-interpolated input: IPA flat mode (or MOV slot fallback) */
+      uint32_t loc = 0;
+      uint32_t comp = 0;
+      rd = ssa_reg_dst(&intr->def);
+      if (nir_intrinsic_has_base(intr))
+         loc = nir_intrinsic_base(intr);
+      if (nir_intrinsic_has_component(intr))
+         comp = nir_intrinsic_component(intr);
+      ok = nv_sass_emit_ipa(sb, rd, (uint8_t)(loc & 0xff),
+                            (uint8_t)(comp & 0x3), NV_SASS_IPA_MODE_FLAT);
+      if (!ok) {
+         ra = (uint8_t)(1 + (loc & 0x0f));
+         ok = nv_sass_emit_mov_rr(sb, rd, ra);
+      }
       break;
    }
 

@@ -547,9 +547,50 @@ nv_sass_emit_pixld_comp(struct nv_sass_buf *b, uint8_t rd, uint8_t sr_idx)
 }
 
 bool
+nv_sass_emit_ipa(struct nv_sass_buf *b, uint8_t rd, uint8_t attr_idx,
+                 uint8_t component, uint8_t mode)
+{
+   uint32_t lo, hi;
+   nv_sass_note_reg(b, rd);
+   /* Maxwell-class IPA approximation: Rd, attr#, component, interp mode.
+    * Exact opcode bits refined against proprietary SASS later; structure
+    * matches nvk/hardware attribute interpolant pipeline. */
+   lo = (uint32_t)rd |
+        ((uint32_t)(attr_idx & 0xff) << 8) |
+        ((uint32_t)(component & 0x3) << 16);
+   hi = NV_SASS_IPA_HI_BASE | ((uint32_t)(mode & 0x3) << 0);
+   return nv_sass_emit_raw(b, lo, hi);
+}
+
+bool
+nv_sass_emit_ipa_vec4(struct nv_sass_buf *b, uint8_t rd_base,
+                      uint8_t attr_idx, uint8_t mode)
+{
+   unsigned c;
+   for (c = 0; c < 4; c++) {
+      if (!nv_sass_emit_ipa(b, (uint8_t)(rd_base + c), attr_idx,
+                            (uint8_t)c, mode))
+         return false;
+   }
+   return true;
+}
+
+bool
+nv_sass_emit_interp_input(struct nv_sass_buf *b, uint8_t rd,
+                          uint8_t attr_idx, uint8_t component,
+                          uint8_t bary_mode)
+{
+   /* Prefer IPA; attr_idx is NIR location/base (clamped). */
+   return nv_sass_emit_ipa(b, rd, attr_idx, component, bary_mode);
+}
+
+bool
 nv_sass_emit_frag_coord(struct nv_sass_buf *b, uint8_t rd_base)
 {
-   /* Four consecutive regs: x,y,z,w — provisional S2R indices until IPA wired */
+   /* Position interpolant is attribute 0 in SPH/IA layout; use IPA smooth. */
+   if (nv_sass_emit_ipa_vec4(b, rd_base, 0, NV_SASS_IPA_MODE_SMOOTH))
+      return true;
+   /* Fallback: provisional S2R indices */
    if (!nv_sass_emit_s2r(b, rd_base + 0, NV_SASS_SR_FRAGMENT_X))
       return false;
    if (!nv_sass_emit_s2r(b, rd_base + 1, NV_SASS_SR_FRAGMENT_Y))

@@ -59,6 +59,24 @@ extern "C" {
 #define NVC597_SET_VERTEX_STREAM_SIZE_A(j)      (0x0600 + (j) * 8)
 #define NVC597_SET_VERTEX_STREAM_SIZE_B(j)      (0x0604 + (j) * 8)
 
+/* Stream output (transform feedback) — offsets stable Maxwell..Ada (clce97/clc597) */
+#define NVC597_SET_STREAM_OUT_BUFFER_ENABLE(j)              (0x0380 + (j) * 32)
+#define NVC597_SET_STREAM_OUT_BUFFER_ENABLE_V_FALSE         0x0
+#define NVC597_SET_STREAM_OUT_BUFFER_ENABLE_V_TRUE          0x1
+#define NVC597_SET_STREAM_OUT_BUFFER_ADDRESS_A(j)           (0x0384 + (j) * 32)
+#define NVC597_SET_STREAM_OUT_BUFFER_ADDRESS_B(j)           (0x0388 + (j) * 32)
+#define NVC597_SET_STREAM_OUT_BUFFER_SIZE(j)                (0x038c + (j) * 32)
+#define NVC597_SET_STREAM_OUT_BUFFER_LOAD_WRITE_POINTER(j)  (0x0390 + (j) * 32)
+#define NVC597_SET_STREAM_OUT_CONTROL_STREAM(j)             (0x0700 + (j) * 16)
+#define NVC597_SET_STREAM_OUT_CONTROL_COMPONENT_COUNT(j)    (0x0704 + (j) * 16)
+#define NVC597_SET_STREAM_OUT_CONTROL_STRIDE(j)             (0x0708 + (j) * 16)
+#define NVC597_SET_STREAM_OUTPUT                            0x0744
+#define NVC597_SET_STREAM_OUTPUT_ENABLE_FALSE               0x0
+#define NVC597_SET_STREAM_OUTPUT_ENABLE_TRUE                0x1
+/* layout select: stream i, dword j packs 4 attribute numbers (byte each) */
+#define NVC597_SET_STREAM_OUT_LAYOUT_SELECT(i, j)           (0x2800 + (i) * 128 + (j) * 4)
+#define NVC597_SET_MAX_STREAM_OUTPUT_GS_INSTANCES_PER_TASK  0x0d60
+
 #define NVC597_SET_VERTEX_ATTRIBUTE_A(i)        (0x1160 + (i) * 4)
 #define NVC597_SET_VERTEX_ATTRIBUTE_A_STREAM_SHIFT            0
 #define NVC597_SET_VERTEX_ATTRIBUTE_A_SOURCE_INACTIVE         (1u << 6)
@@ -1251,6 +1269,154 @@ nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
                   NVC36F_SEMAPHORED_OPERATION_RELEASE |
                   NVC36F_SEMAPHORED_RELEASE_WFI_DIS |
                   NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+}
+
+/** 3D report semaphore acquire: stall until memory at sema_gpu_addr == payload. */
+static inline void
+nv_3d_report_semaphore_acquire(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload, bool one_word)
+{
+   uint32_t d = NVC597_SET_REPORT_SEMAPHORE_D_OPERATION_ACQUIRE |
+                NVC597_SET_REPORT_SEMAPHORE_D_PIPELINE_LOCATION_ALL |
+                (one_word ? NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_ONE_WORD
+                          : NVC597_SET_REPORT_SEMAPHORE_D_STRUCTURE_SIZE_FOUR_WORDS);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_A,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_B,
+                  (uint32_t)(sema_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_C, payload);
+   nv_push_method(p, NVC597_SET_REPORT_SEMAPHORE_D, d);
+}
+
+/* ---- Stream output (transform feedback) ---- */
+
+/** Bind or unbind SO buffer slot j (0..3). size_bytes 0 disables. */
+static inline void
+nv_3d_set_stream_out_buffer(struct nv_push *p, unsigned j, uint64_t gpu_addr,
+                            uint32_t size_bytes)
+{
+   if (j >= 4)
+      return;
+   if (!size_bytes || !gpu_addr) {
+      nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_ENABLE(j),
+                     NVC597_SET_STREAM_OUT_BUFFER_ENABLE_V_FALSE);
+      return;
+   }
+   nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_ADDRESS_A(j),
+                  (uint32_t)(gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_ADDRESS_B(j),
+                  (uint32_t)(gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_SIZE(j), size_bytes);
+   nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_ENABLE(j),
+                  NVC597_SET_STREAM_OUT_BUFFER_ENABLE_V_TRUE);
+}
+
+/** Reset write pointer for SO buffer j (byte offset into the buffer). */
+static inline void
+nv_3d_set_stream_out_buffer_write_pointer(struct nv_push *p, unsigned j,
+                                          uint32_t start_offset_bytes)
+{
+   if (j >= 4)
+      return;
+   nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_LOAD_WRITE_POINTER(j),
+                  start_offset_bytes);
+}
+
+/**
+ * Program SO control for buffer slot b: which GS/VS stream, how many components,
+ * and output stride in bytes.
+ */
+static inline void
+nv_3d_set_stream_out_control(struct nv_push *p, unsigned b, unsigned stream_select,
+                             unsigned component_count, uint32_t stride_bytes)
+{
+   if (b >= 4)
+      return;
+   nv_push_method(p, NVC597_SET_STREAM_OUT_CONTROL_STREAM(b),
+                  stream_select & 0x3);
+   nv_push_method(p, NVC597_SET_STREAM_OUT_CONTROL_COMPONENT_COUNT(b),
+                  component_count & 0xff);
+   nv_push_method(p, NVC597_SET_STREAM_OUT_CONTROL_STRIDE(b), stride_bytes);
+}
+
+/**
+ * Emit one layout-select dword: four attribute numbers (8-bit each).
+ * dword_index is 0..31 per stream buffer; attrs[4] may include 0xff for holes.
+ */
+static inline void
+nv_3d_set_stream_out_layout_dword(struct nv_push *p, unsigned stream_buf,
+                                  unsigned dword_index, const uint8_t attrs[4])
+{
+   uint32_t v;
+   if (stream_buf >= 4 || dword_index >= 32)
+      return;
+   v = (uint32_t)attrs[0] |
+       ((uint32_t)attrs[1] << 8) |
+       ((uint32_t)attrs[2] << 16) |
+       ((uint32_t)attrs[3] << 24);
+   nv_push_method(p, NVC597_SET_STREAM_OUT_LAYOUT_SELECT(stream_buf, dword_index), v);
+}
+
+/** Global SO enable/disable (after buffers/control/layout programmed). */
+static inline void
+nv_3d_set_stream_output_enable(struct nv_push *p, bool enable)
+{
+   nv_push_method(p, NVC597_SET_STREAM_OUTPUT,
+                  enable ? NVC597_SET_STREAM_OUTPUT_ENABLE_TRUE
+                         : NVC597_SET_STREAM_OUTPUT_ENABLE_FALSE);
+}
+
+/** Disable all four SO buffers and turn off stream output. */
+static inline void
+nv_3d_stream_out_disable_all(struct nv_push *p)
+{
+   unsigned j;
+   nv_3d_set_stream_output_enable(p, false);
+   for (j = 0; j < 4; j++)
+      nv_push_method(p, NVC597_SET_STREAM_OUT_BUFFER_ENABLE(j),
+                     NVC597_SET_STREAM_OUT_BUFFER_ENABLE_V_FALSE);
+}
+
+/**
+ * Program a simple interleaved SO layout for buffer 0: sequential attributes
+ * 0..attr_count-1, stride = attr_count * 4 (float/dword components).
+ * Suitable for Gallium set_stream_output_targets when shader xfb is minimal.
+ */
+static inline void
+nv_3d_stream_out_setup_simple(struct nv_push *p, unsigned buf_idx,
+                              uint64_t gpu_addr, uint32_t size_bytes,
+                              unsigned stream_select, unsigned attr_count,
+                              uint32_t stride_bytes)
+{
+   unsigned dwords, di, ai;
+   uint8_t attrs[4];
+
+   if (buf_idx >= 4)
+      return;
+   if (!gpu_addr || !size_bytes || !attr_count) {
+      nv_3d_set_stream_out_buffer(p, buf_idx, 0, 0);
+      return;
+   }
+   if (!stride_bytes)
+      stride_bytes = attr_count * 4u;
+   nv_3d_set_stream_out_buffer(p, buf_idx, gpu_addr, size_bytes);
+   nv_3d_set_stream_out_buffer_write_pointer(p, buf_idx, 0);
+   nv_3d_set_stream_out_control(p, buf_idx, stream_select, attr_count, stride_bytes);
+
+   dwords = (attr_count + 3u) / 4u;
+   if (dwords > 32)
+      dwords = 32;
+   ai = 0;
+   for (di = 0; di < dwords; di++) {
+      unsigned k;
+      for (k = 0; k < 4; k++) {
+         if (ai < attr_count)
+            attrs[k] = (uint8_t)(ai++);
+         else
+            attrs[k] = 0xff;
+      }
+      nv_3d_set_stream_out_layout_dword(p, buf_idx, di, attrs);
+   }
 }
 
 /** One-time channel defaults (subset of nvidia-3d fermi initChannel). */

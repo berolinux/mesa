@@ -204,7 +204,7 @@ extern "C" {
 #define NV_SASS_SR_PM5          9
 #define NV_SASS_SR_PM6          10
 #define NV_SASS_SR_PM7          11
-/* PIXLD-style fragment inputs via S2R (IPA preferred; indices provisional) */
+/* PIXLD-style fragment inputs via S2R (fallback when IPA not used) */
 #define NV_SASS_SR_FRAGMENT_X   12
 #define NV_SASS_SR_FRAGMENT_Y   13
 #define NV_SASS_SR_FRAGMENT_Z   14
@@ -215,6 +215,16 @@ extern "C" {
 #define NV_SASS_SR_VIEWPORT     19
 #define NV_SASS_SR_POINT_X      20
 #define NV_SASS_SR_POINT_Y      21
+
+/* IPA — interpolate attribute (Maxwell/Pascal class; refined vs binary later).
+ * Rd gets interpolated value for attribute index / component.
+ * mode: smooth/perspective (0), flat (1), centroid (2), sc (3). */
+#define NV_SASS_IPA_HI_BASE     0xE0000000u
+#define NV_SASS_IPA_MODE_SMOOTH     0
+#define NV_SASS_IPA_MODE_FLAT       1
+#define NV_SASS_IPA_MODE_CENTROID   2
+#define NV_SASS_IPA_MODE_SC         3
+/* Attribute slot in lo bits [15:8], component in [17:16], mode in hi [1:0] */
 
 struct nv_sass_buf {
    uint32_t *dwords;     /* owned array; 2 dwords per instruction */
@@ -306,8 +316,18 @@ bool nv_sass_emit_vote_ballot(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_re
 bool nv_sass_emit_elect(struct nv_sass_buf *b, uint8_t rd);
 /* PIXLD: load fragment attribute component (stand-in: S2R + mov) */
 bool nv_sass_emit_pixld_comp(struct nv_sass_buf *b, uint8_t rd, uint8_t sr_idx);
-/* Load frag_coord x/y/z/w into rd..rd+3 via four S2R (IPA path later) */
+/* IPA: interpolate VS/FS input attribute (attr_idx + component 0..3, mode) */
+bool nv_sass_emit_ipa(struct nv_sass_buf *b, uint8_t rd, uint8_t attr_idx,
+                      uint8_t component, uint8_t mode);
+/* IPA vec4: four consecutive components for one attribute into rd..rd+3 */
+bool nv_sass_emit_ipa_vec4(struct nv_sass_buf *b, uint8_t rd_base,
+                           uint8_t attr_idx, uint8_t mode);
+/* Load frag_coord x/y/z/w via IPA attr 0 (position interpolant), S2R fallback */
 bool nv_sass_emit_frag_coord(struct nv_sass_buf *b, uint8_t rd_base);
+/* Interpolated input: IPA when possible, else MOV from fixed R slot */
+bool nv_sass_emit_interp_input(struct nv_sass_buf *b, uint8_t rd,
+                               uint8_t attr_idx, uint8_t component,
+                               uint8_t bary_mode);
 
 /* Copy first min(count, dst_cap_dwords) into dst; returns dwords copied. */
 uint32_t nv_sass_buf_copy_out(const struct nv_sass_buf *b,

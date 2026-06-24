@@ -1736,27 +1736,46 @@ static bool
 nvgpu_get_query_result(struct pipe_context *pctx, struct pipe_query *pq,
                        bool wait, union pipe_query_result *result)
 {
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
    struct nvgpu_query *q = (struct nvgpu_query *)pq;
    volatile uint32_t *dw;
-   uint64_t deadline_ns;
-   (void)pctx;
+   unsigned spins;
 
    if (!q || !result)
       return false;
 
    if (q->map) {
       dw = q->map;
-      if (wait) {
-         deadline_ns = 2000000000ull; /* 2s coarse */
-         while (!dw[0] && !dw[1] && deadline_ns) {
-            /* spin briefly; no proper sema wait yet */
-            deadline_ns -= 1000;
+      /* Fast path: already written by GPU */
+      if (dw[0] || dw[1] || dw[2] || dw[3]) {
+         q->result = ((uint64_t)dw[1] << 32) | dw[0];
+         q->result_ready = true;
+      } else if (wait && q->gpu_addr) {
+         /* GPU-side acquire on report sema (payload 1 written by end_query),
+          * then WFI so subsequent host read sees coherent data. */
+         struct nv_push push;
+         if (nvgpu_push_start(ctx, &push, 48)) {
+            const struct nv_device_info *di = ctx->screen ? ctx->screen->info : NULL;
+            if (di && di->class_3d)
+               nv_3d_set_object(&push, di->class_3d);
+            else
+               nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+            nv_3d_report_semaphore_acquire(&push, q->gpu_addr, 1, false);
+            nv_push_wfi(&push);
+            nvgpu_push_finish(ctx, &push, true);
          }
-      }
-      q->result = ((uint64_t)dw[1] << 32) | dw[0];
-      if (!q->result && dw[0] == 0 && dw[1] == 0 && !wait)
+         /* Host poll with fence wait as belt-and-suspenders */
+         if (ctx->fence && ctx->last_fence_seq)
+            nv_fence_wait(ctx->fence, ctx->last_fence_seq, 2000000000ull);
+         else if (ctx->channel)
+            nv_channel_wait_idle(ctx->channel, 2000000000ull);
+         for (spins = 0; spins < 1000000 && !dw[0] && !dw[1]; spins++)
+            ;
+         q->result = ((uint64_t)dw[1] << 32) | dw[0];
+         q->result_ready = (dw[0] || dw[1] || dw[2] || dw[3]);
+      } else if (!wait) {
          return false; /* not ready */
-      q->result_ready = true;
+      }
    }
 
    switch (q->type) {
@@ -1845,6 +1864,210 @@ nvgpu_clear_buffer(struct pipe_context *pctx, struct pipe_resource *pres,
       return;
    nv_copy_push_remap_fill_u32(&push, class_copy, addr, size & ~3u, fill_data);
    nvgpu_push_finish(ctx, &push, true);
+}
+
+/* ---- stream output (transform feedback) ---- */
+
+static void
+nvgpu_set_stream_output_targets(struct pipe_context *pctx,
+                                unsigned num_targets,
+                                struct pipe_stream_output_target **targets,
+                                const unsigned *offsets,
+                                enum mesa_prim output_prim)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   const struct nv_device_info *di;
+   unsigned i;
+   (void)output_prim;
+
+   /* Release previous targets */
+   for (i = 0; i < ctx->num_so_targets; i++) {
+      if (ctx->so_targets[i])
+         pipe_so_target_reference(&ctx->so_targets[i], NULL);
+   }
+   ctx->num_so_targets = 0;
+   ctx->so_append_bitmask = 0;
+   ctx->so_enabled = false;
+
+   if (!num_targets || !targets) {
+      if (nvgpu_push_start(ctx, &push, 32)) {
+         di = ctx->screen ? ctx->screen->info : NULL;
+         if (di && di->class_3d)
+            nv_3d_set_object(&push, di->class_3d);
+         else
+            nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+         nv_3d_stream_out_disable_all(&push);
+         nvgpu_push_finish(ctx, &push, true);
+      }
+      return;
+   }
+
+   if (!nvgpu_push_start(ctx, &push, 256))
+      return;
+   di = ctx->screen ? ctx->screen->info : NULL;
+   if (di && di->class_3d)
+      nv_3d_set_object(&push, di->class_3d);
+   else
+      nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+
+   for (i = 0; i < 4; i++) {
+      if (i >= num_targets || !targets[i]) {
+         nv_3d_set_stream_out_buffer(&push, i, 0, 0);
+         continue;
+      }
+      struct pipe_stream_output_target *t = targets[i];
+      struct nvgpu_resource *res = nvgpu_resource(t->buffer);
+      uint64_t addr = 0;
+      uint32_t size_bytes = 0;
+      unsigned append = 0;
+
+      pipe_so_target_reference(&ctx->so_targets[i], t);
+      if (res)
+         addr = res->gpu_offset + t->buffer_offset;
+      size_bytes = t->buffer_size;
+      if (offsets && offsets[i] == (unsigned)-1)
+         append = 1;
+      if (append)
+         ctx->so_append_bitmask |= (1u << i);
+      else
+         nv_3d_set_stream_out_buffer_write_pointer(&push, i, 0);
+
+      /* Default: 4 components/attr stride until shader xfb layout is wired */
+      nv_3d_stream_out_setup_simple(&push, i, addr, size_bytes,
+                                    0 /* stream 0 */, 4, 16);
+      if (!append)
+         nv_3d_set_stream_out_buffer_write_pointer(&push, i, 0);
+      ctx->num_so_targets = i + 1;
+      ctx->so_enabled = true;
+   }
+   /* Disable unused slots */
+   for (; i < 4; i++)
+      nv_3d_set_stream_out_buffer(&push, i, 0, 0);
+
+   nv_3d_set_stream_output_enable(&push, ctx->so_enabled);
+   nvgpu_push_finish(ctx, &push, true);
+}
+
+static void
+nvgpu_clear_texture(struct pipe_context *pctx, struct pipe_resource *pres,
+                    unsigned level, const struct pipe_box *box,
+                    const void *data)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_resource *res = nvgpu_resource(pres);
+   const struct nv_device_info *di;
+   struct nv_push push;
+   uint64_t addr;
+   uint32_t fill_data = 0;
+   uint32_t class_copy = 0;
+   unsigned bpp, layer_stride, size;
+
+   if (!pres || !res || !box)
+      return;
+   /* Linear/BO clear via CE REMAP for level 0 full/subrect when possible */
+   bpp = util_format_get_blocksize(pres->format);
+   if (!bpp)
+      bpp = 4;
+   if (data && bpp <= 4) {
+      memcpy(&fill_data, data, bpp);
+      if (bpp == 1) {
+         fill_data &= 0xffu;
+         fill_data |= fill_data << 8;
+         fill_data |= fill_data << 16;
+      } else if (bpp == 2)
+         fill_data = (fill_data & 0xffffu) | ((fill_data & 0xffffu) << 16);
+   }
+   layer_stride = (unsigned)pres->width0 * bpp;
+   if (pres->target != PIPE_BUFFER && level == 0 && box->x == 0 && box->y == 0 &&
+       box->width == (int)pres->width0 && box->height == (int)pres->height0) {
+      size = layer_stride * (unsigned)box->height * (unsigned)MAX2(box->depth, 1);
+      addr = res->gpu_offset;
+      di = ctx->screen ? ctx->screen->info : NULL;
+      class_copy = di ? di->class_copy : 0;
+      if (nvgpu_push_start(ctx, &push, 64)) {
+         nv_copy_push_remap_fill_u32(&push, class_copy, addr, size & ~3u,
+                                     fill_data);
+         nvgpu_push_finish(ctx, &push, true);
+         return;
+      }
+   }
+   /* Fallback: software clear via transfer (slow path) */
+   util_clear_texture_sw(pctx, pres, level, box, data);
+}
+
+static void
+nvgpu_get_sample_position(struct pipe_context *pctx, unsigned sample_count,
+                          unsigned sample_index, float *out_value)
+{
+   (void)pctx;
+   /* Standard MSAA positions (subset; matches common GL defaults) */
+   static const float pos1[1][2] = { { 0.5f, 0.5f } };
+   static const float pos2[2][2] = { { 0.25f, 0.25f }, { 0.75f, 0.75f } };
+   static const float pos4[4][2] = {
+      { 0.375f, 0.125f }, { 0.875f, 0.375f },
+      { 0.125f, 0.625f }, { 0.625f, 0.875f }
+   };
+   const float (*tbl)[2] = pos1;
+   unsigned n = 1;
+   if (sample_count >= 4) {
+      tbl = pos4;
+      n = 4;
+   } else if (sample_count >= 2) {
+      tbl = pos2;
+      n = 2;
+   }
+   if (sample_index >= n)
+      sample_index = 0;
+   out_value[0] = tbl[sample_index][0];
+   out_value[1] = tbl[sample_index][1];
+}
+
+static uint64_t
+nvgpu_get_timestamp(struct pipe_context *pctx)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct pipe_query *pq;
+   union pipe_query_result qr;
+   uint64_t ts = 0;
+
+   pq = nvgpu_create_query(pctx, PIPE_QUERY_TIMESTAMP, 0);
+   if (!pq)
+      return 0;
+   if (nvgpu_begin_query(pctx, pq))
+      nvgpu_end_query(pctx, pq);
+   if (nvgpu_get_query_result(pctx, pq, true, &qr))
+      ts = qr.u64;
+   nvgpu_destroy_query(pctx, pq);
+   (void)ctx;
+   return ts;
+}
+
+static void
+nvgpu_flush_resource(struct pipe_context *pctx, struct pipe_resource *pres)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   (void)pres;
+   /* Ensure GPU writes to resource are ordered: WFI + texture/memory barrier */
+   if (!nvgpu_push_start(ctx, &push, 32))
+      return;
+   nv_push_wfi(&push);
+   nv_3d_emit_memory_barrier(&push, true, true, true, false, false, false);
+   nv_3d_emit_texture_barrier(&push);
+   nvgpu_push_finish(ctx, &push, true);
+}
+
+static void
+nvgpu_invalidate_resource(struct pipe_context *pctx, struct pipe_resource *pres)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nv_push push;
+   (void)pres;
+   if (!nvgpu_push_start(ctx, &push, 16))
+      return;
+   nv_3d_emit_texture_barrier(&push);
+   nvgpu_push_finish(ctx, &push, false);
 }
 
 struct pipe_context *
@@ -1936,6 +2159,12 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.end_query = nvgpu_end_query;
    ctx->base.get_query_result = nvgpu_get_query_result;
    ctx->base.clear_buffer = nvgpu_clear_buffer;
+   ctx->base.clear_texture = nvgpu_clear_texture;
+   ctx->base.set_stream_output_targets = nvgpu_set_stream_output_targets;
+   ctx->base.get_sample_position = nvgpu_get_sample_position;
+   ctx->base.get_timestamp = nvgpu_get_timestamp;
+   ctx->base.flush_resource = nvgpu_flush_resource;
+   ctx->base.invalidate_resource = nvgpu_invalidate_resource;
    ctx->base.launch_grid = nvgpu_launch_grid;
 
    nvgpu_ensure_channel(ctx);

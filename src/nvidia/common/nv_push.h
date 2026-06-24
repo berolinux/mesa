@@ -201,6 +201,33 @@ nv_push_sema_release(struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload
                   NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
 }
 
+/* Host semaphore acquire (stall channel until mem == payload; ACQ_GEQ variant). */
+static inline void
+nv_push_sema_acquire(struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload)
+{
+   nv_push_method(p, NVC36F_SEMAPHOREA, (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB, (uint32_t)(sema_gpu_addr & ~0x3u));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED,
+                  NVC36F_SEMAPHORED_OPERATION_ACQUIRE |
+                  NVC36F_SEMAPHORED_ACQUIRE_SWITCH_TSG_ENABLE |
+                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+}
+
+/* Acquire when sema value is >= payload (typical progress sema pattern). */
+static inline void
+nv_push_sema_acquire_geq(struct nv_push *p, uint64_t sema_gpu_addr,
+                         uint32_t payload)
+{
+   nv_push_method(p, NVC36F_SEMAPHOREA, (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB, (uint32_t)(sema_gpu_addr & ~0x3u));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED,
+                  NVC36F_SEMAPHORED_OPERATION_ACQ_GEQ |
+                  NVC36F_SEMAPHORED_ACQUIRE_SWITCH_TSG_ENABLE |
+                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
+}
+
 static inline void
 nv_push_wfi(struct nv_push *p)
 {

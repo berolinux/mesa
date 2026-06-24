@@ -109,6 +109,12 @@ struct nvgpu_context {
    bool cond_render_active;
    bool cond_render_inverted;
    struct pipe_query *active_occlusion; /* non-NULL while begin_query active */
+
+   /* Stream output (transform feedback) targets */
+   struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
+   unsigned num_so_targets;
+   unsigned so_append_bitmask; /* bit i set => append (don't reset write ptr) */
+   bool so_enabled;
 };
 
 /* Occlusion / timestamp query backed by RM sema BO (report semaphore target).
