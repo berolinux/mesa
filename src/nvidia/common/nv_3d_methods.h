@@ -301,6 +301,25 @@ extern "C" {
 #define NVC597_OGL_SET_CULL_FACE_V_FRONT_AND_BACK 0x408
 #define NVC597_SET_CT_WRITE(i)                  (0x1a00 + (i) * 4)
 #define NVC597_SET_LINE_WIDTH_FLOAT             0x0d40
+#define NVC597_SET_POLY_OFFSET_POINT            0x0db0
+#define NVC597_SET_POLY_OFFSET_LINE             0x0db4
+#define NVC597_SET_POLY_OFFSET_FILL             0x0db8
+#define NVC597_SET_DEPTH_BIAS                   0x0dbc
+#define NVC597_SET_SLOPE_SCALE_DEPTH_BIAS       0x0dc0
+#define NVC597_SET_DEPTH_BIAS_CLAMP             0x0dc4
+#define NVC597_SET_ANTI_ALIAS_ENABLE            0x0d58
+#define NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL     0x0d5c
+#define NVC597_SET_SAMPLE_MASK_X0_Y0            0x0d60
+#define NVC597_SET_SAMPLE_MASK_X1_Y0            0x0d64
+#define NVC597_SET_SAMPLE_MASK_X0_Y1            0x0d68
+#define NVC597_SET_SAMPLE_MASK_X1_Y1            0x0d6c
+#define NVC597_SET_ANTI_ALIAS_SAMPLES           0x0d54
+#define NVC597_SET_BLEND_CONST_RED              0x0d20
+#define NVC597_SET_BLEND_CONST_GREEN            0x0d24
+#define NVC597_SET_BLEND_CONST_BLUE             0x0d28
+#define NVC597_SET_BLEND_CONST_ALPHA            0x0d2c
+#define NVC597_SET_BLEND_ENABLE_COMMON          0x0d1c
+/* NVC597_SET_LOGIC_OP / LOGIC_OP_ENABLE already defined above (0x19c4/0x19c8) */
 #define NVC597_SET_PROVOKING_VERTEX             0x0d68
 #define NVC597_SET_PROVOKING_VERTEX_V_FIRST     0x0
 #define NVC597_SET_PROVOKING_VERTEX_V_LAST      0x1
@@ -1025,13 +1044,88 @@ nv_3d_emit_depth_bias(struct nv_push *p, bool enable,
                       float constant_factor, float clamp, float slope_factor)
 {
    union { float f; uint32_t u; } cf, cl, sf;
-   /* Depth bias methods vary; emit test enable via depth bias enable if present */
-   (void)enable;
    cf.f = constant_factor;
    cl.f = clamp;
    sf.f = slope_factor;
-   /* Store factors in push for completeness; full bias class methods refined later */
-   (void)cf; (void)cl; (void)sf;
+   /* Polygon offset enable: fill (triangles); line/point optional */
+   nv_push_method(p, NVC597_SET_POLY_OFFSET_FILL, enable ? 1 : 0);
+   nv_push_method(p, NVC597_SET_POLY_OFFSET_LINE, enable ? 1 : 0);
+   nv_push_method(p, NVC597_SET_POLY_OFFSET_POINT, 0);
+   nv_push_method(p, NVC597_SET_DEPTH_BIAS, cf.u);
+   nv_push_method(p, NVC597_SET_SLOPE_SCALE_DEPTH_BIAS, sf.u);
+   nv_push_method(p, NVC597_SET_DEPTH_BIAS_CLAMP, cl.u);
+}
+
+static inline void
+nv_3d_emit_sample_mask(struct nv_push *p, uint32_t sample_mask)
+{
+   /* Replicate 16-bit/32-bit sample mask across 2x2 pixel sample mask regs */
+   nv_push_method(p, NVC597_SET_SAMPLE_MASK_X0_Y0, sample_mask);
+   nv_push_method(p, NVC597_SET_SAMPLE_MASK_X1_Y0, sample_mask);
+   nv_push_method(p, NVC597_SET_SAMPLE_MASK_X0_Y1, sample_mask);
+   nv_push_method(p, NVC597_SET_SAMPLE_MASK_X1_Y1, sample_mask);
+}
+
+static inline void
+nv_3d_emit_msaa(struct nv_push *p, uint32_t sample_count, bool alpha_to_coverage)
+{
+   uint32_t samples_log2 = 0;
+   if (sample_count >= 16)
+      samples_log2 = 4;
+   else if (sample_count >= 8)
+      samples_log2 = 3;
+   else if (sample_count >= 4)
+      samples_log2 = 2;
+   else if (sample_count >= 2)
+      samples_log2 = 1;
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_ENABLE, sample_count > 1 ? 1 : 0);
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_SAMPLES, samples_log2);
+   nv_push_method(p, NVC597_SET_ANTI_ALIAS_ALPHA_CONTROL,
+                  alpha_to_coverage ? 1 : 0);
+}
+
+static inline void
+nv_3d_emit_blend_constants(struct nv_push *p,
+                           float r, float g, float b, float a)
+{
+   union { float f; uint32_t u; } c;
+   c.f = r; nv_push_method(p, NVC597_SET_BLEND_CONST_RED, c.u);
+   c.f = g; nv_push_method(p, NVC597_SET_BLEND_CONST_GREEN, c.u);
+   c.f = b; nv_push_method(p, NVC597_SET_BLEND_CONST_BLUE, c.u);
+   c.f = a; nv_push_method(p, NVC597_SET_BLEND_CONST_ALPHA, c.u);
+}
+
+static inline void
+nv_3d_emit_color_write_mask(struct nv_push *p, unsigned target_index,
+                            unsigned rgba_mask)
+{
+   unsigned ti = target_index & 7u;
+   nv_push_method(p, NVC597_SET_CT_WRITE(ti), rgba_mask & 0xf);
+}
+
+static inline void
+nv_3d_emit_blend_enable_target(struct nv_push *p, unsigned target_index,
+                               bool enable)
+{
+   /* Per-target blend enable; index 0 uses SET_BLEND(0) */
+   unsigned ti = target_index & 7u;
+   nv_push_method(p, NVC597_SET_BLEND(ti), enable ? 1 : 0);
+}
+
+/** Host semaphore acquire (wait until sema memory >= payload or == payload) */
+static inline void
+nv_push_host_semaphore_acquire(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload)
+{
+   nv_push_method(p, NVC36F_SEMAPHOREA,
+                  (uint32_t)(sema_gpu_addr >> 32) & 0xff);
+   nv_push_method(p, NVC36F_SEMAPHOREB,
+                  (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu));
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+   nv_push_method(p, NVC36F_SEMAPHORED,
+                  NVC36F_SEMAPHORED_OPERATION_ACQ_GEQ |
+                  NVC36F_SEMAPHORED_ACQUIRE_SWITCH_TSG_ENABLE |
+                  NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE);
 }
 
 static inline void
