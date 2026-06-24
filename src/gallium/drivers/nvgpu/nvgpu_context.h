@@ -70,9 +70,17 @@ struct nvgpu_context {
    void *sampler_cso[PIPE_MAX_SAMPLERS];
    unsigned num_sampler_cso;
 
+   /* Compute global LMEM backing (SET_SHADER_LOCAL_MEMORY*) */
+   struct nv_rm_bo *lmem_bo;
+   uint32_t lmem_bo_size;
+   bool lmem_programmed;
+
    /* Bound state (minimal) */
    void *fs;
    void *vs;
+   void *gs;   /* geometry shader CSO (optional) */
+   void *tcs;  /* tess control */
+   void *tes;  /* tess eval */
    void *cs;  /* compute CSO */
    void *blend;
    void *zsa;

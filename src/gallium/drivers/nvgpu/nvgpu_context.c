@@ -1025,6 +1025,8 @@ nvgpu_destroy_context(struct pipe_context *pctx)
 
    if (ctx->tex_pool)
       nv_tex_pool_destroy(ctx->tex_pool);
+   if (ctx->lmem_bo)
+      nv_rm_bo_free(ctx->lmem_bo);
    if (ctx->fence)
       nv_fence_destroy(ctx->fence);
    if (ctx->channel)
@@ -1222,11 +1224,38 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    if (cs && cs->nvsh && cs->nvsh->local_mem_size)
       desc.local_mem_low = cs->nvsh->local_mem_size;
 
-   /* Program LMEM window when shader needs spill/local (requires screen LMEM BO later) */
-   if (desc.local_mem_low && di && di->tpc_count) {
-      /* Without a dedicated LMEM BO on the context, still emit size/SM count
-       * with a zero address is invalid; skip until screen allocates one. */
-      (void)di;
+   /* Ensure compute LMEM BO exists and program SET_SHADER_LOCAL_MEMORY* once */
+   if (!ctx->lmem_bo && ctx->screen && ctx->screen->rm) {
+      struct nv_rm_bo_req req;
+      uint32_t sm_count = 2;
+      uint64_t lmem_need;
+      if (di && di->tpc_count)
+         sm_count = di->tpc_count;
+      lmem_need = nv_lmem_total_bo_bytes(desc.local_mem_low, sm_count);
+      if (lmem_need > 0x10000000ull)
+         lmem_need = 0x10000000ull;
+      if (lmem_need < 0x10000ull)
+         lmem_need = 0x10000ull;
+      memset(&req, 0, sizeof(req));
+      req.size = (uint32_t)lmem_need;
+      req.alignment = 4096;
+      req.vram = true;
+      req.cpu_access = false;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      ctx->lmem_bo = nv_rm_bo_alloc(ctx->screen->rm, &req);
+      if (ctx->lmem_bo)
+         ctx->lmem_bo_size = (uint32_t)lmem_need;
+   }
+   if (ctx->lmem_bo && !ctx->lmem_programmed) {
+      uint64_t lmem_addr = nv_rm_bo_gpu_offset(ctx->lmem_bo);
+      uint32_t sm_count = (di && di->tpc_count) ? di->tpc_count : 1;
+      if (lmem_addr) {
+         nv_compute_set_shader_local_memory_for_shader(&push, lmem_addr,
+                                                      desc.local_mem_low,
+                                                      sm_count);
+         ctx->lmem_programmed = true;
+      }
    }
 
    nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
