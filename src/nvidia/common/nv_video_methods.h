@@ -132,6 +132,28 @@ nv_nvdec_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
    nv_push_method(p, NV_NVDEC_SEMAPHORE_C, payload);
 }
 
+/** Zero host-mapped status/sema before submit (clear stale completion). */
+static inline void
+nv_nvdec_status_reset_cpu(volatile uint32_t *status_cpu)
+{
+   if (status_cpu)
+      *status_cpu = 0;
+}
+
+/**
+ * Full vertical-slice NVDEC sema path: reset status, emit sema release method
+ * with payload, caller then EXECUTE and polls wait_status_cpu / wait_status_geq.
+ */
+static inline void
+nv_nvdec_emit_semaphore_release_reset(struct nv_push *p,
+                                      uint64_t sema_gpu_addr,
+                                      uint32_t payload,
+                                      volatile uint32_t *status_cpu)
+{
+   nv_nvdec_status_reset_cpu(status_cpu);
+   nv_nvdec_emit_semaphore_release(p, sema_gpu_addr, payload);
+}
+
 /**
  * Poll host-mapped status/sema dword until it equals expected (or timeout).
  * NVDEC drivers often write status BO via sema; zero init then wait for payload.
@@ -155,6 +177,38 @@ nv_nvdec_wait_status_cpu(volatile uint32_t *status_cpu, uint32_t expected,
    }
    for (;;) {
       if (*status_cpu == expected)
+         return 0;
+      if (!timeout_ns)
+         return -EAGAIN;
+      if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+         return -ETIMEDOUT;
+      now_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+      if (now_ns >= deadline_ns)
+         return -ETIMEDOUT;
+   }
+}
+
+/** Wait until status_cpu[0] >= expected (GEQ, for incremental pic_idx payloads). */
+static inline int
+nv_nvdec_wait_status_geq(volatile uint32_t *status_cpu, uint32_t expected,
+                         uint64_t timeout_ns)
+{
+   struct timespec ts;
+   uint64_t start_ns = 0, now_ns, deadline_ns;
+
+   if (!status_cpu)
+      return -EINVAL;
+   if (!expected)
+      return 0;
+   if (timeout_ns) {
+      if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+         start_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+      deadline_ns = start_ns + timeout_ns;
+   } else {
+      deadline_ns = 0;
+   }
+   for (;;) {
+      if (*status_cpu >= expected)
          return 0;
       if (!timeout_ns)
          return -EAGAIN;
@@ -2089,6 +2143,7 @@ struct nv_nvdec_session {
    void *pic_setup_cpu_map;    /* optional host map of pic_setup BO */
    uint32_t pic_setup_map_bytes;
    uint64_t status_gpu_addr;
+   volatile uint32_t *status_cpu_map; /* optional host map for sema wait */
    uint64_t output_luma_gpu_addr;
    uint64_t output_chroma_gpu_addr;
    uint32_t output_luma_pitch;
@@ -2148,6 +2203,27 @@ nv_nvdec_session_set_status_bo(struct nv_nvdec_session *s, uint64_t gpu_addr)
    if (!s)
       return;
    s->status_gpu_addr = gpu_addr;
+}
+
+/** Host-mapped status dword for sema/status wait (may be NULL). */
+static inline void
+nv_nvdec_session_set_status_cpu_map(struct nv_nvdec_session *s,
+                                    volatile uint32_t *cpu_map)
+{
+   if (!s)
+      return;
+   s->status_cpu_map = cpu_map;
+}
+
+/** Wait for last emit_frame sema payload (pic_idx+1) with GEQ. */
+static inline int
+nv_nvdec_session_wait_last_frame(struct nv_nvdec_session *s,
+                                 uint64_t timeout_ns)
+{
+   if (!s || !s->status_cpu_map || !s->next_picture_index)
+      return -EINVAL;
+   return nv_nvdec_wait_status_geq(s->status_cpu_map, s->next_picture_index,
+                                   timeout_ns);
 }
 
 /**
@@ -2342,13 +2418,10 @@ nv_nvdec_session_emit_frame(struct nv_push *p, struct nv_nvdec_session *s,
    fs.output_luma_pitch = s->output_luma_pitch;
    fs.output_chroma_pitch = s->output_chroma_pitch;
    fs.execute_flags = 1;
-   /* Arm status sema (payload = picture_index+1) so host can poll completion */
-   if (s->status_gpu_addr && s->pic_setup_cpu_map) {
-      /* If status BO is host-mapped via pic_setup pattern, prefer status BO;
-       * session only stores GPU addr — caller may pass mapped status separately. */
-   }
+   /* Arm status sema (payload = picture_index+1); reset host map before submit */
    if (s->status_gpu_addr)
-      nv_nvdec_emit_semaphore_release(p, s->status_gpu_addr, pic_idx + 1);
+      nv_nvdec_emit_semaphore_release_reset(p, s->status_gpu_addr, pic_idx + 1,
+                                            s->status_cpu_map);
    if (s->app_id == NV_NVDEC_APP_ID_HEVC && s->hevc_ps_valid) {
       fs.mb_width = s->hevc_ps.pic_width_in_luma_samples;
       fs.mb_height = s->hevc_ps.pic_height_in_luma_samples;

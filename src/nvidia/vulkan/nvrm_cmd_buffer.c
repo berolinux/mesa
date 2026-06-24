@@ -14,6 +14,8 @@
 #include "nv_qmd.h"
 #include "nv_rm.h"
 
+#include <time.h>
+
 /* Lazy-init device meta blit VS/FS with SPH+SASS TEX/S2R programs (not EXIT-only). */
 static bool
 nvrm_device_ensure_meta_blit(struct nvrm_device *dev)
@@ -617,7 +619,13 @@ nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
    if (!cmd || !cmd->push_map || !ev || !ev->sema_gpu_addr)
       return;
    nv_push_wfi(&cmd->push);
-   nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1);
+   /* Prefer 3D report sema when graphics pipeline is active; else host sema */
+   if (cmd->bound_gfx_pipeline) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_report_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1, true);
+   } else {
+      nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1);
+   }
    ev->sema_value = 1;
 }
 
@@ -631,7 +639,12 @@ nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
    if (!cmd || !cmd->push_map || !ev || !ev->sema_gpu_addr)
       return;
    nv_push_wfi(&cmd->push);
-   nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0);
+   if (cmd->bound_gfx_pipeline) {
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_report_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0, true);
+   } else {
+      nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0);
+   }
    ev->sema_value = 0;
 }
 
@@ -647,8 +660,15 @@ nvrm_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
       return;
    for (i = 0; i < eventCount && pEvents; i++) {
       VK_FROM_HANDLE(nvrm_event, ev, pEvents[i]);
-      if (ev && ev->sema_gpu_addr)
+      if (!ev || !ev->sema_gpu_addr)
+         continue;
+      if (cmd->bound_gfx_pipeline) {
+         nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+         nv_3d_report_semaphore_acquire(&cmd->push, ev->sema_gpu_addr, 1,
+                                        true);
+      } else {
          nv_push_host_semaphore_acquire(&cmd->push, ev->sema_gpu_addr, 1);
+      }
    }
    nvrm_cmd_emit_full_invalidate(cmd);
 }
@@ -792,10 +812,33 @@ nvrm_GetQueryPoolResults(VkDevice _device, VkQueryPool _pool,
       if (!avail) {
          any_unavailable = true;
          if (flags & VK_QUERY_RESULT_WAIT_BIT) {
-            /* Host-mappable sema BO: spin briefly on availability dword */
-            unsigned spin;
-            for (spin = 0; spin < 100000 && !avail; spin++)
-               avail = nvrm_query_slot_available(slot, qp->kind);
+            /* Host-mappable query BO: wait up to 2s on slot completion marker.
+             * Prefer dw3 non-zero; else any non-zero dword for one-word reports. */
+            {
+               volatile uint32_t *slot_v = (volatile uint32_t *)slot;
+               struct timespec ts;
+               uint64_t start_ns = 0, now_ns, deadline_ns = 2000000000ull;
+               if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+                  start_ns = (uint64_t)ts.tv_sec * 1000000000ull +
+                             (uint64_t)ts.tv_nsec;
+               deadline_ns += start_ns;
+               while (!avail) {
+                  avail = nvrm_query_slot_available(slot, qp->kind);
+                  if (avail)
+                     break;
+                  /* dw3 as sema-style completion when present */
+                  if (slot_v[3]) {
+                     avail = true;
+                     break;
+                  }
+                  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+                     break;
+                  now_ns = (uint64_t)ts.tv_sec * 1000000000ull +
+                           (uint64_t)ts.tv_nsec;
+                  if (now_ns >= deadline_ns)
+                     break;
+               }
+            }
             if (!avail)
                any_unavailable = true;
             else
@@ -858,7 +901,18 @@ nvrm_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer,
       uint64_t out = daddr + (uint64_t)i * (stride ? stride : elem_size);
       uint32_t copy_bytes = elem_size <= NVRM_QUERY_SLOT_BYTES
                             ? elem_size : NVRM_QUERY_SLOT_BYTES;
-      nv_copy_emit_buffer_copy(&cmd->push, saddr, out, copy_bytes, 0, 0, 1);
+      bool last = (i + 1 == queryCount);
+      if (last && cmd->device && cmd->device->queue &&
+          cmd->device->queue->submit_fence &&
+          cmd->device->queue->submit_fence->sema_gpu_addr) {
+         struct nv_fence *sf = cmd->device->queue->submit_fence;
+         uint32_t pay = nv_fence_alloc_seq(sf);
+         nv_copy_emit_buffer_copy_with_sema(&cmd->push, saddr, out, copy_bytes,
+                                            sf->sema_gpu_addr, pay);
+         cmd->device->queue->submit_seq = pay;
+      } else {
+         nv_copy_emit_buffer_copy(&cmd->push, saddr, out, copy_bytes, 0, 0, 1);
+      }
    }
    nv_push_wfi(&cmd->push);
 }

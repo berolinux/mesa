@@ -1357,6 +1357,10 @@ nvgpu_destroy_context(struct pipe_context *pctx)
          nv_rm_bo_unmap(ctx->qmd_bo);
       nv_rm_bo_free(ctx->qmd_bo);
    }
+   if (ctx->smoke_cs) {
+      nv_shader_destroy(ctx->smoke_cs);
+      ctx->smoke_cs = NULL;
+   }
    if (ctx->indirect_shadow_bo) {
       if (ctx->indirect_shadow_map)
          nv_rm_bo_unmap(ctx->indirect_shadow_bo);
@@ -1590,17 +1594,17 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       if (cs->nvsh->register_count)
          regs = cs->nvsh->register_count;
    } else if (ctx->screen && ctx->screen->rm) {
-      /* No bound CSO: transient smoke compute object for vertical-slice tests */
-      static struct nv_shader *smoke_cs;
-      if (!smoke_cs) {
-         smoke_cs = nv_shader_create(ctx->screen->rm, NV_SHADER_KIND_COMPUTE);
-         if (smoke_cs)
-            (void)nv_shader_upload_compute_smoke(smoke_cs, 0, 0, 0, 16);
+      /* No bound CSO: per-context smoke compute (G2 slice; not process-global) */
+      if (!ctx->smoke_cs) {
+         ctx->smoke_cs = nv_shader_create(ctx->screen->rm,
+                                          NV_SHADER_KIND_COMPUTE);
+         if (ctx->smoke_cs)
+            (void)nv_shader_upload_compute_smoke(ctx->smoke_cs, 0, 0, 0, 16);
       }
-      if (smoke_cs && smoke_cs->uploaded) {
-         prog = smoke_cs->code_gpu_addr;
-         if (smoke_cs->register_count)
-            regs = smoke_cs->register_count;
+      if (ctx->smoke_cs && ctx->smoke_cs->uploaded) {
+         prog = ctx->smoke_cs->code_gpu_addr;
+         if (ctx->smoke_cs->register_count)
+            regs = ctx->smoke_cs->register_count;
       }
    }
 

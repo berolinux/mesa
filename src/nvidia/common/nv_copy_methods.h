@@ -120,6 +120,14 @@ nv_copy_launch_dma_with_sema_one_word(uint32_t launch_dma)
           NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
 }
 
+/** True if LAUNCH_DMA dword requests one-word sema release (G1 bring-up check). */
+static inline bool
+nv_copy_launch_dma_has_sema_one_word(uint32_t launch_dma)
+{
+   return (launch_dma & (0x3u << 3)) ==
+          NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+}
+
 /**
  * Emit sema A/B/payload then a no-transfer LAUNCH_DMA that only releases the
  * semaphore (completion marker without copy). Useful after a prior CE op when
@@ -181,6 +189,29 @@ nv_copy_emit_buffer_copy_with_sema(struct nv_push *p,
    if (sema_gpu_addr)
       launch = nv_copy_launch_dma_with_sema_one_word(launch);
    nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * G1 vertical-slice helper: pitch buffer copy with sema, then optional standalone
+ * sema-only release if sema2_gpu_addr is set (second completion marker).
+ * Primary path uses sema_gpu_addr on the copy LAUNCH_DMA.
+ */
+static inline void
+nv_copy_emit_g1_buffer_copy_sema_slice(struct nv_push *p,
+                                       uint64_t src_gpu_addr,
+                                       uint64_t dst_gpu_addr,
+                                       uint32_t size_bytes,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       uint64_t sema2_gpu_addr,
+                                       uint32_t sema2_payload)
+{
+   if (!p)
+      return;
+   nv_copy_emit_buffer_copy_with_sema(p, src_gpu_addr, dst_gpu_addr, size_bytes,
+                                      sema_gpu_addr, sema_payload);
+   if (sema2_gpu_addr)
+      nv_copy_emit_semaphore_release(p, sema2_gpu_addr, sema2_payload);
 }
 
 /** REMAP u32 fill with optional CE sema on the final LAUNCH_DMA chunk. */

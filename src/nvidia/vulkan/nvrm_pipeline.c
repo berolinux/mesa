@@ -2350,13 +2350,17 @@ nvrm_unmap_indirect(void *unmap_cookie)
       nv_rm_bo_unmap((struct nv_rm_bo *)unmap_cookie);
 }
 
-/* Ensure device MME indirect stubs are uploaded into this cmd buffer once. */
+/* Ensure device MME indirect stubs are uploaded into this cmd buffer once.
+ * Deferred entirely while programs are END-only stubs (path A/B is correctness). */
 static void
 nvrm_cmd_ensure_mme_indirect(struct nvrm_cmd_buffer *cmd)
 {
    if (!cmd || !cmd->device || cmd->device->mme_indirect_uploaded)
       return;
    if (!cmd->push_map)
+      return;
+   /* Skip MME upload/kick while microcode is stub — avoids bogus CALL_MME */
+   if (nv_3d_mme_indirect_is_stub())
       return;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    if (nv_3d_mme_upload_indirect_stubs(&cmd->push, NULL))
@@ -2392,10 +2396,9 @@ nvrm_CmdDrawIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
    /* Path A: host-mappable indirect BO */
    base = nvrm_try_map_indirect_u32(buf, offset,
                                     rec_stride * drawCount, &unmap);
+   /* Path C only when real MME microcode is present (not END stubs) */
    if (!base && buf && ib_addr && cmd->device &&
-       cmd->device->mme_indirect_uploaded) {
-      /* Path C: prime MME MEM_ADDRESS + CALL_MME (END stub until real ucode).
-       * Fall through to path B/A for correctness until macro emits draws. */
+       cmd->device->mme_indirect_uploaded && !nv_3d_mme_indirect_is_stub()) {
       (void)nv_3d_try_draw_indirect_path_c(&cmd->push, ib_addr, drawCount,
                                            rec_stride, false /* indexed */,
                                            true);
@@ -2460,7 +2463,7 @@ nvrm_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
       base = nvrm_try_map_indirect_u32(buf, offset,
                                        rec_stride * drawCount, &unmap);
    if (!base && buf && ib_addr && cmd->device &&
-       cmd->device->mme_indirect_uploaded) {
+       cmd->device->mme_indirect_uploaded && !nv_3d_mme_indirect_is_stub()) {
       (void)nv_3d_try_draw_indirect_path_c(&cmd->push, ib_addr, drawCount,
                                            rec_stride, true /* indexed */,
                                            true);

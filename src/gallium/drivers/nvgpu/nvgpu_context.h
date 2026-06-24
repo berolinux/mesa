@@ -88,6 +88,9 @@ struct nvgpu_context {
    void *qmd_map;
    uint32_t qmd_bo_size;
 
+   /* Per-context transient compute smoke shader (G2 vertical-slice; not static) */
+   struct nv_shader *smoke_cs;
+
    /* Bound state (minimal) */
    void *fs;
    void *vs;
