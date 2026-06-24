@@ -66,16 +66,19 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
       return;
    fprintf(stderr,
            "%s: run=0x%x ok=0x%x g1_rc=%d g2_rc=%d g3_rc=%d"
-           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_db=%d"
-           " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_sema=0x%x g1_class=0x%x"
+           " g1_pre=%d g1_pre_d=%d g1_sched=%d g1_sched_rc=%d g1_db=%d"
+           " g1_submit=%d g1_payload=%d g1_sema_only=%d g1_remap=%d"
+           " g1_sema=0x%x g1_fill=0x%x g1_class=0x%x"
            " g2_submit=%d g2_store=%d g2_obs=0x%x g2_class=0x%x g2_prog=0x%llx\n",
            p,
            (unsigned)res->slices_run, (unsigned)res->slices_ok,
            res->g1_rc, res->g2_rc, res->g3_rc,
            res->g1_preflight_rc, res->g1_preflight_detail,
-           res->g1_was_scheduled ? 1 : 0, res->g1_had_doorbell ? 1 : 0,
+           res->g1_was_scheduled ? 1 : 0, res->g1_schedule_rc,
+           res->g1_had_doorbell ? 1 : 0,
            res->g1_submit_rc, res->g1_payload_rc, res->g1_sema_only_rc,
-           (unsigned)res->g1_sema_observed,
+           res->g1_remap_fill_rc,
+           (unsigned)res->g1_sema_observed, (unsigned)res->g1_fill_observed,
            (unsigned)res->g1_class_copy,
            res->g2_submit_rc, res->g2_store_rc,
            (unsigned)res->g2_store_observed,
@@ -84,16 +87,18 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
    if (res->g1_rc < 0 && (res->slices_run & NV_SMOKE_HW_G1)) {
       fprintf(stderr,
               "%s: G1 bring-up hints: class_copy=0x%x preflight=%d (detail=%d) "
-              "sched=%d doorbell=%d submit_rc=%d sema_only_rc=%d\n"
-              "  preflight -EAGAIN = GPFIFO_SCHEDULE failed (fix schedule first)\n"
+              "sched=%d schedule_rc=%d doorbell=%d submit=%d sema_only=%d remap=%d\n"
+              "  preflight -EAGAIN / schedule_rc!=0 = GPFIFO_SCHEDULE (try TSG+channel both)\n"
               "  preflight -EINVAL = missing USERD/GPFIFO/push (channel alloc)\n"
-              "  ETIMEDOUT + sema_only also fail = schedule/doorbell/GPPut not kicking\n"
-              "  sema_only ok but copy fail = CE methods/class/pitch (class_copy)\n"
+              "  ETIMEDOUT + sema_only+remap fail = kickoff (GPPut/doorbell/schedule)\n"
+              "  sema_only ok, copy fail, remap ok = pitch/src OFFSET_IN issue\n"
+              "  sema_only ok, copy+remap fail = CE class/methods (class_copy)\n"
+              "  sema_only fail, remap/copy fail = sema path or not running at all\n"
               "  payload_rc=-EIO = sema ok but 256B dst!=src (wrong offsets/VAS)\n",
               p, (unsigned)res->g1_class_copy, res->g1_preflight_rc,
               res->g1_preflight_detail, res->g1_was_scheduled ? 1 : 0,
-              res->g1_had_doorbell ? 1 : 0, res->g1_submit_rc,
-              res->g1_sema_only_rc);
+              res->g1_schedule_rc, res->g1_had_doorbell ? 1 : 0,
+              res->g1_submit_rc, res->g1_sema_only_rc, res->g1_remap_fill_rc);
    }
    if (res->g2_rc < 0 && (res->slices_run & NV_SMOKE_HW_G2)) {
       fprintf(stderr,
@@ -249,6 +254,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.g1_class_copy = nv_channel_resolve_class_copy(ch, 0);
       res.g1_preflight_rc = nv_channel_submit_preflight(ch, &res.g1_preflight_detail);
       res.g1_was_scheduled = ch->scheduled;
+      res.g1_schedule_rc = ch->schedule_rc;
       res.g1_had_doorbell = ch->has_work_submit_token && ch->usermode_map != NULL;
 
       if (res.g1_preflight_rc != 0 && res.g1_preflight_rc != -EAGAIN) {
@@ -291,10 +297,10 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             }
          } else if (res.g1_submit_rc != 0 && res.g1_submit_rc != -EAGAIN) {
             /*
-             * Secondary probe: sema-only CE fence.  If this succeeds, sema/GPFIFO
-             * path works and failure is in copy methods/class; if it fails too,
-             * fix channel/submit/sema before debugging CE pitch.
-             * Skip when preflight already says unscheduled (submit would only EAGAIN).
+             * Secondary: sema-only CE fence.  Tertiary: REMAP fill+sema (no src).
+             * sema_only ok + remap ok + copy fail => pitch/src issue
+             * sema_only ok + remap fail => CE class/REMAP methods
+             * all fail => schedule/doorbell/GPPut not executing methods
              */
             if (sc->sema_cpu)
                sc->sema_cpu[0] = 0;
@@ -306,8 +312,28 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                                                                     check_notifier);
             if (sc->sema_cpu)
                res.g1_sema_observed = sc->sema_cpu[0];
+
+            if (sc->dst_cpu)
+               memset(sc->dst_cpu, 0, 256);
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            res.g1_remap_fill_rc = nv_channel_g1_ce_remap_fill_sema_submit(
+               ch, 0, sc->dst_gpu, 256, 0xcafebabeu, sc->sema_gpu,
+               sc->sema_cpu, sc->sema_payload, true, to, check_notifier);
+            if (sc->sema_cpu && res.g1_remap_fill_rc == 0)
+               res.g1_sema_observed = sc->sema_cpu[0];
+            if (sc->dst_cpu)
+               res.g1_fill_observed = ((const uint32_t *)sc->dst_cpu)[0];
+            /* If primary copy failed but remap+sema succeeded, note remap path works */
+            if (res.g1_remap_fill_rc == 0 && sc->dst_cpu &&
+                ((const uint32_t *)sc->dst_cpu)[0] == 0xcafebabeu) {
+               /* Remap works: still report primary fail but narrow diagnosis via logs */
+               if (res.g1_rc < 0 && res.g1_sema_only_rc == 0)
+                  ; /* pitch/src path issue */
+            }
          } else if (res.g1_submit_rc == -EAGAIN) {
             res.g1_sema_only_rc = -EAGAIN;
+            res.g1_remap_fill_rc = -EAGAIN;
          }
          if (res.g1_rc && !r)
             r = res.g1_rc;

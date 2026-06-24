@@ -50,6 +50,7 @@ struct nv_channel {
    uint32_t work_submit_token;
    bool has_work_submit_token;
    bool scheduled;
+   int schedule_rc;                /* last GPFIFO_SCHEDULE errno (0 = ok/n/a) */
    bool use_channel_group;
 
    /* CPU mappings */
@@ -227,6 +228,23 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
                                   bool sema_reset,
                                   uint64_t wait_timeout_ns,
                                   bool check_notifier);
+
+/**
+ * G1 tertiary probe: CE REMAP u32 fill to dst + sema (no src buffer).
+ * Isolates pitch-copy OFFSET_IN/src issues from class/sema/kickoff.
+ */
+int
+nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
+                                        uint32_t class_copy,
+                                        uint64_t dst_gpu_addr,
+                                        uint32_t size_bytes,
+                                        uint32_t fill_data,
+                                        uint64_t sema_gpu_addr,
+                                        volatile uint32_t *sema_cpu,
+                                        uint32_t sema_payload,
+                                        bool sema_reset,
+                                        uint64_t wait_timeout_ns,
+                                        bool check_notifier);
 
 /**
  * G2 vertical slice (hardware path): compute SET_OBJECT + SPA/CWD init

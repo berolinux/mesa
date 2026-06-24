@@ -86,10 +86,13 @@ struct nv_smoke_hw_result {
    int g1_submit_rc;   /* return from nv_channel_g1_ce_copy_sema_submit */
    int g1_payload_rc;  /* 0 ok, -EIO if sema ok but dst != src (256B) */
    int g1_sema_only_rc; /* secondary: sema-only submit if copy path failed */
+   int g1_remap_fill_rc; /* tertiary: REMAP fill+sema if copy+sema_only both fail or copy fails */
    int g1_preflight_rc; /* nv_channel_submit_preflight before G1 (-EAGAIN=unscheduled) */
    int g1_preflight_detail; /* 0 ok, 1=GPPut-only (no doorbell token), else errno */
+   int g1_schedule_rc;  /* channel->schedule_rc from last GPFIFO_SCHEDULE attempt */
    uint32_t g1_sema_observed; /* sema_cpu[0] after wait (debug) */
    uint32_t g1_class_copy;    /* class used (0 if unknown) */
+   uint32_t g1_fill_observed; /* dst_cpu[0] after remap-fill probe (if run) */
    bool g1_had_doorbell;      /* work_submit_token + usermode map at G1 start */
    bool g1_was_scheduled;     /* channel scheduled at G1 start */
    /* G2 phase detail */

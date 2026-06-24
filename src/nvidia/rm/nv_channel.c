@@ -143,7 +143,9 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->userd = nv_rm_bo_map(ch->userd_bo);
    if (!ch->userd)
       goto fail;
-   memset((void *)ch->userd, 0, NV_CHANNEL_USERD_SIZE);
+   /* GPGet/GPPut/Put/Get must start at 0 or first submit races with garbage */
+   nvidia_userd_init_host(ch->userd, NV_CHANNEL_USERD_SIZE);
+   ch->gpfifo_put = 0;
 
    /* Error notifier memory + CTXDMA (NV01_CONTEXT_ERROR_TO_MEMORY) */
    req.size = NV_CHANNEL_NOTIFIER_SIZE;
@@ -307,7 +309,12 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       }
    }
 
-   /* Schedule: prefer channel-group schedule when TSG is used, else per-channel */
+   /*
+    * Schedule: try both TSG (A06C) and per-channel (A06F) GPFIFO_SCHEDULE.
+    * Order depends on whether channel was parented under TSG; if first fails,
+    * always attempt the other (RM often accepts only one form).
+    */
+   ch->schedule_rc = -EAGAIN;
    if (ch->use_channel_group && ch->h_channel_group) {
       NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
       memset(&gsched, 0, sizeof(gsched));
@@ -316,6 +323,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       ret = nv_rm_control(rm, ch->h_channel_group,
                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
                           &gsched, sizeof(gsched));
+      ch->schedule_rc = ret;
       if (ret == 0)
          ch->scheduled = true;
    }
@@ -326,8 +334,26 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       sched.bSkipSubmit = NV_FALSE;
       ret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
                           &sched, sizeof(sched));
-      if (ret == 0)
+      if (ret == 0) {
          ch->scheduled = true;
+         ch->schedule_rc = 0;
+      } else if (!ch->scheduled)
+         ch->schedule_rc = ret;
+   }
+   /* If TSG schedule failed but we only tried channel-first path inverse: try TSG last */
+   if (!ch->scheduled && ch->h_channel_group) {
+      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+      memset(&gsched, 0, sizeof(gsched));
+      gsched.bEnable = NV_TRUE;
+      gsched.bSkipSubmit = NV_FALSE;
+      ret = nv_rm_control(rm, ch->h_channel_group,
+                          NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                          &gsched, sizeof(gsched));
+      if (ret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+      } else if (!ch->scheduled)
+         ch->schedule_rc = ret;
    }
 
    /* Work submit token (Volta+) via channel GPFIFO ctrl */
@@ -422,25 +448,48 @@ nv_channel_ensure_submit_ready(struct nv_channel *ch)
 
    /* Schedule if create-time schedule failed (channel won't run methods) */
    if (!ch->scheduled) {
+      int sret = -1;
       if (ch->use_channel_group && ch->h_channel_group) {
          NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
          memset(&gsched, 0, sizeof(gsched));
          gsched.bEnable = NV_TRUE;
          gsched.bSkipSubmit = NV_FALSE;
-         if (nv_rm_control(ch->rm, ch->h_channel_group,
-                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                           &gsched, sizeof(gsched)) == 0)
+         sret = nv_rm_control(ch->rm, ch->h_channel_group,
+                              NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                              &gsched, sizeof(gsched));
+         if (sret == 0) {
             ch->scheduled = true;
+            ch->schedule_rc = 0;
+         } else
+            ch->schedule_rc = sret;
       }
       if (!ch->scheduled) {
          NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
          memset(&sched, 0, sizeof(sched));
          sched.bEnable = NV_TRUE;
          sched.bSkipSubmit = NV_FALSE;
-         if (nv_rm_control(ch->rm, ch->h_channel,
-                           NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
-                           &sched, sizeof(sched)) == 0)
+         sret = nv_rm_control(ch->rm, ch->h_channel,
+                              NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                              &sched, sizeof(sched));
+         if (sret == 0) {
             ch->scheduled = true;
+            ch->schedule_rc = 0;
+         } else if (!ch->scheduled)
+            ch->schedule_rc = sret;
+      }
+      if (!ch->scheduled && ch->h_channel_group) {
+         NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+         memset(&gsched, 0, sizeof(gsched));
+         gsched.bEnable = NV_TRUE;
+         gsched.bSkipSubmit = NV_FALSE;
+         sret = nv_rm_control(ch->rm, ch->h_channel_group,
+                              NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
+                              &gsched, sizeof(gsched));
+         if (sret == 0) {
+            ch->scheduled = true;
+            ch->schedule_rc = 0;
+         } else if (!ch->scheduled)
+            ch->schedule_rc = sret;
       }
    }
 
@@ -817,6 +866,53 @@ nv_channel_g1_ce_sema_only_submit(struct nv_channel *ch,
    nv_push_init(&push, map, need);
    nv_copy_set_object(&push, cc);
    nv_copy_emit_semaphore_release(&push, sema_gpu_addr, sema_payload);
+   nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+   return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+}
+
+int
+nv_channel_g1_ce_remap_fill_sema_submit(struct nv_channel *ch,
+                                        uint32_t class_copy,
+                                        uint64_t dst_gpu_addr,
+                                        uint32_t size_bytes,
+                                        uint32_t fill_data,
+                                        uint64_t sema_gpu_addr,
+                                        volatile uint32_t *sema_cpu,
+                                        uint32_t sema_payload,
+                                        bool sema_reset,
+                                        uint64_t wait_timeout_ns,
+                                        bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 96;
+   uint32_t cc;
+   int pre;
+
+   if (!ch || !dst_gpu_addr || !size_bytes || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   cc = nv_channel_resolve_class_copy(ch, class_copy);
+
+   if (sema_reset && sema_cpu)
+      sema_cpu[0] = 0;
+
+   map = nv_channel_push_begin(ch, need);
+   if (!map)
+      return -ENOMEM;
+
+   nv_push_init(&push, map, need);
+   nv_copy_set_object(&push, cc);
+   nv_copy_emit_remap_fill_u32_with_sema(&push, dst_gpu_addr, size_bytes,
+                                         fill_data, sema_gpu_addr, sema_payload);
    nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
