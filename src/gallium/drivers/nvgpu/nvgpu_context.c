@@ -16,6 +16,7 @@
 #include "nv_push.h"
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
+#include "nv_qmd.h"
 #include "nv_shader.h"
 #include "nv_fence.h"
 #include "nv_tex.h"
@@ -1088,6 +1089,158 @@ nvgpu_delete_sampler_state(struct pipe_context *pctx, void *state)
    FREE(state);
 }
 
+
+/* ---- blit: prefer HW copy; otherwise util_blitter if available ---- */
+
+static void
+nvgpu_blit(struct pipe_context *pctx, const struct pipe_blit_info *info)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct pipe_box box;
+
+   if (!info || !info->src.resource || !info->dst.resource)
+      return;
+
+   /* Nearest, same-format, no scaling: use CE path via resource_copy_region */
+   if (info->src.resource->format == info->dst.resource->format &&
+       info->filter == PIPE_TEX_FILTER_NEAREST &&
+       info->src.box.width == info->dst.box.width &&
+       info->src.box.height == info->dst.box.height &&
+       info->src.box.depth == info->dst.box.depth &&
+       !(info->mask & PIPE_MASK_S)) {
+      u_box_3d(info->src.box.x, info->src.box.y, info->src.box.z,
+               info->src.box.width, info->src.box.height, info->src.box.depth,
+               &box);
+      nvgpu_resource_copy_region(pctx, info->dst.resource, info->dst.level,
+                                 info->dst.box.x, info->dst.box.y, info->dst.box.z,
+                                 info->src.resource, info->src.level, &box);
+      return;
+   }
+
+   if (ctx->blitter && util_blitter_is_blit_supported(ctx->blitter, info)) {
+      util_blitter_save_vertex_buffers(ctx->blitter, ctx->vb, ctx->num_vb);
+      util_blitter_save_vertex_elements(ctx->blitter, ctx->velems);
+      util_blitter_save_vertex_shader(ctx->blitter, ctx->vs);
+      util_blitter_save_rasterizer(ctx->blitter, ctx->rs);
+      util_blitter_save_viewport(ctx->blitter, &ctx->viewport);
+      util_blitter_save_scissor(ctx->blitter, &ctx->scissor);
+      util_blitter_save_fragment_shader(ctx->blitter, ctx->fs);
+      util_blitter_save_blend(ctx->blitter, ctx->blend);
+      util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
+      util_blitter_save_framebuffer(ctx->blitter, &ctx->fb);
+      util_blitter_save_fragment_sampler_states(ctx->blitter,
+         ctx->num_sampler_cso, (void **)ctx->sampler_cso);
+      util_blitter_save_fragment_sampler_views(ctx->blitter,
+         ctx->num_samplers[MESA_SHADER_FRAGMENT],
+         ctx->samplers[MESA_SHADER_FRAGMENT]);
+      util_blitter_blit(ctx->blitter, info, NULL);
+   }
+}
+
+/* ---- compute launch_grid via QMD (mirrors Vulkan nvrm compute path) ---- */
+
+static void
+nvgpu_launch_grid(struct pipe_context *pctx,
+                  const struct pipe_grid_info *info)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   const struct nv_device_info *di = ctx->screen->info;
+   struct nv_qmd_desc desc;
+   struct nv_push push;
+   struct nvgpu_shader_cso *cs = ctx->cs;
+   uint32_t class_compute = di ? di->class_compute : 0;
+   uint64_t prog = 0;
+   uint32_t regs = 16;
+   uint32_t gx, gy, gz;
+   uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
+   uint8_t sass_ver = 0x50;
+
+   if (!info)
+      return;
+   if (!nvgpu_push_start(ctx, &push, 256))
+      return;
+
+   if (cs && cs->nvsh) {
+      nvgpu_ensure_shader_uploaded(ctx, cs);
+      prog = cs->nvsh->code_gpu_addr;
+      if (cs->nvsh->register_count)
+         regs = cs->nvsh->register_count;
+   }
+
+   gx = info->grid[0] ? info->grid[0] : 1;
+   gy = info->grid[1] ? info->grid[1] : 1;
+   gz = info->grid[2] ? info->grid[2] : 1;
+   cta_x = info->block[0] ? info->block[0] : 1;
+   cta_y = info->block[1] ? info->block[1] : 1;
+   cta_z = info->block[2] ? info->block[2] : 1;
+
+   if (di && di->sm_version)
+      sass_ver = (uint8_t)(di->sm_version & 0xff);
+
+   memset(&desc, 0, sizeof(desc));
+   desc.program_addr = prog;
+   desc.grid_x = gx;
+   desc.grid_y = gy;
+   desc.grid_z = gz;
+   desc.cta_x = cta_x;
+   desc.cta_y = cta_y;
+   desc.cta_z = cta_z;
+   desc.register_count = regs;
+   desc.sass_version = sass_ver;
+   desc.sm_global_caching = true;
+   desc.invalidate_caches = true;
+   if (cs && cs->nvsh && cs->nvsh->local_mem_size)
+      desc.local_mem_low = cs->nvsh->local_mem_size;
+
+   nv_compute_emit_dispatch(&push, &desc, 0, class_compute);
+   nv_push_wfi(&push);
+   nvgpu_push_finish(ctx, &push, true);
+}
+
+static void *
+nvgpu_create_compute_state(struct pipe_context *pctx,
+                           const struct pipe_compute_state *cso)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   struct nvgpu_shader_cso *scso;
+   struct pipe_shader_state sh;
+
+   if (!cso)
+      return NULL;
+   scso = CALLOC_STRUCT(nvgpu_shader_cso);
+   if (!scso)
+      return NULL;
+   memset(&sh, 0, sizeof(sh));
+   sh.type = cso->ir_type;
+   if (cso->ir_type == PIPE_SHADER_IR_NIR)
+      sh.ir.nir = (void *)cso->prog;
+   scso->base = sh;
+   scso->nvsh = nv_shader_create(ctx->screen->rm, NV_SHADER_KIND_COMPUTE);
+   if (!scso->nvsh) {
+      FREE(scso);
+      return NULL;
+   }
+   if (cso->ir_type == PIPE_SHADER_IR_NIR && cso->prog)
+      nv_shader_set_nir(scso->nvsh, (struct nir_shader *)cso->prog, false);
+   nvgpu_ensure_shader_uploaded(ctx, scso);
+   return scso;
+}
+
+static void
+nvgpu_bind_compute_state(struct pipe_context *pctx, void *state)
+{
+   nvgpu_context(pctx)->cs = state;
+}
+
+static void
+nvgpu_set_global_binding(struct pipe_context *pctx,
+                         unsigned first, unsigned count,
+                         struct pipe_resource **resources,
+                         uint32_t **handles)
+{
+   (void)pctx; (void)first; (void)count; (void)resources; (void)handles;
+}
+
 struct pipe_context *
 nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 {
@@ -1147,10 +1300,17 @@ nvgpu_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    ctx->base.sampler_view_destroy = nvgpu_sampler_view_destroy;
 
    ctx->base.resource_copy_region = nvgpu_resource_copy_region;
-   ctx->base.blit = NULL; /* use blitter once shaders work */
+   ctx->base.blit = nvgpu_blit;
+   ctx->base.create_compute_state = nvgpu_create_compute_state;
+   ctx->base.bind_compute_state = nvgpu_bind_compute_state;
+   ctx->base.delete_compute_state = nvgpu_delete_shader_state;
+   ctx->base.set_global_binding = nvgpu_set_global_binding;
+   ctx->base.launch_grid = nvgpu_launch_grid;
 
    nvgpu_ensure_channel(ctx);
    if (screen->rm)
       ctx->fence = nv_fence_create(screen->rm);
+   /* Software blitter for scaled/filtered blits (uses driver shaders/CSOs) */
+   ctx->blitter = util_blitter_create(&ctx->base);
    return &ctx->base;
 }

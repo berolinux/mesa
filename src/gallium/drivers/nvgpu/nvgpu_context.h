@@ -73,6 +73,7 @@ struct nvgpu_context {
    /* Bound state (minimal) */
    void *fs;
    void *vs;
+   void *cs;  /* compute CSO */
    void *blend;
    void *zsa;
    void *rs;
