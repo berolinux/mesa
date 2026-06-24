@@ -63,6 +63,15 @@ struct nv_device_info {
    uint64_t vram_usable_bytes;
    uint64_t sysmem_visible_bytes;
 
+   /* tick96: from nvidia_gpu_info refined probe */
+   uint32_t fb_region_count;
+   uint64_t fb_region0_base;
+   uint64_t fb_region0_limit;
+   uint64_t max_page_size;
+   uint32_t rm_pci_device_id;
+   uint32_t rm_pci_subsystem_id;
+   uint32_t rm_pci_revision_id;
+
    char name[64];
    char chipset_name[32];
 

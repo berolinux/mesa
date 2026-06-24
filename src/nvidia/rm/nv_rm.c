@@ -142,6 +142,16 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.tpc_count = gi.tpc_count;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
+      /* tick96: refined FB/PCI/page-size probe from libdrm refresh */
+      dev->info.fb_region_count = gi.fb_region_count;
+      dev->info.fb_region0_base = gi.fb_region0_base;
+      dev->info.fb_region0_limit = gi.fb_region0_limit;
+      dev->info.max_page_size = gi.max_page_size;
+      dev->info.rm_pci_device_id = gi.rm_pci_device_id;
+      dev->info.rm_pci_subsystem_id = gi.rm_pci_subsystem_id;
+      dev->info.rm_pci_revision_id = gi.rm_pci_revision_id;
+      if (!dev->info.pci_device_id && gi.rm_pci_device_id)
+         dev->info.pci_device_id = gi.rm_pci_device_id & 0xffffu;
       memcpy(dev->info.name, gi.name, sizeof(dev->info.name));
    }
 
