@@ -374,6 +374,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g1_host_sema_mode = -1;
    res.g2_host_sema_mode = -1;
    res.g3_host_sema_mode = -1;
+   res.g1_fault_method_rc = -1;
    res.g1_rc = 1;
    res.g2_rc = 1;
    res.g3_rc = 1;
@@ -398,6 +399,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
       res.g1_was_scheduled = ch->scheduled;
       res.g1_schedule_rc = ch->schedule_rc;
       res.g1_schedule_path = ch->schedule_path;
+      res.g1_fault_method_rc = ch->fault_method_rc;
       res.g1_schedule_bind_rc = ch->schedule_bind_rc;
       res.g1_tsg = ch->h_channel_group ? 1 : 0;
       res.g1_engine_alloc_rc = ch->engine_alloc_rc;

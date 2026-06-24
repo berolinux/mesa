@@ -57,17 +57,70 @@ nv_channel_try_schedule(struct nv_channel *ch)
    rm = ch->rm;
    ch->schedule_bind_rc = -1;
 
-   /* --- TSG path: BIND (engine) then A06C_GPFIFO_SCHEDULE --- */
+   /*
+    * Pass6 RE: glcore/eglcore schedule via A06F on the channel (BIND 0xa06f0104
+    * then SCHEDULE 0xa06f0103). A06C TSG schedule is cuda-primary; try channel
+    * path first for GL/smoke, then fall back to TSG if a channel group exists.
+    */
+
+   /* --- Channel path: A06F_BIND then A06F_GPFIFO_SCHEDULE (glcore a52b69) --- */
+   {
+      NVA06F_CTRL_BIND_PARAMS cbind;
+      NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
+
+      memset(&cbind, 0, sizeof(cbind));
+      cbind.engineType = ch->engine_type;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_BIND,
+                           &cbind, sizeof(cbind));
+      ch->schedule_bind_rc = sret;
+      /* BIND may fail if already bound; still try schedule */
+
+      memset(&sched, 0, sizeof(sched));
+      sched.bEnable = NV_TRUE;
+      sched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &sched, sizeof(sched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 2; /* A06F channel */
+         return 0;
+      }
+      last_err = sret;
+
+      /* Plain schedule without BIND (legacy / already-bound) */
+      memset(&sched, 0, sizeof(sched));
+      sched.bEnable = NV_TRUE;
+      sched.bSkipSubmit = NV_FALSE;
+      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                           &sched, sizeof(sched));
+      if (sret == 0) {
+         ch->scheduled = true;
+         ch->schedule_rc = 0;
+         ch->schedule_path = 2;
+         return 0;
+      }
+      last_err = sret;
+   }
+
+   /* --- TSG path: optional A06C timeslice, BIND, then A06C_GPFIFO_SCHEDULE --- */
    if (ch->h_channel_group) {
       NVA06C_CTRL_BIND_PARAMS bind;
       NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+      NVA06C_CTRL_SET_TIMESLICE_PARAMS ts;
+
+      /* Pass6: 0xa06c0103 is SET_TIMESLICE (NvU64), not interleave; best-effort. */
+      memset(&ts, 0, sizeof(ts));
+      ts.timesliceUs = 1000; /* 1 ms default; RM may clamp */
+      (void)nv_rm_control(rm, ch->h_channel_group, NVA06C_CTRL_CMD_SET_TIMESLICE,
+                          &ts, sizeof(ts));
 
       memset(&bind, 0, sizeof(bind));
       bind.engineType = ch->engine_type;
       sret = nv_rm_control(rm, ch->h_channel_group, NVA06C_CTRL_CMD_BIND,
                            &bind, sizeof(bind));
-      ch->schedule_bind_rc = sret;
-      /* BIND may fail if already bound; still try schedule */
+      if (ch->schedule_bind_rc != 0)
+         ch->schedule_bind_rc = sret;
 
       memset(&gsched, 0, sizeof(gsched));
       gsched.bEnable = NV_TRUE;
@@ -84,66 +137,7 @@ nv_channel_try_schedule(struct nv_channel *ch)
       }
       last_err = sret;
 
-      /* Retry schedule without assuming BIND succeeded (order variation) */
-      memset(&gsched, 0, sizeof(gsched));
-      gsched.bEnable = NV_TRUE;
-      gsched.bSkipSubmit = NV_FALSE;
-      sret = nv_rm_control(rm, ch->h_channel_group,
-                           NVA06C_CTRL_CMD_GPFIFO_SCHEDULE,
-                           &gsched, sizeof(gsched));
-      if (sret == 0) {
-         ch->scheduled = true;
-         ch->schedule_rc = 0;
-         ch->schedule_path = 1;
-         ch->use_channel_group = true;
-         return 0;
-      }
-      last_err = sret;
-   }
-
-   /* --- Channel path: A06F_BIND then A06F_GPFIFO_SCHEDULE --- */
-   {
-      NVA06F_CTRL_BIND_PARAMS cbind;
-      NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sched;
-
-      memset(&cbind, 0, sizeof(cbind));
-      cbind.engineType = ch->engine_type;
-      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_BIND,
-                           &cbind, sizeof(cbind));
-      if (ch->schedule_bind_rc != 0)
-         ch->schedule_bind_rc = sret;
-
-      memset(&sched, 0, sizeof(sched));
-      sched.bEnable = NV_TRUE;
-      sched.bSkipSubmit = NV_FALSE;
-      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
-                           &sched, sizeof(sched));
-      if (sret == 0) {
-         ch->scheduled = true;
-         ch->schedule_rc = 0;
-         ch->schedule_path = 2; /* A06F channel */
-         return 0;
-      }
-      last_err = sret;
-
-      /* Plain schedule without BIND (legacy path that worked before tick79) */
-      memset(&sched, 0, sizeof(sched));
-      sched.bEnable = NV_TRUE;
-      sched.bSkipSubmit = NV_FALSE;
-      sret = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
-                           &sched, sizeof(sched));
-      if (sret == 0) {
-         ch->scheduled = true;
-         ch->schedule_rc = 0;
-         ch->schedule_path = 2;
-         return 0;
-      }
-      last_err = sret;
-   }
-
-   /* Final TSG-only schedule if group exists but channel-first was preferred earlier */
-   if (!ch->scheduled && ch->h_channel_group) {
-      NVA06C_CTRL_GPFIFO_SCHEDULE_PARAMS gsched;
+      /* TSG schedule without BIND */
       memset(&gsched, 0, sizeof(gsched));
       gsched.bEnable = NV_TRUE;
       gsched.bSkipSubmit = NV_FALSE;
@@ -465,6 +459,8 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->schedule_rc = -EAGAIN;
    ch->schedule_path = 0;
    ch->schedule_bind_rc = -1;
+   ch->host_sema_mode_pref = -1;
+   ch->fault_method_rc = -1;
    (void)nv_channel_try_schedule(ch);
 
    /* Work submit token (Turing+ / class > C36E): NOTIF_INDEX then GET_TOKEN.
@@ -496,6 +492,50 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
 
    /* Ensure VAS mappings for ring/push/userd (may refine gpu_addr after alloc) */
    (void)nv_channel_ensure_buffers_gpu_va(ch);
+
+   /*
+    * Optional fault method buffer (0xc36f0109). Pass6 RE: 0 hits in normal
+    * glcore/eglcore/cuda — primarily SR-IOV/vGPU guest virtual channels
+    * (ctrlc36f.h). Non-fatal if RM rejects; keep for diagnostics only.
+    */
+   if (ch->gpfifo_class == 0 || ch->gpfifo_class > 0xc36eu) {
+      struct nv_rm_bo_req freq;
+      struct nv_rm_bo *fbo;
+      NVC36F_CTRL_GPFIFO_UPDATE_FAULT_METHOD_BUFFER_PARAMS fmp;
+      uint64_t fva;
+      int fret;
+
+      memset(&freq, 0, sizeof(freq));
+      freq.size = 4096;
+      freq.alignment = 4096;
+      freq.vram = false;
+      freq.cpu_access = true;
+      freq.map_gpu_va = true;
+      fbo = nv_rm_bo_alloc(rm, &freq);
+      if (fbo) {
+         fva = nv_rm_bo_gpu_offset(fbo);
+         if (fva) {
+            memset(&fmp, 0, sizeof(fmp));
+            fmp.bar2Addr[0] = fva;
+            fmp.bar2Addr[1] = fva;
+            fret = nv_rm_control(rm, ch->h_channel,
+                                 NVC36F_CTRL_CMD_GPFIFO_UPDATE_FAULT_METHOD_BUFFER,
+                                 &fmp, sizeof(fmp));
+            ch->fault_method_rc = fret;
+            if (fret == 0) {
+               ch->fault_method_bo = fbo;
+               ch->fault_method_gpu_addr = fva;
+               fbo = NULL; /* owned by channel */
+            }
+         } else {
+            ch->fault_method_rc = -ENOMEM;
+         }
+         if (fbo)
+            nv_rm_bo_free(fbo);
+      } else {
+         ch->fault_method_rc = -ENOMEM;
+      }
+   }
 
    /* Engine objects under channel (copy/compute/3d) — best-effort before first methods */
    (void)nv_channel_ensure_engine_objects(ch);
@@ -550,6 +590,8 @@ nv_channel_destroy(struct nv_channel *ch)
       if (ch->h_error_ctxdma)
          nv_rm_free_object(ch->rm, h_dev, ch->h_error_ctxdma);
    }
+   if (ch->fault_method_bo)
+      nv_rm_bo_free(ch->fault_method_bo);
    if (ch->push_bo)
       nv_rm_bo_free(ch->push_bo);
    if (ch->gpfifo_bo)
@@ -1463,6 +1505,8 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
    int pre;
    int last_rc = -EIO;
    unsigned i;
+   enum nv_host_sema_mode order[NV_HOST_SEMA_MODE_COUNT + 1];
+   unsigned n_order = 0;
 
    if (mode_used_out)
       *mode_used_out = (int)NV_HOST_SEMA_MODE_BLOB_SHIFT2;
@@ -1476,8 +1520,26 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
    if (pre)
       return pre;
 
+   /* Prefer mode that already worked on this channel (tick80 sticky). */
+   if (ch->host_sema_mode_pref >= 0 &&
+       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+      order[n_order++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
    for (i = 0; i < NV_HOST_SEMA_MODE_COUNT; i++) {
-      enum nv_host_sema_mode mode = nv_host_sema_try_order[i];
+      enum nv_host_sema_mode m = nv_host_sema_try_order[i];
+      unsigned j;
+      bool dup = false;
+      for (j = 0; j < n_order; j++) {
+         if (order[j] == m) {
+            dup = true;
+            break;
+         }
+      }
+      if (!dup)
+         order[n_order++] = m;
+   }
+
+   for (i = 0; i < n_order; i++) {
+      enum nv_host_sema_mode mode = order[i];
 
       if (sema_reset && sema_cpu)
          sema_cpu[0] = 0;
@@ -1498,8 +1560,10 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
                                             wait_timeout_ns, check_notifier);
       if (mode_used_out)
          *mode_used_out = (int)mode;
-      if (last_rc == 0)
+      if (last_rc == 0) {
+         ch->host_sema_mode_pref = (int)mode;
          return 0;
+      }
       /* -ETIMEDOUT / -EIO: sema did not complete — try next encoding */
       if (last_rc != -ETIMEDOUT && last_rc != -EIO && last_rc != -EAGAIN)
          return last_rc;

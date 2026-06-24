@@ -72,6 +72,16 @@ struct nv_channel {
    int schedule_path;
    bool use_channel_group;
 
+   /*
+    * Host sema emit mode that worked on this channel (pass5 A/B ladder).
+    * -1 = unknown (try full ladder); else nv_host_sema_mode value to reuse first.
+    */
+   int host_sema_mode_pref;
+   /* Fault method buffer BO (optional; pass5 0xc36f0109 UPDATE_FAULT_METHOD_BUFFER) */
+   struct nv_rm_bo *fault_method_bo;
+   uint64_t fault_method_gpu_addr;
+   int fault_method_rc;            /* 0 ok, negative if setup failed, -1 n/a */
+
    /* CPU mappings */
    volatile uint32_t *userd;       /* USERD control block (GPPut/GPGet/...) */
    volatile void *error_notifier;  /* mapped notifier memory (nvidia_notification_t) */
