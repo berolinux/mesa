@@ -3703,6 +3703,80 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* tick160: pass21 compute object / NIR depth ladder (no HW) */
+   {
+      struct nv_pass21_compute_object obj;
+      enum nv_pass21_compute_shader_kind kinds[4];
+      unsigned kn, ki;
+      struct nv_push cp;
+      uint32_t cb[512];
+      uint8_t ser[512];
+      uint32_t ser_sz;
+
+      kn = nv_pass21_compute_shader_kind_ladder_fill(kinds, 4);
+      if (kn != 4)
+         return -731;
+      if (kinds[0] != NV_PASS21_CS_EXIT_ONLY ||
+          kinds[3] != NV_PASS21_CS_S2R_STORE_IMM)
+         return -732;
+
+      for (ki = 0; ki < kn; ki++) {
+         memset(&obj, 0, sizeof(obj));
+         obj.shader_kind = kinds[ki];
+         obj.program_gpu_addr = 0x210000ull;
+         obj.qmd_gpu_addr = 0x800000ull;
+         obj.qmd_sema_gpu = 0x310000ull;
+         obj.qmd_sema_payload = 0x55u;
+         obj.store_gpu_addr = 0x300000ull;
+         obj.imm_value = 0xdeadbeefu;
+         obj.register_count = 16;
+         obj.spa_version = 0x53u;
+         if (nv_pass21_compute_object_build(&obj) != 0)
+            return -733 - (int)ki;
+         if (!obj.ser_bytes || obj.ser_bytes > sizeof(ser))
+            return -737;
+         ser_sz = nv_sph_pass21_compute_serialise(&obj.sph, ser, sizeof(ser));
+         if (!ser_sz || ser_sz > sizeof(ser))
+            return -738;
+         if ((ser[0] & 0xf) != NV_SPH_TYPE_COMPUTE)
+            return -739;
+      }
+
+      /* default depth kind (s2r+store) launch shape */
+      memset(&obj, 0, sizeof(obj));
+      obj.shader_kind = NV_PASS21_CS_S2R_STORE_IMM;
+      obj.program_gpu_addr = 0x210000ull;
+      obj.qmd_gpu_addr = 0x800000ull;
+      obj.qmd_sema_gpu = 0x310000ull;
+      obj.store_gpu_addr = 0x300000ull;
+      if (nv_pass21_compute_object_build(&obj) != 0)
+         return -740;
+      if (!(obj.sph.sph[0] & (1u << 11)))
+         return -741; /* global store bit */
+      memset(cb, 0, sizeof(cb));
+      nv_push_init(&cp, cb, (uint32_t)(sizeof(cb) / 4));
+      if (nv_pass21_compute_object_emit_launch(
+             &cp, 0xc5c0u, &obj, 0, true, 0x610000ull, 0x66u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -742;
+      if (nv_push_dw_count(&cp) <
+          nv_pass20_inline_qmd_launch_min_methods(true) + 2u)
+         return -743;
+      if (nv_pass21_compute_object_emit_launch(
+             &cp, 0xc5c0u, &obj, 0, true, 0, 0,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -744; /* ser_bytes set; may reuse same obj */
+
+      /* reject unbuilt object */
+      memset(&obj, 0, sizeof(obj));
+      obj.program_gpu_addr = 0x210000ull;
+      obj.qmd_gpu_addr = 0x800000ull;
+      if (nv_pass21_compute_object_emit_launch(
+             &cp, 0xc5c0u, &obj, 0, false, 0, 0,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != -4)
+         return -745;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

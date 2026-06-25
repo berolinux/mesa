@@ -363,7 +363,12 @@ nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
     * mode 5: S2R SR3 (ctaid.x family) + MOV imm + EXIT (pass14 SR variants)
     */
    if (mode == 1 && store_addr)
-      nv_sph_build_compute_store_imm(&blob, store_imm, store_addr, (uint16_t)regs);
+      /* tick160: pass21 depth uses s2r+store_imm when store target known */
+      nv_sph_build_compute_s2r_store_imm_pass21(&blob, store_imm, store_addr,
+                                                (uint16_t)regs);
+   else if (mode == 1)
+      nv_sph_build_compute_store_imm(&blob, store_imm, store_addr,
+                                     (uint16_t)regs);
    else if (mode == 2)
       nv_sph_build_compute_mov_imm_exit(&blob, store_imm ? store_imm : 0xcfu,
                                         (uint16_t)regs);

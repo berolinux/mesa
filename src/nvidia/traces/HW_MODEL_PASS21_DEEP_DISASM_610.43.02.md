@@ -69,4 +69,16 @@ NV_PASS21_RE_G0_G4_UNIFIED_TAIL    // 1
 NV_PASS21_RE_PATH_C_STILL_GATED    // 1
 ```
 
+## Pass21 completion (tick160)
+
+- Implementation wire-up complete through tick159 (G0–G4 sema symmetry, MME RAM_DATA
+  scaffold + env probe, Gallium/Vulkan barriers, channel G1/G2/G3 ladders).
+- Compute NIR depth: `nv_pass21_compute_object` + shader kind ladder
+  (exit → store_imm → s2r multi-SR → s2r+store_imm); not full NIR lower yet.
+- Static RE in `re_pass21/` remains scaffold dirs; measurements carried from pass18–20.
+- No `/dev/nvidia*` on autoloop host: silicon sema/MME/PCAS order still unproven.
+
+**Status:** pass21 implementation phase **COMPLETE** for mesa userspace scaffolding;
+next RE/HW work is live trace + real MME ISA + full NIR→SASS.
+
 *Artifacts: `/tmp/nvidia-reveng-pp-v2/re_pass{18,19,20,21}/`; mesa traces pass18–21.*

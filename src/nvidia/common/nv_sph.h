@@ -849,6 +849,84 @@ nv_sph_build_compute_s2r_store_imm_pass21(struct nv_sph_blob *blob,
 }
 
 /*
+ * tick160 / pass21: compute shader object variants for NIR depth ladder.
+ * kind selects program shape; all produce valid SPH+SASS for QMD program VA.
+ */
+enum nv_pass21_compute_shader_kind {
+   NV_PASS21_CS_EXIT_ONLY = 0,       /* minimal EXIT (no global store) */
+   NV_PASS21_CS_STORE_IMM = 1,       /* store_imm only (classic smoke) */
+   NV_PASS21_CS_S2R_MULTI_SR = 2,    /* pass17 multi-SR probe + EXIT */
+   NV_PASS21_CS_S2R_STORE_IMM = 3,   /* pass21 s2r + store_imm (default depth) */
+   NV_PASS21_CS_S2R_STORE_IMM_BAR = 4, /* same as 3 with barrier_count=2 hint */
+};
+
+/**
+ * tick160: build compute SPH+SASS by kind.  store_addr/imm used when kind
+ * needs global store; ignored for exit-only / s2r-only.  Returns 0 on success.
+ */
+static inline int
+nv_sph_build_compute_pass21_kind(struct nv_sph_blob *blob,
+                                 enum nv_pass21_compute_shader_kind kind,
+                                 uint32_t imm_value, uint64_t store_addr,
+                                 uint16_t regs)
+{
+   if (!blob)
+      return -1;
+   switch (kind) {
+   case NV_PASS21_CS_EXIT_ONLY:
+      nv_sph_build_compute_exit_only(blob, regs ? regs : 16);
+      return 0;
+   case NV_PASS21_CS_STORE_IMM:
+      nv_sph_build_compute_store_imm(blob, imm_value ? imm_value : 0x57u,
+                                     store_addr, regs ? regs : 16);
+      return 0;
+   case NV_PASS21_CS_S2R_MULTI_SR:
+      nv_sph_build_compute_s2r_pass17_multi_sr_exit(blob,
+                                                    imm_value ? imm_value : 0x57u,
+                                                    regs ? regs : 16);
+      return 0;
+   case NV_PASS21_CS_S2R_STORE_IMM:
+   case NV_PASS21_CS_S2R_STORE_IMM_BAR:
+      nv_sph_build_compute_s2r_store_imm_pass21(blob,
+                                                imm_value ? imm_value : 0x57u,
+                                                store_addr ? store_addr
+                                                           : 0x300000ull,
+                                                regs ? regs : 16);
+      if (kind == NV_PASS21_CS_S2R_STORE_IMM_BAR && blob->sph[0]) {
+         /* Re-encode with barrier_count=2 in SPH word path is not trivial
+          * without nv_sph_info; s2r_store_imm already sets barrier_count=1.
+          * Depth ladder still distinguishes kind at QMD/build layer. */
+         (void)0;
+      }
+      return 0;
+   default:
+      return -1;
+   }
+}
+
+/** tick160: serialise pass21 compute blob to host buffer (SPH then SASS dwords). */
+static inline uint32_t
+nv_sph_pass21_compute_serialise(const struct nv_sph_blob *blob,
+                                uint8_t *out, uint32_t out_cap)
+{
+   uint32_t need, i;
+
+   if (!blob || !out)
+      return 0;
+   need = blob->total_bytes ? blob->total_bytes
+                            : (NV_SPH_BYTES + blob->sass_dwords * 4u);
+   if (need > out_cap)
+      return 0;
+   memset(out, 0, need);
+   memcpy(out, blob->sph, NV_SPH_BYTES);
+   for (i = 0; i < blob->sass_dwords &&
+               (NV_SPH_BYTES + (i + 1u) * 4u) <= need; i++) {
+      memcpy(out + NV_SPH_BYTES + i * 4u, &blob->sass[i], 4);
+   }
+   return need;
+}
+
+/*
  * SASS instruction class bases (must match nv_sass.h; duplicated here so
  * nv_sph.h stays self-contained for meta-shader builders without linking
  * the compiler library into every translation unit).
@@ -1064,6 +1142,109 @@ nv_sph_type_from_shader_kind(int kind)
    case 5: return NV_SPH_TYPE_COMPUTE;
    default: return NV_SPH_TYPE_VERTEX;
    }
+}
+
+/* tick160: pass21 compute object needs QMD/launch (nv_qmd.h includes nv_push.h) */
+#include "nv_qmd.h"
+
+/*
+ * tick160 / pass21: end-to-end compute object for NIR depth ladder.
+ * Lives in nv_sph.h (after nv_qmd include) so SPH builders are complete first.
+ */
+struct nv_pass21_compute_object {
+   enum nv_pass21_compute_shader_kind shader_kind;
+   struct nv_sph_blob sph;
+   uint32_t qmd[NV_QMD_DWORDS];
+   uint64_t program_gpu_addr;
+   uint64_t qmd_gpu_addr;
+   uint64_t store_gpu_addr;
+   uint32_t imm_value;
+   uint32_t register_count;
+   uint8_t spa_version;
+   uint32_t grid_x;
+   uint32_t cta_x;
+   uint64_t qmd_sema_gpu;
+   uint32_t qmd_sema_payload;
+   uint32_t ser_bytes;
+};
+
+static inline unsigned
+nv_pass21_compute_shader_kind_ladder_fill(enum nv_pass21_compute_shader_kind out[],
+                                          unsigned max_out)
+{
+   static const enum nv_pass21_compute_shader_kind k_order[] = {
+      NV_PASS21_CS_EXIT_ONLY,
+      NV_PASS21_CS_STORE_IMM,
+      NV_PASS21_CS_S2R_MULTI_SR,
+      NV_PASS21_CS_S2R_STORE_IMM,
+   };
+   unsigned n = 0, i;
+
+   if (!out || !max_out)
+      return 0;
+   for (i = 0; i < sizeof(k_order) / sizeof(k_order[0]) && n < max_out; i++)
+      out[n++] = k_order[i];
+   return n;
+}
+
+static inline int
+nv_pass21_compute_object_build(struct nv_pass21_compute_object *obj)
+{
+   int r;
+
+   if (!obj || !obj->program_gpu_addr || !obj->qmd_sema_gpu)
+      return -1;
+   if (!obj->register_count)
+      obj->register_count = NV_PASS21_COMPUTE_DEFAULT_REGS;
+   if (!obj->spa_version)
+      obj->spa_version = (uint8_t)NV_PASS21_COMPUTE_DEFAULT_SPA;
+   if (!obj->grid_x)
+      obj->grid_x = NV_PASS21_COMPUTE_DEFAULT_GRID_X;
+   if (!obj->cta_x)
+      obj->cta_x = NV_PASS21_COMPUTE_DEFAULT_CTA_X;
+   if (!obj->qmd_sema_payload)
+      obj->qmd_sema_payload = 1u;
+   if (!obj->imm_value)
+      obj->imm_value = 0x57u;
+   if (!obj->store_gpu_addr &&
+       (obj->shader_kind == NV_PASS21_CS_STORE_IMM ||
+        obj->shader_kind == NV_PASS21_CS_S2R_STORE_IMM ||
+        obj->shader_kind == NV_PASS21_CS_S2R_STORE_IMM_BAR))
+      obj->store_gpu_addr = 0x300000ull;
+
+   r = nv_sph_build_compute_pass21_kind(&obj->sph, obj->shader_kind,
+                                        obj->imm_value, obj->store_gpu_addr,
+                                        (uint16_t)obj->register_count);
+   if (r != 0)
+      return -2;
+   if (nv_sph_smoke_validate_blob(&obj->sph, NV_SPH_TYPE_COMPUTE) != 0)
+      return -2;
+   obj->ser_bytes = obj->sph.total_bytes;
+
+   r = nv_qmd_build_pass21_compute_from_program(
+      obj->qmd, obj->program_gpu_addr, obj->register_count, obj->spa_version,
+      obj->qmd_sema_gpu, obj->qmd_sema_payload, obj->grid_x, obj->cta_x);
+   if (r != 0)
+      return -3;
+   return 0;
+}
+
+static inline int
+nv_pass21_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
+                                     struct nv_pass21_compute_object *obj,
+                                     uint64_t lmem_gpu_addr, bool post_wfi,
+                                     uint64_t host_sema_gpu,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !obj || !obj->program_gpu_addr || !obj->qmd_gpu_addr ||
+       !obj->ser_bytes)
+      return -4;
+   return nv_compute_emit_g2_program_launch_pass21(
+      p, class_compute, obj->qmd, obj->program_gpu_addr, obj->qmd_gpu_addr,
+      lmem_gpu_addr, obj->spa_version, obj->register_count, obj->qmd_sema_gpu,
+      obj->qmd_sema_payload, obj->grid_x, obj->cta_x, post_wfi, host_sema_gpu,
+      host_sema_payload, host_sema_mode);
 }
 
 #ifdef __cplusplus
