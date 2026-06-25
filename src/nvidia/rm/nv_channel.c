@@ -4476,8 +4476,13 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
             p22obj.grid_x = grid_x;
             p22obj.cta_x = cta_x;
             if (nv_pass22_compute_object_build(&p22obj) == 0) {
-               /* tick189: pass27 first; tick185: pass26; tick181: pass25; pass24/22 */
-               if (NV_PASS27_RE_SCAFFOLD && nv_pass27_policy_ok() &&
+               /* tick191: pass28 first; tick189: pass27; tick185: pass26; pass25/24/22 */
+               if (NV_PASS28_RE_SCAFFOLD && nv_pass28_policy_ok() &&
+                   nv_pass28_g0_g4_symmetry_ok())
+                  emit_ok = nv_pass28_compute_object_emit_launch(
+                     &push, cc_try, &p22obj, lmem_gpu_addr, true,
+                     sema_gpu_addr, sema_payload, hs_mode);
+               if (emit_ok != 0 && NV_PASS27_RE_SCAFFOLD && nv_pass27_policy_ok() &&
                    nv_pass27_g0_g4_symmetry_ok())
                   emit_ok = nv_pass27_compute_object_emit_launch(
                      &push, cc_try, &p22obj, lmem_gpu_addr, true,

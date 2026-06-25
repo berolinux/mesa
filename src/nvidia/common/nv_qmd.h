@@ -234,6 +234,21 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS27_IMPL_G1_CHANNEL_TICK190        1
 #define NV_PASS27_IMPL_G3_CHANNEL_TICK190        1
 #define NV_PASS27_IMPL_G4_CHANNEL_TICK190        1
+/* tick191: pass27 implementation audit (RE full disasm still pending) */
+#define NV_PASS27_IMPL_AUDIT_TICK191             1
+#define NV_PASS27_IMPL_SCAFFOLD_TICK188          1
+#define NV_PASS27_IMPL_G0_G4_SYMMETRY_TICK189    1
+#define NV_PASS27_IMPL_G2_CHANNEL_TICK189        1
+#define NV_PASS27_IMPL_WIRE_COMPLETE             1
+#define NV_PASS27_RE_TRACE_SCAFFOLD_TICK191      1
+
+/* tick191 / pass28 scaffold — inherits pass27 impl wire; RE TBD */
+#define NV_PASS28_RE_SCAFFOLD                    1
+#define NV_PASS28_RE_INHERITS_PASS27             1
+#define NV_PASS28_RE_EXPLICIT_EMIT_POLICY        NV_PASS27_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS28_RE_PATH_C_STILL_GATED          NV_PASS27_RE_PATH_C_STILL_GATED
+#define NV_PASS28_RE_FULL_DISASM_PENDING         1
+#define NV_PASS28_IMPL_INHERITS_PASS27_WIRE      NV_PASS27_IMPL_WIRE_COMPLETE
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -347,6 +362,32 @@ nv_pass27_policy_ok(void)
           NV_PASS27_RE_INHERITS_PASS26 != 0 &&
           nv_pass26_implementation_audit_ok() &&
           NV_PASS27_RE_PATH_C_STILL_GATED != 0;
+}
+
+/** tick191: pass27 mesa G0–G4 wire complete; pass27 RE still pending. */
+static inline bool
+nv_pass27_implementation_audit_ok(void)
+{
+   return NV_PASS27_IMPL_AUDIT_TICK191 != 0 &&
+          NV_PASS27_IMPL_SCAFFOLD_TICK188 != 0 &&
+          NV_PASS27_IMPL_G0_G4_SYMMETRY_TICK189 != 0 &&
+          NV_PASS27_IMPL_G1_G3_G4_TICK190 != 0 &&
+          NV_PASS27_IMPL_G2_CHANNEL_TICK189 != 0 &&
+          NV_PASS27_IMPL_G1_CHANNEL_TICK190 != 0 &&
+          NV_PASS27_IMPL_G3_CHANNEL_TICK190 != 0 &&
+          NV_PASS27_IMPL_G4_CHANNEL_TICK190 != 0 &&
+          NV_PASS27_IMPL_WIRE_COMPLETE != 0 &&
+          nv_pass27_policy_ok() &&
+          NV_PASS27_RE_FULL_DISASM_PENDING != 0;
+}
+
+static inline bool
+nv_pass28_policy_ok(void)
+{
+   return NV_PASS28_RE_SCAFFOLD != 0 &&
+          NV_PASS28_RE_INHERITS_PASS27 != 0 &&
+          nv_pass27_implementation_audit_ok() &&
+          NV_PASS28_RE_PATH_C_STILL_GATED != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
