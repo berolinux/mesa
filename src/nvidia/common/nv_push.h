@@ -63,6 +63,12 @@ extern "C" {
  * (a4498e etc), NEVER as pushbuffer sema execute. Keep open-header modes as
  * last-resort theoretical A/B only; primary is blob 0x1001, then vdpau 0x2.
  *
+ * pass14 sema config table (glcore @ 0x11e30c0): structured records
+ *   exec (0x1001/02/04, 0x0802/04) + tag_a(4/5/0) + tag_b(2/3/1) + sema_idx
+ *   (0x10=A .. 0x12=C; 0x1004→C, 0x1002→B, 0x0802→A; 0x1001 primary @ +0x140).
+ * Slot-aware sema (execute on A/B/C not only D) is experimental; ladder below
+ * still programs full ABCD with execute in D, varying only execute imm.
+ *
  * Blob (610.43.02 glcore @ b6c952) hardcodes SEMAPHORED = 0x1001 after inc4
  * sema block 0x20040004. Pass8 vdpau @ 28c9a uses execute = 0x00000002.
  *

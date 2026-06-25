@@ -1617,7 +1617,8 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    uint32_t regs = 16;
    uint32_t gx, gy, gz;
    uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
-   uint8_t sass_ver = 0x50;
+   /* tick139: SPA/SASS from device probe (pass13; default 0x53) */
+   uint8_t sass_ver = 0x53u;
    uint32_t qmd_tmp[NV_QMD_DWORDS];
    bool indirect_gpu_only = false;
    uint64_t indirect_gpu = 0;
@@ -1673,8 +1674,8 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       }
    }
 
-   if (di && di->sm_version)
-      sass_ver = (uint8_t)(di->sm_version & 0xff);
+   if (di)
+      sass_ver = nv_device_info_sass_version_u8(di);
 
    memset(&desc, 0, sizeof(desc));
    desc.program_addr = prog;

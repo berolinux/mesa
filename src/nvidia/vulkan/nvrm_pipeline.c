@@ -2800,7 +2800,8 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    uint32_t cta_x = 1, cta_y = 1, cta_z = 1;
    uint32_t shared = 0;
    uint32_t local_spill = 0;
-   uint8_t sass_ver = 0x50;
+   /* tick139: SPA/SASS from device probe (pass13; default 0x53 when unknown) */
+   uint8_t sass_ver = 0x53u;
 
    memset(desc, 0, sizeof(*desc));
    if (!cmd)
@@ -2811,8 +2812,7 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    info = cmd->device ? cmd->device->info : NULL;
    if (info) {
       class_compute = info->class_compute;
-      if (info->sm_version)
-         sass_ver = (uint8_t)(info->sm_version & 0xff);
+      sass_ver = nv_device_info_sass_version_u8(info);
    }
    if (class_compute_out)
       *class_compute_out = class_compute;
@@ -2930,12 +2930,12 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
 
    /* tick136 / pass12: first compute in cmd buffer uses full G2 channel_prep */
    if (!cmd->compute_init_done) {
-      uint8_t spa = desc.sass_version ? desc.sass_version : 0x50;
+      uint8_t spa = desc.sass_version ? desc.sass_version : 0x53u;
       const struct nv_device_info *info = cmd->device ? cmd->device->info : NULL;
       uint64_t lmem_addr = 0;
       uint32_t lmem_low = desc.local_mem_low ? desc.local_mem_low : 256u;
-      if (info && info->sm_version)
-         spa = (uint8_t)(info->sm_version & 0xff);
+      if (info)
+         spa = nv_device_info_sass_version_u8(info);
       if (cmd->lmem_bo)
          lmem_addr = nv_rm_bo_gpu_offset(cmd->lmem_bo);
       nv_compute_emit_g2_channel_prep(&cmd->push, class_compute, spa,
@@ -2948,6 +2948,8 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
                                       desc.sema_release0_addr,
                                       desc.sema_release0_value,
                                       false /* inv in channel_prep or prior */);
+   /* tick139 / pass13: post-launch invalidate wave (cuda-shaped) */
+   nv_compute_emit_g2_post_launch_invalidate(&cmd->push);
    if (qmd_host && cmd->qmd_bo)
       nv_rm_bo_unmap(cmd->qmd_bo);
 

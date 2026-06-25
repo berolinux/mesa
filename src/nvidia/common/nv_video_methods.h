@@ -41,6 +41,13 @@ extern "C" {
 #define NV_VIDEO_CLASS_NVDEC_C6B0        0x0000C6B0
 #define NV_VIDEO_CLASS_NVDEC_C5B0        0x0000C5B0
 #define NV_VIDEO_CLASS_NVDEC_C3B0        0x0000C3B0
+/* pass14 glcore @ 0x1238bf0 region: newer NVDEC *B0 ladder head */
+#define NV_VIDEO_CLASS_NVDEC_D1B0        0x0000D1B0
+#define NV_VIDEO_CLASS_NVDEC_CFB0        0x0000CFB0
+#define NV_VIDEO_CLASS_NVDEC_CEB0        0x0000CEB0
+#define NV_VIDEO_CLASS_NVDEC_CDB0        0x0000CDB0
+#define NV_VIDEO_CLASS_NVDEC_CBB0        0x0000CBB0
+#define NV_VIDEO_CLASS_NVDEC_CAB0        0x0000CAB0
 
 #define NV_VIDEO_CLASS_NVENC_PASCAL_B4B7 0x0000B4B7
 #define NV_VIDEO_CLASS_NVENC_TURING_C0B7 0x0000C0B7
@@ -96,10 +103,20 @@ extern "C" {
 static inline uint32_t
 nv_video_pick_nvdec_class(uint8_t sm_version)
 {
-   /* Prefer newest class in pass9 ladder; RmAlloc ladder tries alternates. */
+   /* Prefer newest class; RmAlloc ladder tries pass14/11/9 alternates. */
+   if (sm_version >= 0x9a)
+      return NV_VIDEO_CLASS_NVDEC_D1B0; /* pass14 rodata head */
+   if (sm_version >= 0x95)
+      return NV_VIDEO_CLASS_NVDEC_CFB0;
+   if (sm_version >= 0x92)
+      return NV_VIDEO_CLASS_NVDEC_CEB0;
    if (sm_version >= 0x90)
-      return NV_VIDEO_CLASS_NVDEC_C9B0;
+      return NV_VIDEO_CLASS_NVDEC_CDB0; /* pass14; was C9B0-only pre-tick139 */
+   if (sm_version >= 0x8c)
+      return NV_VIDEO_CLASS_NVDEC_CBB0;
    if (sm_version >= 0x89)
+      return NV_VIDEO_CLASS_NVDEC_C9B0;
+   if (sm_version >= 0x88)
       return NV_VIDEO_CLASS_NVDEC_C8B0;
    if (sm_version >= 0x87)
       return NV_VIDEO_CLASS_NVDEC_HOPPER_C7;

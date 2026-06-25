@@ -271,6 +271,21 @@ bool nv_sass_emit_smoke_mov_imm_exit(struct nv_sass_buf *b, uint8_t rd,
                                      uint32_t imm);
 /** pass12/tick135: NOP + EXIT (gpucomp 0x50b0/0x7918 signature alignment). */
 bool nv_sass_emit_smoke_nop_exit(struct nv_sass_buf *b);
+/**
+ * tick139 / pass13: S2R R0, SR_TID.X (or sr) + MOV R1, imm + EXIT.
+ * Exercises S2R (gpucomp 0xf0c8) + MOV + EXIT without global store — useful
+ * compute bind/trace target when store VA unavailable but non-trivial SASS wanted.
+ */
+bool nv_sass_emit_smoke_s2r_mov_imm_exit(struct nv_sass_buf *b, uint8_t sr,
+                                         uint8_t rd_s2r, uint8_t rd_mov,
+                                         uint32_t imm);
+/**
+ * tick139: S2R tid.x → R4; MOV R1,imm; STG [R2],R1; EXIT (addr must be in R2
+ * or set via prior mov_ri).  Full pass13 smoke kernel pattern.
+ */
+bool nv_sass_emit_smoke_s2r_store_imm_at_gva(struct nv_sass_buf *b,
+                                             uint64_t store_gpu_addr,
+                                             uint32_t imm_value);
 
 bool nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                     uint8_t ra_addr, uint32_t imm);

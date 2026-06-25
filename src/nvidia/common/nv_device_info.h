@@ -139,6 +139,75 @@ nv_device_info_is_virtualized(const struct nv_device_info *info)
 }
 
 /**
+ * tick139 / pass13: map device SM / sass_version probe to SPA_VERSION byte.
+ * sm_version is often 0xMMNN (major.minor BCD-ish, e.g. 0x0806 = SM 8.6) or a
+ * single-byte sass/SPA code already (0x50..0x90).  Smoke default remains 0x53
+ * (Ampere-era 5.3) when probe is missing — matches G3 channel_prep 5,3.
+ *
+ * Returns a single-byte SPA/SASS code suitable for SET_SPA_VERSION low byte
+ * and QMD sass_version fields.
+ */
+static inline uint8_t
+nv_device_info_spa_version_u8(const struct nv_device_info *info)
+{
+   uint32_t sm;
+   uint8_t maj, min;
+
+   if (!info || !info->sm_version)
+      return 0x53u; /* pass12/13 smoke default (maj=5, min=3) */
+
+   sm = info->sm_version;
+   /* Already a compact code in typical SPA range (0x40..0xA0). */
+   if (sm >= 0x40u && sm <= 0xA0u)
+      return (uint8_t)(sm & 0xffu);
+   /* BCD / nibble major.minor in low 16 (e.g. 0x0806, 0x0705, 0x0089). */
+   if (sm <= 0xffffu) {
+      maj = (uint8_t)((sm >> 8) & 0xffu);
+      min = (uint8_t)(sm & 0xffu);
+      if (maj == 0 && min != 0)
+         return min; /* low byte only */
+      if (maj >= 5u && maj <= 12u && min <= 15u)
+         return (uint8_t)(((maj & 0xfu) << 4) | (min & 0xfu));
+      /* decimal-style 0xMMNN where NN is two-digit minor (8.6 → 0x0806) */
+      if (maj >= 5u && maj <= 12u && min <= 99u)
+         return (uint8_t)(((maj & 0xfu) << 4) | ((min / 10u) & 0xfu));
+   }
+   return (uint8_t)(sm & 0xffu);
+}
+
+/** tick139: SPA major/minor for NVC597_SET_SPA_VERSION ((maj<<8)|min). */
+static inline void
+nv_device_info_spa_maj_min(const struct nv_device_info *info,
+                           uint8_t *maj_out, uint8_t *min_out)
+{
+   uint8_t spa = nv_device_info_spa_version_u8(info);
+   uint8_t maj = (uint8_t)((spa >> 4) & 0xfu);
+   uint8_t min = (uint8_t)(spa & 0xfu);
+
+   /* 0x53 → maj=5 min=3; 0x50 with zero minor nibbles still maj=5 min=0 */
+   if (maj == 0 && spa >= 0x40u) {
+      maj = (uint8_t)((spa >> 4) & 0xfu);
+      if (maj == 0)
+         maj = 5u;
+   }
+   if (maj == 0)
+      maj = 5u;
+   if (!min && spa == 0x53u)
+      min = 3u;
+   if (maj_out)
+      *maj_out = maj;
+   if (min_out)
+      *min_out = min;
+}
+
+/** Alias: QMD / compute sass_version field uses same SPA-ish byte. */
+static inline uint8_t
+nv_device_info_sass_version_u8(const struct nv_device_info *info)
+{
+   return nv_device_info_spa_version_u8(info);
+}
+
+/**
  * tick108: prefer conservative sysmem/CPU-access paths when virtualized.
  * Guest/vGPU often has restricted BAR1 / limited GPU-direct allocs; host sema
  * and notifier rings should still work in sysmem WC.

@@ -358,12 +358,24 @@ nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
     * mode 0: EXIT only
     * mode 1: store_imm at store_addr (requires non-zero store_addr)
     * mode 2: MOV imm + EXIT (tick137; non-trivial without global store)
+    * mode 3: S2R tid.x + MOV imm + EXIT (tick139 / pass13 S2R+MOV+EXIT)
+    * mode 4: NOP + EXIT (tick139 / pass14 minimal kernel pattern)
+    * mode 5: S2R SR3 (ctaid.x family) + MOV imm + EXIT (pass14 SR variants)
     */
    if (mode == 1 && store_addr)
       nv_sph_build_compute_store_imm(&blob, store_imm, store_addr, (uint16_t)regs);
    else if (mode == 2)
       nv_sph_build_compute_mov_imm_exit(&blob, store_imm ? store_imm : 0xcfu,
                                         (uint16_t)regs);
+   else if (mode == 3)
+      nv_sph_build_compute_s2r_mov_imm_exit(&blob, store_imm ? store_imm : 0xcfu,
+                                            (uint16_t)regs);
+   else if (mode == 4)
+      nv_sph_build_compute_nop_exit(&blob, (uint16_t)regs);
+   else if (mode == 5)
+      nv_sph_build_compute_s2r_sr_mov_imm_exit(&blob, 3 /* SR_CTAID.X? */,
+                                               store_imm ? store_imm : 0xcfu,
+                                               (uint16_t)regs);
    else
       nv_sph_build_compute_exit_only(&blob, (uint16_t)regs);
 

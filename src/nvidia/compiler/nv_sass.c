@@ -92,6 +92,40 @@ nv_sass_emit_smoke_nop_exit(struct nv_sass_buf *b)
 }
 
 bool
+nv_sass_emit_smoke_s2r_mov_imm_exit(struct nv_sass_buf *b, uint8_t sr,
+                                    uint8_t rd_s2r, uint8_t rd_mov,
+                                    uint32_t imm)
+{
+   /* SR_TID.X is commonly index 0 in Maxwell+ S2R tables (approximation). */
+   if (!nv_sass_emit_s2r(b, rd_s2r, sr))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, rd_mov, imm))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
+nv_sass_emit_smoke_s2r_store_imm_at_gva(struct nv_sass_buf *b,
+                                        uint64_t store_gpu_addr,
+                                        uint32_t imm_value)
+{
+   uint32_t lo = (uint32_t)(store_gpu_addr & 0xffffffffu);
+   uint32_t hi = (uint32_t)(store_gpu_addr >> 32);
+   /* S2R tid.x → R4 (ignored by store; proves S2R in stream) */
+   if (!nv_sass_emit_s2r(b, 4, 0 /* SR_TID.X approx */))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 2, lo))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 3, hi))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 1, imm_value))
+      return false;
+   if (!nv_sass_emit_stg_u32(b, 2, 1))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
 nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
                                     uint64_t store_gpu_addr,
                                     uint32_t imm_value)

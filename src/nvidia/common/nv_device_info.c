@@ -394,12 +394,12 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
       0x0000c56fu, 0x0000c46fu, 0x0000c36fu, 0x0000c36eu, 0x0000c06fu,
       0x0000b06fu, 0x0000a26fu, 0x0000a16fu, 0x0000a06fu, 0x0000906fu,
    };
-   /* pass11 global hits + NVENC side table @ 0x1238bb4: C9B0.. + B8B0/CBB0/CAB0 */
+   /* pass14 glcore @ 0x1238bf0: D1B0 CFB0 CEB0 CDB0 C9B0..; pass11 alts CBB0/CAB0/B8B0 */
    static const uint32_t ladder_nvdec[] = {
-      0x0000cbb0u, 0x0000cab0u, 0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u,
-      0x0000c6b0u, 0x0000c5b0u, 0x0000c4b0u, 0x0000c3b0u, 0x0000c2b0u,
-      0x0000c1b0u, 0x0000c0b0u, 0x0000b8b0u, 0x0000b6b0u, 0x0000b0b0u,
-      0x0000a0b0u,
+      0x0000d1b0u, 0x0000cfb0u, 0x0000ceb0u, 0x0000cdb0u, 0x0000cbb0u,
+      0x0000cab0u, 0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u, 0x0000c6b0u,
+      0x0000c5b0u, 0x0000c4b0u, 0x0000c3b0u, 0x0000c2b0u, 0x0000c1b0u,
+      0x0000c0b0u, 0x0000b8b0u, 0x0000b6b0u, 0x0000b0b0u, 0x0000a0b0u,
    };
    /* pass11 glcore @ 0x1238bb4: D1B7 CFB7 CEB7 C9B7 C8B7 C7B7 + C5B7 C4B7 B6B7 B4B7 */
    static const uint32_t ladder_nvenc[] = {

@@ -1188,23 +1188,41 @@ nv_compute_emit_wait_for_idle(struct nv_push *p)
 /**
  * pass12: full G2 channel prep — bringup init + WFI + second invalidate pass.
  * Mirrors glcore order: SPA/CWD/LMEM → inv → WFI → (QMD later).
+ * spa_version 0 → 0x53 smoke default (pass13 / tick139).
  */
 static inline void
 nv_compute_emit_g2_channel_prep(struct nv_push *p, uint32_t class_compute,
                                 uint8_t spa_version, uint64_t lmem_gpu_addr,
                                 uint32_t local_mem_low_bytes)
 {
+   uint8_t spa = spa_version ? spa_version : (uint8_t)0x53u;
+
    if (!p)
       return;
-   nv_compute_emit_g2_bringup_init(p, class_compute, spa_version, 0,
+   nv_compute_emit_g2_bringup_init(p, class_compute, spa, 0,
                                    lmem_gpu_addr, local_mem_low_bytes);
    nv_compute_emit_wait_for_idle(p);
    nv_compute_emit_invalidate_caches(p);
 }
 
 /**
- * tick133 / pass12: full G2 smoke slice — channel prep + QMD encode (G2
- * defaults) + materialize + inline QMD / PCAS launch.
+ * tick139 / pass13 cuda n-grams: second invalidate wave after QMD/PCAS launch
+ * (INV_SD / INV_TH / INV_SC family interleaved with SIG_PCAS_B in binaries).
+ * Optional; safe to call after inline QMD or SEND_PCAS.
+ */
+static inline void
+nv_compute_emit_g2_post_launch_invalidate(struct nv_push *p)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_compute_emit_invalidate_caches(p);
+   nv_compute_emit_wait_for_idle(p);
+}
+
+/**
+ * tick133 / pass12/13: full G2 smoke slice — channel prep + QMD encode (G2
+ * defaults) + materialize + inline QMD / PCAS launch + optional post-inv.
  * program_gpu_addr may be 0 for encode-only tests.
  * Returns 0 on success, -1 on bad args.
  */
@@ -1219,15 +1237,16 @@ nv_compute_emit_g2_smoke_slice(struct nv_push *p, uint32_t class_compute,
 {
    struct nv_qmd_desc d;
    uint32_t qmd[NV_QMD_DWORDS];
+   uint8_t spa = sass_version ? sass_version : (uint8_t)0x53u;
 
    if (!p)
       return -1;
 
-   /* pass12: channel_prep includes WFI + double invalidate vs bringup_init only */
-   nv_compute_emit_g2_channel_prep(p, class_compute, 0, lmem_gpu_addr, 256u);
+   /* tick139: pass sass_version into channel_prep (was always 0 before) */
+   nv_compute_emit_g2_channel_prep(p, class_compute, spa, lmem_gpu_addr, 256u);
 
    nv_qmd_desc_init_smoke_grid(&d, program_gpu_addr, register_count,
-                               sass_version,
+                               spa,
                                grid_x ? grid_x : 1, 1, 1,
                                cta_x ? cta_x : 1, 1, 1,
                                0, 0);
@@ -1239,6 +1258,8 @@ nv_compute_emit_g2_smoke_slice(struct nv_push *p, uint32_t class_compute,
    else
       nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
    nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+   /* pass13: post-PCAS invalidate wave (cuda-shaped compute path) */
+   nv_compute_emit_g2_post_launch_invalidate(p);
    return 0;
 }
 

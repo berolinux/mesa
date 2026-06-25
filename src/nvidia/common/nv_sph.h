@@ -206,6 +206,131 @@ nv_sph_build_compute_mov_imm_exit(struct nv_sph_blob *blob, uint32_t imm_value,
 }
 
 /**
+ * tick139: compute S2R(tid.x) + MOV imm + EXIT via hand-encoded SPH/SASS
+ * (aligns pass13 gpucomp S2R/MOV/EXIT families; no global store).
+ */
+static inline void
+nv_sph_build_compute_s2r_mov_imm_exit(struct nv_sph_blob *blob,
+                                      uint32_t imm_value, uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   info.does_global_store = false;
+   info.barrier_count = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+#define NV_SPH_SASS_MOV32I_HI(rd)  (0x01000000u | ((uint32_t)(rd) & 0xffu))
+   /* S2R R0, SR0 — approximate Maxwell+ encoding (hi class 0xf0c8 in pass13) */
+   s[n++] = 0x00000000u; /* lo: Rd=0, Sr=0 */
+   s[n++] = 0xf0c80000u; /* hi: S2R class (pass13 gpucomp 0xf0c8) */
+   s[n++] = imm_value;
+   s[n++] = NV_SPH_SASS_MOV32I_HI(1);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_SASS_MOV32I_HI
+
+   blob->sass_dwords = n;
+   code_off = NV_SPH_BYTES;
+   total = code_off + n * 4u;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+   (void)code_off;
+}
+
+/**
+ * tick139 / pass14: compute S2R(sr) + MOV imm + EXIT with explicit SR index.
+ * pass14 gpucomp: SR 0x00 dominant (tid/laneid family); also try SR1/SR3.
+ */
+static inline void
+nv_sph_build_compute_s2r_sr_mov_imm_exit(struct nv_sph_blob *blob,
+                                         uint8_t sr_index, uint32_t imm_value,
+                                         uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   info.does_global_store = false;
+   info.barrier_count = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+#define NV_SPH_SASS_MOV32I_HI(rd)  (0x01000000u | ((uint32_t)(rd) & 0xffu))
+   /* S2R R0, SR# — lo packs Rd=0 + Sr in low byte (pass14 shift probes) */
+   s[n++] = (uint32_t)(sr_index & 0xffu);
+   s[n++] = 0xf0c80000u;
+   s[n++] = imm_value;
+   s[n++] = NV_SPH_SASS_MOV32I_HI(1);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_SASS_MOV32I_HI
+
+   blob->sass_dwords = n;
+   code_off = NV_SPH_BYTES;
+   total = code_off + n * 4u;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+   (void)code_off;
+}
+
+/**
+ * tick139 / pass14: minimal compute NOP+EXIT (gpucomp short-kernel pattern).
+ * Validates SPH+SASS without MOV/S2R — useful for program object bring-up.
+ */
+static inline void
+nv_sph_build_compute_nop_exit(struct nv_sph_blob *blob, uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 8;
+   info.does_global_store = false;
+   info.barrier_count = 0;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+   /* NOP then EXIT (pass14 / pass13 SASS families 0x50b0 / 0x7918) */
+   s[n++] = 0x00000000u;
+   s[n++] = 0x50b00000u;
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+
+   blob->sass_dwords = n;
+   code_off = NV_SPH_BYTES;
+   total = code_off + n * 4u;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+   (void)code_off;
+}
+
+/**
  * tick121: minimal graphics stage smoke — correct SPH type + EXIT only.
  * Used when NIR/SASS is unavailable so bind/draw still has a valid program
  * object (HW may still fault on shader I/O; fixed-func path remains preferred

@@ -1955,6 +1955,160 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -481;
    }
 
+   /* tick139: SPA/SASS helpers; G2 smoke_slice passes spa; S2R+MOV SPH; sass smoke */
+   {
+      struct nv_device_info di;
+      struct nv_sph_blob s2r_sph;
+      struct nv_sass_buf sb;
+      struct nv_push p2;
+      uint32_t g2buf[256], n2, ii;
+      bool saw_wfi = false, saw_inv = false;
+      uint8_t maj = 0, min = 0;
+
+      memset(&di, 0, sizeof(di));
+      if (nv_device_info_spa_version_u8(NULL) != 0x53u)
+         return -495;
+      if (nv_device_info_spa_version_u8(&di) != 0x53u)
+         return -496;
+      di.sm_version = 0x53u;
+      if (nv_device_info_spa_version_u8(&di) != 0x53u)
+         return -497;
+      di.sm_version = 0x0806u; /* SM 8.6 BCD-ish */
+      if (nv_device_info_spa_version_u8(&di) == 0)
+         return -498;
+      nv_device_info_spa_maj_min(NULL, &maj, &min);
+      if (maj != 5u || min != 3u)
+         return -499;
+      nv_device_info_spa_maj_min(&di, &maj, &min);
+      if (maj == 0)
+         return -500;
+
+      nv_sph_build_compute_s2r_mov_imm_exit(&s2r_sph, 0xabu, 16);
+      if (nv_sph_smoke_validate_blob(&s2r_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -501;
+      if (s2r_sph.sass_dwords < 6)
+         return -502;
+
+      nv_sass_buf_init(&sb);
+      if (!nv_sass_emit_smoke_s2r_mov_imm_exit(&sb, 0, 0, 1, 0xcfu))
+         return -503;
+      if (sb.count < 6) /* 3 insns × 2 dwords */
+         return -504;
+      nv_sass_buf_finish(&sb);
+
+      nv_sass_buf_init(&sb);
+      if (!nv_sass_emit_smoke_s2r_store_imm_at_gva(&sb, 0x300000ull, 0xdeadbeefu))
+         return -505;
+      if (sb.count < 10) /* S2R + 3×MOV + STG + EXIT */
+         return -506;
+      nv_sass_buf_finish(&sb);
+
+      /* G2 smoke_slice: channel_prep must get non-zero SPA (0x53 default) */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      if (nv_compute_emit_g2_smoke_slice(&p2, 0xc5c0u, 0x900000ull, 16, 0x53,
+                                         0xa00000ull, NULL, 0, 0xc00000ull, 7u,
+                                         1u, 1u) != 0)
+         return -507;
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 24)
+         return -508;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_WAIT_FOR_IDLE)
+            saw_wfi = true;
+         if (method == NVC3C0_INVALIDATE_SHADER_CACHES ||
+             method == NVC3C0_INVALIDATE_TEXTURE_HEADER_CACHE)
+            saw_inv = true;
+      }
+      if (!saw_wfi || !saw_inv)
+         return -509;
+
+      /* G3 channel_prep_spa_u8 + path_c (stubs → no CALL, still valid push) */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_3d_emit_g3_channel_prep_spa_u8(&p2, 0xc597u, 0x53u, true);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 4)
+         return -510;
+   }
+
+   /* tick139 / pass14: NVDEC class ladder head; NOP+EXIT / S2R-SR SPH; sema ladder */
+   {
+      struct nv_sph_blob nop_sph, sr_sph;
+      uint32_t nvdec_lad[24];
+      unsigned nvdec_n = 24, ni;
+      bool saw_d1 = false, saw_cf = false, saw_ce = false, saw_cd = false;
+      bool saw_1004 = false, saw_0804 = false, saw_0802 = false;
+      enum nv_host_sema_mode sema_modes[NV_HOST_SEMA_MODE_COUNT];
+      unsigned sema_n, si;
+
+      if (nv_video_pick_nvdec_class(0x9a) != NV_VIDEO_CLASS_NVDEC_D1B0)
+         return -511;
+      if (nv_video_pick_nvdec_class(0x95) != NV_VIDEO_CLASS_NVDEC_CFB0)
+         return -512;
+      if (nv_video_pick_nvdec_class(0x92) != NV_VIDEO_CLASS_NVDEC_CEB0)
+         return -513;
+      if (nv_video_pick_nvdec_class(0x90) != NV_VIDEO_CLASS_NVDEC_CDB0)
+         return -514;
+      if (nv_video_pick_nvdec_class(0x80) != NV_VIDEO_CLASS_NVDEC_AMPERE_C1)
+         return -515;
+
+      nv_device_info_fill_class_ladder(3 /* nvdec */, 0, nvdec_lad, &nvdec_n);
+      if (nvdec_n < 8)
+         return -516;
+      for (ni = 0; ni < nvdec_n; ni++) {
+         if (nvdec_lad[ni] == 0x0000d1b0u)
+            saw_d1 = true;
+         if (nvdec_lad[ni] == 0x0000cfb0u)
+            saw_cf = true;
+         if (nvdec_lad[ni] == 0x0000ceb0u)
+            saw_ce = true;
+         if (nvdec_lad[ni] == 0x0000cdb0u)
+            saw_cd = true;
+      }
+      if (!saw_d1 || !saw_cf || !saw_ce || !saw_cd)
+         return -517;
+      /* pass14 newest-first: D1B0 should be first entry (no prefer_first) */
+      if (nvdec_lad[0] != 0x0000d1b0u)
+         return -518;
+
+      nv_sph_build_compute_nop_exit(&nop_sph, 8);
+      if (nv_sph_smoke_validate_blob(&nop_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -519;
+      if (nop_sph.sass_dwords < 4)
+         return -520;
+
+      nv_sph_build_compute_s2r_sr_mov_imm_exit(&sr_sph, 3, 0x55u, 16);
+      if (nv_sph_smoke_validate_blob(&sr_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -521;
+      if (sr_sph.sass_dwords < 6)
+         return -522;
+      /* lo dword of first insn should carry SR index in low byte */
+      if ((sr_sph.sass[0] & 0xffu) != 3u)
+         return -523;
+
+      sema_n = nv_host_sema_ladder_fill(sema_modes, -1);
+      if (sema_n < 16)
+         return -524;
+      for (si = 0; si < sema_n; si++) {
+         if (sema_modes[si] == NV_HOST_SEMA_MODE_BLOB1004_ALIGN4 ||
+             sema_modes[si] == NV_HOST_SEMA_MODE_BLOB1004_SHIFT2)
+            saw_1004 = true;
+         if (sema_modes[si] == NV_HOST_SEMA_MODE_BLOB0804_ALIGN4 ||
+             sema_modes[si] == NV_HOST_SEMA_MODE_BLOB0804_SHIFT2)
+            saw_0804 = true;
+         if (sema_modes[si] == NV_HOST_SEMA_MODE_BLOB0802_ALIGN4 ||
+             sema_modes[si] == NV_HOST_SEMA_MODE_BLOB0802_SHIFT2)
+            saw_0802 = true;
+      }
+      if (!saw_1004 || !saw_0804 || !saw_0802)
+         return -525;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

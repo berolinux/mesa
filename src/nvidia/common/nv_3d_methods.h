@@ -3931,6 +3931,7 @@ nv_3d_emit_g3_shader_draw_sema(struct nv_push *p, uint32_t class_3d,
  *
  * spa_maj/min: 0,0 uses 5.3 (Ampere-era default, same as pipeline_bind_smoke).
  * upload_mme: when true, emits nv_mme_emit_upload_indirect_stubs_only.
+ * tick139: path_c_try — after MME upload, attempt CALL only if non-stub (usually 0).
  */
 static inline void
 nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
@@ -3949,8 +3950,11 @@ nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
    nv_push_method(p, NVC597_SET_SPA_VERSION,
                   ((uint32_t)maj << 8) | (uint32_t)min);
 
-   if (upload_mme)
+   if (upload_mme) {
       (void)nv_mme_emit_upload_indirect_stubs_only(p);
+      /* tick139: path C CALL only when real MME exists (no-op while stubs) */
+      (void)nv_mme_emit_path_c_calls_if_ready(p);
+   }
 
    /* pass12/glcore: invalidate after MME/program setup, before first draw */
    {
@@ -3964,6 +3968,25 @@ nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
       nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
       nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
    }
+}
+
+/**
+ * tick139: G3 channel_prep using SPA byte (e.g. nv_device_info_spa_version_u8).
+ * spa_u8 0x53 → maj=5 min=3; high nibble = major, low = minor.
+ */
+static inline void
+nv_3d_emit_g3_channel_prep_spa_u8(struct nv_push *p, uint32_t class_3d,
+                                  uint8_t spa_u8, bool upload_mme)
+{
+   uint8_t spa = spa_u8 ? spa_u8 : (uint8_t)0x53u;
+   uint8_t maj = (uint8_t)((spa >> 4) & 0xfu);
+   uint8_t min = (uint8_t)(spa & 0xfu);
+
+   if (!maj)
+      maj = 5u;
+   if (!min && spa == 0x53u)
+      min = 3u;
+   nv_3d_emit_g3_channel_prep(p, class_3d, maj, min, upload_mme);
 }
 
 /**
