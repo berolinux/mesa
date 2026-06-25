@@ -4134,6 +4134,9 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          if (nv_push_dw_count(&p171) <= n0)
             return -833;
       }
+      /* tick172: pass23 RE trace scaffold flags */
+      if (!NV_PASS23_RE_TRACE_SCAFFOLD_TICK172 || !NV_PASS23_RE_FULL_DISASM_PENDING)
+         return -834;
    }
 
    if (trace_push && trace_dwords) {

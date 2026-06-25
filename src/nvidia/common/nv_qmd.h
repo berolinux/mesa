@@ -117,6 +117,8 @@ nv_pass23_explicit_emit_required(void)
 }
 
 #define NV_PASS23_RE_G0_G4_SYMMETRY_TICK171  1
+#define NV_PASS23_RE_TRACE_SCAFFOLD_TICK172  1
+#define NV_PASS23_RE_FULL_DISASM_PENDING     1
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
