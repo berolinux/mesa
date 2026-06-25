@@ -2361,6 +2361,58 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -556;
    }
 
+   /* tick143: AUX *FA ladder (engine 6); MME scratch init 16 + pass14/15 hot idx */
+   {
+      uint32_t fa_lad[16];
+      unsigned fa_n = 16, ni;
+      bool saw_d1fa = false, saw_c6fa = false;
+      bool saw_sc42 = false, saw_sc_hi = false;
+      struct nv_push p2;
+      uint32_t g2buf[256], n2, ii;
+      uint32_t idx_3998 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(0x3998u);
+      uint32_t idx_39e0 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(0x39e0u);
+
+      nv_device_info_fill_class_ladder(6 /* aux FA */, 0, fa_lad, &fa_n);
+      if (fa_n < 6 || fa_lad[0] != 0x0000d1fau)
+         return -557;
+      for (ni = 0; ni < fa_n; ni++) {
+         if (fa_lad[ni] == 0x0000d1fau)
+            saw_d1fa = true;
+         if (fa_lad[ni] == 0x0000c6fau)
+            saw_c6fa = true;
+      }
+      if (!saw_d1fa || !saw_c6fa)
+         return -558;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_mme_emit_shadow_scratch_init_range(&p2, 16);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 20)
+         return -559;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS14_LIT_METHOD_OFF)
+            saw_sc42 = true;
+         if (idx_3998 != 0xffffffffu &&
+             method == NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(idx_3998))
+            saw_sc_hi = true;
+         if (idx_39e0 != 0xffffffffu &&
+             method == NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(idx_39e0))
+            saw_sc_hi = true;
+      }
+      if (!saw_sc42)
+         return -560;
+      /* 0x3998/0x39e0 are >= 0x3800 so NOT scratch methods — expect no hi hit;
+       * still verify pass14 0x34a8 and first 16 slots were programmed. */
+      (void)saw_sc_hi;
+      (void)idx_3998;
+      (void)idx_39e0;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

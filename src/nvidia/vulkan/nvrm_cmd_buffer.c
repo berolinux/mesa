@@ -610,6 +610,34 @@ nvrm_ResetEvent(VkDevice _device, VkEvent _event)
    return VK_SUCCESS;
 }
 
+/* tick143 / pass15: host sema with channel slot/classic policy (matches Gallium t142).
+ * Forward decl — full definition later with other cmd helpers; inlined body here
+ * so event/signal paths compile without reordering half the file. */
+static void
+nvrm_cmd_emit_host_sema_release_ex(struct nvrm_cmd_buffer *cmd,
+                                   uint64_t sema_gpu_addr, uint32_t payload,
+                                   bool wfi_before)
+{
+   enum nv_host_sema_mode mode = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
+   int emit_pref = 0;
+   struct nv_channel *ch;
+
+   if (!cmd || !cmd->push_map || !sema_gpu_addr)
+      return;
+   if (wfi_before)
+      nv_push_wfi(&cmd->push);
+   ch = (cmd->device && cmd->device->queue) ? cmd->device->queue->channel : NULL;
+   if (ch) {
+      if (ch->host_sema_mode_pref >= 0 &&
+          ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+         mode = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
+      if (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
+         emit_pref = ch->host_sema_emit_pref;
+   }
+   nv_push_host_semaphore_release_wfi_mode_ex(&cmd->push, sema_gpu_addr, payload,
+                                              false, mode, emit_pref);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
                   const VkDependencyInfo *pDependencyInfo)
@@ -624,9 +652,9 @@ nvrm_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
    if (cmd->bound_gfx_pipeline) {
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
       nv_3d_report_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1, true);
-   } else {
-      nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 1);
    }
+   /* tick143: always also emit host sema (pass15 SEMA_A/WFI idioms; dual fence) */
+   nvrm_cmd_emit_host_sema_release_ex(cmd, ev->sema_gpu_addr, 1, false);
    ev->sema_value = 1;
 }
 
@@ -643,9 +671,8 @@ nvrm_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
    if (cmd->bound_gfx_pipeline) {
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
       nv_3d_report_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0, true);
-   } else {
-      nv_push_host_semaphore_release(&cmd->push, ev->sema_gpu_addr, 0);
    }
+   nvrm_cmd_emit_host_sema_release_ex(cmd, ev->sema_gpu_addr, 0, false);
    ev->sema_value = 0;
 }
 
@@ -1542,10 +1569,7 @@ static void
 nvrm_cmd_emit_host_sema_release(struct nvrm_cmd_buffer *cmd,
                                 uint64_t sema_gpu_addr, uint32_t payload)
 {
-   if (!cmd || !cmd->push_map || !sema_gpu_addr)
-      return;
-   nv_push_wfi(&cmd->push);
-   nv_push_host_semaphore_release(&cmd->push, sema_gpu_addr, payload);
+   nvrm_cmd_emit_host_sema_release_ex(cmd, sema_gpu_addr, payload, true);
 }
 
 VKAPI_ATTR void VKAPI_CALL

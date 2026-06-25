@@ -409,6 +409,11 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
       0x0000c7b7u, 0x0000c5b7u, 0x0000c4b7u, 0x0000b6b7u, 0x0000b4b7u,
       0x0000c6b7u, 0x0000c1b7u, 0x0000c0b7u,
    };
+   /* pass15 glcore @ 0x1238c20: AUX *FA (display/overlay?); try only if RmAlloc needs */
+   static const uint32_t ladder_aux_fa[] = {
+      0x0000d1fau, 0x0000cffau, 0x0000cefau, 0x0000cdfau, 0x0000c9fau,
+      0x0000b8fau, 0x0000c7fau, 0x0000c6fau,
+   };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;
 
@@ -440,6 +445,10 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
    case 5:
       lad = ladder_gpfifo;
       lad_n = sizeof(ladder_gpfifo) / sizeof(ladder_gpfifo[0]);
+      break;
+   case 6: /* pass15 aux *FA — not G0–G4 smoke; optional class alloc ladder */
+      lad = ladder_aux_fa;
+      lad_n = sizeof(ladder_aux_fa) / sizeof(ladder_aux_fa[0]);
       break;
    default:
       *inout_n = 0;

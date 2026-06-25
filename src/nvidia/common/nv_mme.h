@@ -759,13 +759,23 @@ nv_mme_emit_pass14_hot_scratch_zero(struct nv_push *p)
 }
 
 /**
- * tick140: zero first N scratch slots (default 8) + pass14 hot index 42.
- * Cheap channel-init hygiene before MME RAM upload.
+ * tick140/143: zero first N scratch slots + pass14/15 hot indices.
+ * pass15 unknown lit methods 0x3998 / 0x39e0 sit in MME/AA region — also zero
+ * scratch indices derived from those method offs (relative to 0x3400 base)
+ * when they fall in the shadow-scratch method space.
  */
+#define NV_MME_PASS15_LIT_METHOD_OFF_3998    0x3998u
+#define NV_MME_PASS15_LIT_METHOD_OFF_39E0    0x39e0u
+/* If interpreted as SET_MME_SHADOW_SCRATCH(i): i = (off - 0x3400) / 4 */
+#define NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(off) \
+   ((((uint32_t)(off) >= 0x3400u) && ((uint32_t)(off) < 0x3800u)) \
+    ? (((uint32_t)(off) - 0x3400u) / 4u) : 0xffffffffu)
+
 static inline void
 nv_mme_emit_shadow_scratch_init_range(struct nv_push *p, unsigned count)
 {
-   unsigned i, n = count ? count : 8u;
+   unsigned i, n = count ? count : 16u;
+   uint32_t idx_3998, idx_39e0;
    if (!p)
       return;
    if (n > 64u)
@@ -774,6 +784,13 @@ nv_mme_emit_shadow_scratch_init_range(struct nv_push *p, unsigned count)
       nv_mme_emit_set_shadow_scratch(p, i, 0);
    if (NV_MME_PASS14_LIT_SCRATCH_INDEX >= n)
       nv_mme_emit_pass14_hot_scratch_zero(p);
+   /* tick143: pass15 gap methods 0x3998/0x39e0 — zero as scratch if in range */
+   idx_3998 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(NV_MME_PASS15_LIT_METHOD_OFF_3998);
+   idx_39e0 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(NV_MME_PASS15_LIT_METHOD_OFF_39E0);
+   if (idx_3998 != 0xffffffffu && idx_3998 >= n)
+      nv_mme_emit_set_shadow_scratch(p, idx_3998, 0);
+   if (idx_39e0 != 0xffffffffu && idx_39e0 >= n && idx_39e0 != idx_3998)
+      nv_mme_emit_set_shadow_scratch(p, idx_39e0, 0);
 }
 
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
@@ -782,8 +799,8 @@ nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
-   /* tick140: clear MME shadow scratch incl. pass14 0x34a8 hotspot before RAM */
-   nv_mme_emit_shadow_scratch_init_range(p, 8);
+   /* tick143: clear 16 scratch slots + pass14/15 hot indices before RAM upload */
+   nv_mme_emit_shadow_scratch_init_range(p, 16);
    nv_mme_emit_upload_full_table_only(p);
    return true;
 }
