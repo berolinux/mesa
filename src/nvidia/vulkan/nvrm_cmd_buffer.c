@@ -413,12 +413,13 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       }
    }
 
-   /* Empty barrier: still WFI for ordering (queue submit may batch). */
+   /* Empty barrier: pass21 full inv+WFI (tick159; was pass18 full invalidate). */
    if (!pDependencyInfo ||
        (pDependencyInfo->memoryBarrierCount == 0 &&
         pDependencyInfo->bufferMemoryBarrierCount == 0 &&
         pDependencyInfo->imageMemoryBarrierCount == 0)) {
-      nvrm_cmd_emit_full_invalidate(cmd);
+      nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+      nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
       return;
    }
 
@@ -442,6 +443,7 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
    bool before_code = false;
+   bool heavy_all = false;
 
    if (after_shader_write || after_transfer || after_color || after_depth ||
        after_xfb || before_shader_read || before_tex)
@@ -461,6 +463,9 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       if (src_access & (VK_ACCESS_2_SHADER_WRITE_BIT |
                         VK_ACCESS_2_TRANSFER_WRITE_BIT))
          before_code = true;
+      if ((src | dst) & (VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+                         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT))
+         heavy_all = true;
    }
    /* Host access or execution dependency only */
    if ((src | dst) & VK_PIPELINE_STAGE_2_HOST_BIT)
@@ -489,13 +494,31 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    (void)tex_h;
    (void)tex_d;
 
-   if (need_wfi)
-      nv_push_wfi(&cmd->push);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_3d_emit_barrier_from_access(&cmd->push,
-                                  after_shader_write, after_transfer,
-                                  after_color, after_depth, after_xfb,
-                                  before_shader_read, before_tex, before_code);
+   /* tick159 / pass21: heavy/global barriers use NVC597 full inv ladder + WFI;
+    * narrower access uses fine-grained barrier_from_access (pass18 path). */
+   if (heavy_all || (need_tex && after_shader_write && before_shader_read)) {
+      nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
+   } else if (before_shader_read || before_tex || after_shader_write ||
+              after_transfer || after_color || after_depth || before_code) {
+      shader_instr = before_code;
+      shader_data = after_shader_write || before_shader_read || after_transfer;
+      shader_const = before_shader_read || after_shader_write;
+      tex_s = before_tex || need_tex;
+      tex_h = before_tex || need_tex;
+      tex_d = before_tex || need_tex || after_color || after_depth;
+      nv_3d_emit_g3_barrier_pass21(&cmd->push, shader_instr, shader_data,
+                                   shader_const, tex_s, tex_h, tex_d,
+                                   need_wfi);
+   } else {
+      if (need_wfi)
+         nv_push_wfi(&cmd->push);
+      nv_3d_emit_barrier_from_access(&cmd->push,
+                                     after_shader_write, after_transfer,
+                                     after_color, after_depth, after_xfb,
+                                     before_shader_read, before_tex,
+                                     before_code);
+   }
 }
 
 /* ---- VkEvent / VkQueryPool object management + cmd recording ---- */
@@ -994,14 +1017,19 @@ nvrm_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       return;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    if (qp->kind == NVRM_QUERY_OCCLUSION) {
-      /* tick151: pass19 WFI + zpass report sema (one-word avail payload) */
+      /* tick151/159: pass19 WFI + zpass report sema; pass21 barrier after write */
       nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, true, true,
                                             true);
       nv_3d_set_zpass_pixel_count(&cmd->push, false);
+      /* Ensure subsequent shader/tex reads see query report sema completion */
+      nv_3d_emit_g3_barrier_pass21(&cmd->push, false, true, false, false, false,
+                                   false, false);
    } else {
       /* Timestamp / stats: 4-word structure via pass19 query end ladder */
       nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, false, false,
                                             true);
+      nv_3d_emit_g3_barrier_pass21(&cmd->push, false, true, false, false, false,
+                                   false, false);
    }
    if (cmd->active_query_pool == qp)
       cmd->active_query_pool = NULL;
@@ -1021,9 +1049,12 @@ nvrm_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    addr = nvrm_query_slot_addr(qp, query);
    if (!addr)
       return;
-   /* tick151: pass19 query end (WFI embedded) — timestamp write */
+   /* tick151/159: pass19 query end + pass21 shader-data inv (no full WFI) */
+   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, false, false,
                                          true);
+   nv_3d_emit_g3_barrier_pass21(&cmd->push, false, true, false, false, false,
+                                false, false);
 }
 
 VKAPI_ATTR void VKAPI_CALL

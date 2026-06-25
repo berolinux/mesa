@@ -2660,6 +2660,46 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+
+      /* tick159 / pass21: single-kick CE + pass21 host sema tail (unified
+       * formal sema; modes from pass21 ladder with sticky first) */
+      {
+         enum nv_host_sema_mode p21_modes[8];
+         unsigned n_p21, pi;
+
+         n_p21 = nv_pass21_g0_g4_sema_mode_ladder_fill(
+            p21_modes, 8,
+            (ch->host_sema_mode_pref >= 0 &&
+             ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+               ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+               : NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+         for (pi = 0; pi < n_p21; pi++) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need);
+            if (nv_g1_emit_copy_then_host_sema_pass21(
+                   &push, cl, src_gpu_addr, dst_gpu_addr, size_bytes, false,
+                   true, sema_gpu_addr, sema_payload, p21_modes[pi]) != 0)
+               continue;
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (host_sema_mode_out)
+               *host_sema_mode_out = (int)p21_modes[pi];
+            if (r == 0) {
+               ch->host_sema_mode_pref = (int)p21_modes[pi];
+               if (!ch->class_copy_bound)
+                  ch->class_copy_bound = cl;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+         }
+      }
    }
    return last;
 }

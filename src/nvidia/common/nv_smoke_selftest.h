@@ -3629,6 +3629,80 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       (void)saw_wfi;
    }
 
+   /* tick159: G1 pass21 emit + MME probe env gate (default off) */
+   {
+      struct nv_push p1, mp;
+      uint32_t b1[256], mb[512], ni, li;
+      bool saw_host = false, saw_launch = false;
+      unsigned ram_hits = 0;
+
+      /* env probe off unless explicitly set — must not fail default prime */
+      if (nv_mme_pass21_probe_ram_data_env_enabled()) {
+         /* if runner exported the var, probe path is intentional */
+      } else {
+         memset(mb, 0, sizeof(mb));
+         nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+         (void)nv_mme_emit_channel_prime_upload_only(&mp);
+         ni = nv_push_dw_count(&mp);
+         for (li = 0; li + 1 < ni; li++) {
+            uint32_t hdr = mb[li];
+            uint32_t method = (hdr & 0x1fff) << 2;
+            if ((hdr >> 29) != 0)
+               continue;
+            if (method == NV_MME_PASS21_RAM_DATA_METHOD_OFF)
+               ram_hits++;
+         }
+         if (ram_hits != 0)
+            return -726; /* default must not probe RAM_DATA */
+      }
+
+      /* explicit probe=true still works (silicon opt-in path) */
+      memset(mb, 0, sizeof(mb));
+      nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+      (void)nv_mme_emit_channel_prime_upload_pass21(&mp, true);
+      ni = nv_push_dw_count(&mp);
+      ram_hits = 0;
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = mb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS21_RAM_DATA_METHOD_OFF)
+            ram_hits++;
+      }
+      if (ram_hits < 2)
+         return -727;
+
+      memset(b1, 0, sizeof(b1));
+      nv_push_init(&p1, b1, (uint32_t)(sizeof(b1) / 4));
+      if (nv_g1_emit_copy_then_host_sema_pass21(
+             &p1, 0xc5b5u, 0x100000ull, 0x200000ull, 64u, false, true,
+             0x500000ull, 0x42u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -728;
+      ni = nv_push_dw_count(&p1);
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = b1[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_LAUNCH_DMA)
+            saw_launch = true;
+         if (method == NVC36F_SEMAPHOREC && b1[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_launch || !saw_host)
+         return -729;
+
+      /* pass21 mode ladder non-empty (G1 channel phase 3 order source) */
+      {
+         enum nv_host_sema_mode ladder[8];
+         unsigned ln = nv_pass21_g0_g4_sema_mode_ladder_fill(
+            ladder, 8, NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+         if (ln < 5)
+            return -730;
+      }
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

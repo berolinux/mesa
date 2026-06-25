@@ -50,6 +50,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef __cplusplus
@@ -965,14 +966,34 @@ nv_mme_emit_channel_prime_upload_pass21(struct nv_push *p, bool probe_ram_data)
    return true;
 }
 
+/**
+ * tick159: opt-in silicon MME RAM_DATA probe via environment.
+ * Set NV_MME_PASS21_PROBE_RAM_DATA=1 (or "true"/"yes") to emit RAM_DATA END
+ * stubs during channel prime (capture/vocab only; does not enable path C CALL).
+ * Default off so normal bringup stays clean.
+ */
+static inline bool
+nv_mme_pass21_probe_ram_data_env_enabled(void)
+{
+   const char *e = getenv("NV_MME_PASS21_PROBE_RAM_DATA");
+   if (!e || !e[0])
+      return false;
+   if (e[0] == '1' && e[1] == '\0')
+      return true;
+   if (e[0] == 'y' || e[0] == 'Y' || e[0] == 't' || e[0] == 'T')
+      return true;
+   return false;
+}
+
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
 static inline bool
 nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
-   /* tick143/145/146/156: scratch + RAM; pass16/17 0x39e0; pass21 no probe by default */
-   return nv_mme_emit_channel_prime_upload_pass21(p, false);
+   /* tick143/145/146/156/159: pass21 prime; RAM_DATA probe only if env opt-in */
+   return nv_mme_emit_channel_prime_upload_pass21(
+      p, nv_mme_pass21_probe_ram_data_env_enabled());
 }
 
 /**
