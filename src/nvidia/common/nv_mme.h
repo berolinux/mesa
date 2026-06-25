@@ -490,6 +490,26 @@ nv_mme_emit_prime_extended_stubs(struct nv_push *p)
    nv_mme_emit_load_and_call_end_stub(p, &clear_prog);
 }
 
+/**
+ * tick109: upload full extended macro table (indirect loop + init/clear + pass5 hot).
+ * Still END-terminated stubs — exercises LOAD/START/CALL plumbing for G3 channel-init
+ * experiments without enabling production indirect draws (host path remains authoritative).
+ */
+static inline void
+nv_mme_emit_prime_full_table_stubs(struct nv_push *p)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_EXTENDED_COUNT];
+   struct nv_mme_program pass5;
+   unsigned i, n;
+
+   if (!p)
+      return;
+   n = nv_mme_build_extended_program_table(progs, &pass5);
+   for (i = 0; i < n && i < NV_MME_SLOT_EXTENDED_COUNT; i++)
+      nv_mme_emit_load_and_call_end_stub(p, &progs[i]);
+   nv_mme_emit_load_and_call_end_stub(p, &pass5);
+}
+
 #ifdef __cplusplus
 }
 #endif

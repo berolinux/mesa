@@ -2223,9 +2223,13 @@ nv_channel_submit_wait_sema(struct nv_channel *ch,
                             uint64_t wait_timeout_ns, bool check_notifier)
 {
    int r;
+   uint64_t to;
 
    if (!ch)
       return -EINVAL;
+
+   /* tick109: stretch waits under VGX/vGPU; never shorten caller request */
+   to = nv_channel_effective_wait_timeout_ns(ch, wait_timeout_ns);
 
    nv_channel_notifier_reset(ch);
 
@@ -2237,11 +2241,11 @@ nv_channel_submit_wait_sema(struct nv_channel *ch,
    r = nvidia_submit_wait_complete(ch->userd, ch->gpfifo_put,
                                    sema_cpu, sema_payload,
                                    check_notifier ? ch->error_notifier : NULL,
-                                   wait_timeout_ns);
+                                   to);
    return r;
 #else
    (void)sema_cpu; (void)sema_payload; (void)wait_timeout_ns;
-   (void)check_notifier;
+   (void)check_notifier; (void)to;
    return -ENOSYS;
 #endif
 }

@@ -411,6 +411,19 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
 
    if (!ch || !sc || !sc->sema_gpu || !sc->sema_cpu)
       return -EINVAL;
+
+   /* tick109: virt/vGPU may need longer sema/GPFIFO waits than 2s default */
+   to = nv_channel_effective_wait_timeout_ns(ch, to);
+   if (nv_smoke_hw_env_verbose() && ch->info &&
+       nv_device_info_is_virtualized(ch->info)) {
+      fprintf(stderr,
+              "nv_smoke_hw: virt_mode=0x%x grid=%u wait_timeout_ns=%llu "
+              "prefer_sysmem=%d\n",
+              ch->info->virtualization_mode, ch->info->is_grid_build,
+              (unsigned long long)to,
+              nv_device_info_prefer_sysmem_alloc(ch->info) ? 1 : 0);
+   }
+
    if (!slices)
       slices = NV_SMOKE_HW_ALL;
 

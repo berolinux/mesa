@@ -380,8 +380,22 @@ nv_channel_wait_sema_cpu(volatile uint32_t *sema_cpu, uint32_t payload,
                          uint64_t timeout_ns);
 
 /**
+ * tick109: effective sema/GPFIFO wait timeout from channel probe (virt stretches).
+ * requested 0 => treat as default 2s then apply virt floor; non-zero uses max(req, virt min).
+ */
+static inline uint64_t
+nv_channel_effective_wait_timeout_ns(const struct nv_channel *ch,
+                                     uint64_t requested_ns)
+{
+   uint64_t d = requested_ns ? requested_ns : 2000000000ull;
+   const struct nv_device_info *info = ch ? ch->info : NULL;
+   return nv_device_info_gpfifo_stall_ns(info, d);
+}
+
+/**
  * Full vertical-slice wait: GPFIFO drain + sema GEQ + optional notifier check.
  * sema_cpu may be NULL (skip sema wait). payload 0 skips sema wait.
+ * tick109: internally applies nv_channel_effective_wait_timeout_ns when ch->info set.
  */
 int
 nv_channel_submit_wait_sema(struct nv_channel *ch,

@@ -842,6 +842,84 @@ nv_copy_indirect_to_shadow(struct nv_push *p, uint32_t class_copy,
    nv_push_wfi(p);
 }
 
+/**
+ * tick109: 2D pitch copy (width_bytes × height lines) with optional sema on
+ * same LAUNCH_DMA. pitch_in/out default to width_bytes when 0. MULTI_LINE when
+ * height > 1. Non-pipelined unless pipelined=true; refine on silicon.
+ */
+static inline void
+nv_copy_emit_pitch2d_copy_with_sema(struct nv_push *p,
+                                    uint64_t src_gpu_addr,
+                                    uint64_t dst_gpu_addr,
+                                    uint32_t width_bytes,
+                                    uint32_t height,
+                                    uint32_t pitch_in,
+                                    uint32_t pitch_out,
+                                    uint64_t sema_gpu_addr,
+                                    uint32_t sema_payload,
+                                    bool pipelined)
+{
+   uint32_t launch;
+   uint32_t h = height ? height : 1u;
+   uint32_t pin = pitch_in ? pitch_in : width_bytes;
+   uint32_t pout = pitch_out ? pitch_out : width_bytes;
+
+   if (!p || !width_bytes)
+      return;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, pin);
+   nv_push_method(p, NVC6B5_PITCH_OUT, pout);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, width_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, h);
+
+   launch = (pipelined ? NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED
+                       : NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED) |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (h > 1)
+      launch |= NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_one_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * tick109: buffer copy then separate sema-only LAUNCH_DMA (split path).
+ * Some CE/class combos only complete sema on a follow-up no-transfer launch.
+ */
+static inline void
+nv_copy_emit_buffer_copy_then_sema_release(struct nv_push *p,
+                                           uint64_t src_gpu_addr,
+                                           uint64_t dst_gpu_addr,
+                                           uint32_t size_bytes,
+                                           uint64_t sema_gpu_addr,
+                                           uint32_t sema_payload,
+                                           bool pipelined)
+{
+   if (!p)
+      return;
+   if (pipelined)
+      nv_copy_emit_buffer_copy_with_sema_pipelined(p, src_gpu_addr, dst_gpu_addr,
+                                                   size_bytes, 0, 0);
+   else
+      nv_copy_emit_buffer_copy_with_sema(p, src_gpu_addr, dst_gpu_addr,
+                                         size_bytes, 0, 0);
+   if (sema_gpu_addr)
+      nv_copy_emit_semaphore_release(p, sema_gpu_addr, sema_payload);
+}
+
 #ifdef __cplusplus
 }
 #endif
