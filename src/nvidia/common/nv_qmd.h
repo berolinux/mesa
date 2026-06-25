@@ -1406,6 +1406,149 @@ nv_compute_emit_g2_smoke_slice_pass17(struct nv_push *p, uint32_t class_compute,
    return 0;
 }
 
+/**
+ * tick150 / pass19: G2 QMD sema-only slice — pass17 QMD defaults with
+ * sema_release0 + invalidate; channel_prep without host sema; no extra host
+ * sema tail.  pass19: do not synthesize PCAS/INLINE order from static imm
+ * (runtime-only); keep hand-authored inline_qmd_launch as the only schedule
+ * path.  Completion is QMD sema_release0 only (wait on sema_cpu externally).
+ *
+ * Use when silicon should prove QMD sema without host sema confounding.
+ * sema_gpu_addr required (else returns -1).
+ */
+static inline int
+nv_compute_emit_g2_qmd_sema_only_pass17(struct nv_push *p,
+                                        uint32_t class_compute,
+                                        uint64_t program_gpu_addr,
+                                        uint32_t register_count,
+                                        uint8_t sass_version,
+                                        uint64_t qmd_gpu_addr, void *qmd_host,
+                                        uint64_t lmem_gpu_addr,
+                                        uint64_t sema_gpu_addr,
+                                        uint32_t sema_payload,
+                                        uint32_t grid_x, uint32_t cta_x,
+                                        bool post_launch_inv)
+{
+   struct nv_qmd_desc d;
+   uint32_t qmd[NV_QMD_DWORDS];
+   uint8_t spa = sass_version ? sass_version : (uint8_t)0x53u;
+
+   if (!p || !sema_gpu_addr)
+      return -1;
+
+   /* No host sema in prep — QMD sema_release0 is the sole completion signal */
+   nv_compute_emit_g2_channel_prep(p, class_compute, spa, lmem_gpu_addr, 256u);
+
+   nv_qmd_desc_init_pass17_defaults(&d, program_gpu_addr, 0,
+                                    register_count ? register_count : 16,
+                                    sema_gpu_addr,
+                                    sema_payload ? sema_payload : 1u);
+   d.cta_x = cta_x ? cta_x : 32;
+   d.cta_y = 1;
+   d.cta_z = 1;
+   d.grid_x = grid_x ? grid_x : 1;
+   d.grid_y = 1;
+   d.grid_z = 1;
+   d.sass_version = spa;
+   nv_qmd_desc_apply_g2_bringup_defaults(&d, sema_gpu_addr,
+                                         sema_payload ? sema_payload : 1u);
+   nv_qmd_materialize(&d, qmd, qmd_host);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+   if (post_launch_inv)
+      nv_compute_emit_g2_post_launch_invalidate(p);
+   return 0;
+}
+
+/**
+ * tick150 / pass19: QMD sema_release0 + optional pass17 host sema tail after
+ * post-launch inv/WFI.  pass19 emitter reality: ordered templates absent in
+ * binary; this is an explicit mesa ladder (prep → QMD/PCAS → inv → host sema)
+ * for silicon try when QMD sema alone is unreliable but engine kicks.
+ *
+ * host_sema_gpu_addr 0 skips host tail (same as qmd_sema_only if sema is QMD).
+ * When both sema addrs match, QMD and host sema target the same slot (host
+ * overwrites payload after QMD may have written — use distinct slots on HW).
+ */
+static inline int
+nv_compute_emit_g2_qmd_sema_then_host_pass19(struct nv_push *p,
+                                             uint32_t class_compute,
+                                             uint64_t program_gpu_addr,
+                                             uint32_t register_count,
+                                             uint8_t sass_version,
+                                             uint64_t qmd_gpu_addr,
+                                             void *qmd_host,
+                                             uint64_t lmem_gpu_addr,
+                                             uint64_t qmd_sema_gpu_addr,
+                                             uint32_t qmd_sema_payload,
+                                             uint64_t host_sema_gpu_addr,
+                                             uint32_t host_sema_payload,
+                                             uint32_t grid_x, uint32_t cta_x,
+                                             enum nv_host_sema_mode host_sema_mode,
+                                             int host_sema_emit,
+                                             bool post_launch_inv)
+{
+   int r;
+
+   if (!p || !qmd_sema_gpu_addr)
+      return -1;
+
+   r = nv_compute_emit_g2_qmd_sema_only_pass17(
+      p, class_compute, program_gpu_addr, register_count, sass_version,
+      qmd_gpu_addr, qmd_host, lmem_gpu_addr, qmd_sema_gpu_addr,
+      qmd_sema_payload, grid_x, cta_x, post_launch_inv);
+   if (r != 0)
+      return r;
+
+   if (host_sema_gpu_addr) {
+      /* Host sema on 3D/GPFIFO sema methods (NVC36F) after compute work */
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         p, host_sema_gpu_addr,
+         host_sema_payload ? host_sema_payload : 1u, true, host_sema_mode,
+         nv_host_sema_emit_pref_normalize(host_sema_emit));
+   }
+   return 0;
+}
+
+/**
+ * tick150: encode-only pass17 QMD with sema_release0 + invalidate flags set.
+ * No pushbuffer; for selftest / pre-fill of qmd_host before channel submit.
+ * Returns 0 on success, -1 on bad args.
+ */
+static inline int
+nv_qmd_build_pass17_qmd_sema_only(uint32_t qmd_out[NV_QMD_DWORDS],
+                                  uint64_t program_gpu_addr,
+                                  uint32_t register_count, uint8_t sass_version,
+                                  uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                  uint32_t grid_x, uint32_t cta_x)
+{
+   struct nv_qmd_desc d;
+   uint8_t spa = sass_version ? sass_version : (uint8_t)0x53u;
+
+   if (!qmd_out || !sema_gpu_addr)
+      return -1;
+   nv_qmd_desc_init_pass17_defaults(&d, program_gpu_addr, 0,
+                                    register_count ? register_count : 16,
+                                    sema_gpu_addr,
+                                    sema_payload ? sema_payload : 1u);
+   d.cta_x = cta_x ? cta_x : 32;
+   d.cta_y = 1;
+   d.cta_z = 1;
+   d.grid_x = grid_x ? grid_x : 1;
+   d.grid_y = 1;
+   d.grid_z = 1;
+   d.sass_version = spa;
+   nv_qmd_desc_apply_g2_bringup_defaults(&d, sema_gpu_addr,
+                                         sema_payload ? sema_payload : 1u);
+   nv_qmd_encode_full(&d, qmd_out);
+   return 0;
+}
+
 /** Encode smoke QMD with optional non-1x1x1 grid; returns 0 on success. */
 static inline int
 nv_qmd_build_compute_smoke_grid(uint32_t qmd_out[NV_QMD_DWORDS],

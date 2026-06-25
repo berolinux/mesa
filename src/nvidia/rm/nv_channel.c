@@ -4187,22 +4187,61 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
       if (!map)
          return -ENOMEM;
       nv_push_init(&push, map, need);
-      /* tick148: pass17 G2 smoke (pass17 QMD defaults; no host sema in prep —
-       * QMD sema_release0 + optional post-launch inv handles completion) */
-      if (nv_compute_emit_g2_smoke_slice_pass17(
+      /* tick150: prefer QMD sema-only (pass17 defaults, no host sema in prep)
+       * — pass19: no synthetic PCAS/INLINE order; hand-authored inline launch */
+      if (nv_compute_emit_g2_qmd_sema_only_pass17(
              &push, cc_try, program_gpu_addr, register_count, sass_version,
              qmd_gpu_addr, qmd_host, lmem_gpu_addr, sema_gpu_addr, sema_payload,
-             grid_x, cta_x,
-             (ch->host_sema_mode_pref >= 0 &&
-              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
-                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
-                : NV_HOST_SEMA_MODE_BLOB_ALIGN4,
-             false /* sema in QMD not host prep */) != 0) {
-         last = -EINVAL;
-         continue;
+             grid_x, cta_x, true /* post inv */) != 0) {
+         /* fallback: pass17 smoke slice (same QMD path, may differ prep edge) */
+         if (nv_compute_emit_g2_smoke_slice_pass17(
+                &push, cc_try, program_gpu_addr, register_count, sass_version,
+                qmd_gpu_addr, qmd_host, lmem_gpu_addr, sema_gpu_addr,
+                sema_payload, grid_x, cta_x,
+                (ch->host_sema_mode_pref >= 0 &&
+                 ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                   ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                   : NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+                false) != 0) {
+            last = -EINVAL;
+            continue;
+         }
       }
       nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         if (!ch->class_compute_bound)
+            ch->class_compute_bound = cc_try;
+         if (class_used_out)
+            *class_used_out = cc_try;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+
+      /* tick150: QMD sema timed out — try pass19 QMD sema + host sema tail
+       * (same sema slot; host may complete when QMD sema not observed) */
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+      nv_push_init(&push, map, need);
+      if (nv_compute_emit_g2_qmd_sema_then_host_pass19(
+             &push, cc_try, program_gpu_addr, register_count, sass_version,
+             qmd_gpu_addr, qmd_host, lmem_gpu_addr, sema_gpu_addr, sema_payload,
+             sema_gpu_addr, sema_payload, grid_x, cta_x,
+             (ch->host_sema_mode_pref >= 0 &&
+              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                : NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+             ch->host_sema_emit_pref, true) != 0) {
+         continue;
+      }
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
       r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
       if (r == 0) {

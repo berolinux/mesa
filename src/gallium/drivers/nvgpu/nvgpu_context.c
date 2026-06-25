@@ -2002,12 +2002,14 @@ nvgpu_memory_barrier(struct pipe_context *pctx, unsigned flags)
    }
    if (flags & PIPE_BARRIER_MAPPED_BUFFER)
       sh_d = true;
-   /* pass18: full barrier also invalidates shader instruction cache + WFI */
-   if (flags & PIPE_BARRIER_ALL)
+   /* pass18/19: full barrier uses pass19 NVC597 inv ladder (0x021c/0x133x)+WFI */
+   if (flags & PIPE_BARRIER_ALL) {
       sh_i = sh_d = sh_c = tx_s = tx_h = tx_d = true;
-   nv_3d_emit_memory_barrier(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d);
-   if (flags & PIPE_BARRIER_ALL)
-      nv_push_method(&push, NVC597_WAIT_FOR_IDLE, 0);
+      nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(&push, sh_i, sh_d, sh_c,
+                                                  tx_s, tx_h, tx_d, true);
+   } else {
+      nv_3d_emit_memory_barrier(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d);
+   }
    nvgpu_push_finish(ctx, &push, true);
 }
 

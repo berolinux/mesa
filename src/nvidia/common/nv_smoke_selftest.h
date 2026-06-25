@@ -2869,6 +2869,156 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -623;
    }
 
+   /* tick150 / pass19: G2 QMD sema-only (no host sema in prep/tail) */
+   {
+      struct nv_push g2q;
+      uint32_t g2qb[2048], g2qn, g2qi;
+      uint32_t qmd_only[NV_QMD_DWORDS];
+      bool saw_pcas_a = false, saw_inline = false;
+      int qbr;
+
+      qbr = nv_qmd_build_pass17_qmd_sema_only(qmd_only, 0x210000ull, 16, 0x53,
+                                              0x310000ull, 0x44u, 1, 32);
+      if (qbr != 0)
+         return -624;
+      if (nv_qmd_get(qmd_only, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0) != 1)
+         return -625;
+      if (nv_qmd_get(qmd_only, NV_QMD_F_INVALIDATE_INSTRUCTION_CACHE) != 1)
+         return -626;
+
+      memset(g2qb, 0, sizeof(g2qb));
+      nv_push_init(&g2q, g2qb, (uint32_t)(sizeof(g2qb) / 4));
+      if (nv_compute_emit_g2_qmd_sema_only_pass17(
+             &g2q, 0xc5c0u, 0x900000ull, 16, 0x53, 0x800000ull, NULL, 0,
+             0x500000ull, 0x22u, 1, 32, true) != 0)
+         return -627;
+      g2qn = nv_push_dw_count(&g2q);
+      if (g2qn < 30)
+         return -628;
+      for (g2qi = 0; g2qi + 1 < g2qn; g2qi++) {
+         uint32_t hdr = g2qb[g2qi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_SEND_PCAS_A)
+            saw_pcas_a = true;
+         if (method == NVC3C0_SET_INLINE_QMD_ADDRESS_A ||
+             method == NVC3C0_LOAD_INLINE_QMD_DATA(0))
+            saw_inline = true;
+      }
+      /* Must schedule via inline QMD / PCAS path (hand-authored, not static) */
+      if (!saw_pcas_a && !saw_inline)
+         return -629;
+   }
+
+   /* tick150: pass19 QMD sema + host sema tail (explicit mesa ladder) */
+   {
+      struct nv_push g2h;
+      uint32_t g2hb[2048], g2hn, g2hi;
+      bool saw_host_exec = false, saw_pcas = false;
+
+      memset(g2hb, 0, sizeof(g2hb));
+      nv_push_init(&g2h, g2hb, (uint32_t)(sizeof(g2hb) / 4));
+      if (nv_compute_emit_g2_qmd_sema_then_host_pass19(
+             &g2h, 0xc5c0u, 0x900000ull, 16, 0x53, 0x800000ull, NULL, 0,
+             0x510000ull, 0x33u, 0x610000ull, 0x44u, 1, 32,
+             NV_HOST_SEMA_MODE_BLOB1004_ALIGN4, NV_HOST_SEMA_EMIT_PASS17,
+             true) != 0)
+         return -630;
+      g2hn = nv_push_dw_count(&g2h);
+      if (g2hn < 35)
+         return -631;
+      for (g2hi = 0; g2hi + 1 < g2hn; g2hi++) {
+         uint32_t hdr = g2hb[g2hi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_SEND_PCAS_A)
+            saw_pcas = true;
+         if (method == NVC36F_SEMAPHOREC && g2hb[g2hi + 1] == 0x1004u)
+            saw_host_exec = true;
+      }
+      if (!saw_pcas)
+         return -632;
+      if (!saw_host_exec)
+         return -633;
+   }
+
+   /* tick150 / pass19: NVC597 full inv ladder (class-correct, not 0x0b00 family) */
+   {
+      struct nv_push ivp;
+      uint32_t ivb[64], ivn, ivi;
+      bool saw_021c = false, saw_1330 = false, saw_1334 = false, saw_1338 = false;
+      bool saw_wfi = false;
+
+      memset(ivb, 0, sizeof(ivb));
+      nv_push_init(&ivp, ivb, (uint32_t)(sizeof(ivb) / 4));
+      nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(&ivp, true, true, true, true,
+                                                  true, true, true);
+      ivn = nv_push_dw_count(&ivp);
+      if (ivn < 6)
+         return -634;
+      for (ivi = 0; ivi + 1 < ivn; ivi++) {
+         uint32_t hdr = ivb[ivi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_INVALIDATE_SHADER_CACHES)
+            saw_021c = true;
+         if (method == NVC597_INVALIDATE_SAMPLER_CACHE)
+            saw_1330 = true;
+         if (method == NVC597_INVALIDATE_TEXTURE_HEADER_CACHE)
+            saw_1334 = true;
+         if (method == NVC597_INVALIDATE_TEXTURE_DATA_CACHE)
+            saw_1338 = true;
+         if (method == NVC597_WAIT_FOR_IDLE)
+            saw_wfi = true;
+      }
+      if (!saw_021c || !saw_1330 || !saw_1334 || !saw_1338 || !saw_wfi)
+         return -635;
+   }
+
+   /* tick150: inv_report_host_pass19 composite shape */
+   {
+      struct nv_push irp;
+      uint32_t irb[128], irn, iri;
+      bool saw_rep = false, saw_host = false;
+
+      memset(irb, 0, sizeof(irb));
+      nv_push_init(&irp, irb, (uint32_t)(sizeof(irb) / 4));
+      nv_3d_emit_g3_inv_report_host_pass19(
+         &irp, 0xb00000ull, 0x55u, true, 0xc00000ull, 0x66u,
+         NV_HOST_SEMA_MODE_BLOB1004_ALIGN4, NV_HOST_SEMA_EMIT_PASS17);
+      irn = nv_push_dw_count(&irp);
+      if (irn < 12)
+         return -636;
+      for (iri = 0; iri + 1 < irn; iri++) {
+         uint32_t hdr = irb[iri];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_C && irb[iri + 1] == 0x55u)
+            saw_rep = true;
+         if (method == NVC36F_SEMAPHOREC && irb[iri + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_rep || !saw_host)
+         return -637;
+   }
+
+   /* tick150: sema_only rejects null sema addr */
+   {
+      struct nv_push badp;
+      uint32_t badb[64];
+
+      memset(badb, 0, sizeof(badb));
+      nv_push_init(&badp, badb, (uint32_t)(sizeof(badb) / 4));
+      if (nv_compute_emit_g2_qmd_sema_only_pass17(
+             &badp, 0xc5c0u, 0x900000ull, 16, 0x53, 0x800000ull, NULL, 0,
+             0, 0x22u, 1, 32, false) == 0)
+         return -638;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

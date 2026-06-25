@@ -4145,8 +4145,57 @@ nv_3d_emit_g3_channel_prep_pass17(struct nv_push *p, uint32_t class_3d,
 }
 
 /**
+ * tick150 / pass19: full NVC597 invalidate ladder (class-correct offsets only).
+ * pass19 taxonomy: prefer 0x021c / 0x1330 / 0x1334 / 0x1338 over imm-family
+ * 0x0b00.. aliases.  Order: shader caches (I/D/C) → sampler → tex_hdr →
+ * tex_data → optional WFI.  pass19 emitter forward_ok=0: order is mesa policy,
+ * not a static binary template.
+ */
+static inline void
+nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(struct nv_push *p,
+                                            bool inv_shader_i,
+                                            bool inv_shader_d,
+                                            bool inv_shader_c,
+                                            bool inv_sampler,
+                                            bool inv_tex_hdr,
+                                            bool inv_tex_data,
+                                            bool do_wfi)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (inv_shader_i || inv_shader_d || inv_shader_c) {
+      uint32_t inv = 0;
+      if (inv_shader_i)
+         inv |= NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE;
+      if (inv_shader_d)
+         inv |= NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE;
+      if (inv_shader_c)
+         inv |= NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
+   }
+   if (inv_sampler)
+      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
+   if (inv_tex_hdr)
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+   if (inv_tex_data)
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+   if (do_wfi)
+      nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+}
+
+/** tick150: all-caches NVC597 inv ladder + WFI (common pre-draw / barrier). */
+static inline void
+nv_3d_emit_g3_inv_all_wfi_pass19(struct nv_push *p)
+{
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
+                                               true, true);
+}
+
+/**
  * tick148 / pass18: G3 invalidate shader+tex caches, WFI, then host sema pass17.
  * Pipeline signature G3_clear_then_host from pass18 RE (imm co-presence).
+ * tick150: uses pass19 full inv ladder then sema (same methods, clearer order).
  */
 static inline void
 nv_3d_emit_g3_inv_wfi_host_sema_pass17(struct nv_push *p,
@@ -4157,21 +4206,44 @@ nv_3d_emit_g3_inv_wfi_host_sema_pass17(struct nv_push *p,
 {
    if (!p)
       return;
-   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
-   {
-      uint32_t inv = NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
-                     NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
-                     NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
-      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
-      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
-      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
-      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
-   }
-   nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
+                                               true, true);
    if (sema_gpu_addr) {
       nv_push_host_semaphore_release_wfi_mode_ex(
          p, sema_gpu_addr, sema_payload ? sema_payload : 1u, false, sema_mode,
          nv_host_sema_emit_pref_normalize(sema_emit));
+   }
+}
+
+/**
+ * tick150 / pass19: full inv ladder + optional report sema (0x1b00 family) +
+ * optional host sema pass17.  Composite for Gallium barrier/query paths that
+ * need both 3D report sema and host sema without CB bind.
+ */
+static inline void
+nv_3d_emit_g3_inv_report_host_pass19(struct nv_push *p,
+                                     uint64_t report_sema_gpu_addr,
+                                     uint32_t report_sema_payload,
+                                     bool report_one_word,
+                                     uint64_t host_sema_gpu_addr,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode,
+                                     int host_sema_emit)
+{
+   if (!p)
+      return;
+   nv_3d_emit_g3_inv_all_wfi_pass19(p);
+   if (report_sema_gpu_addr) {
+      nv_3d_report_semaphore_release(p, report_sema_gpu_addr,
+                                     report_sema_payload ? report_sema_payload
+                                                         : 1u,
+                                     report_one_word);
+   }
+   if (host_sema_gpu_addr) {
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         p, host_sema_gpu_addr,
+         host_sema_payload ? host_sema_payload : 1u, false, host_sema_mode,
+         nv_host_sema_emit_pref_normalize(host_sema_emit));
    }
 }
 
