@@ -4150,6 +4150,22 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          if (nv_push_dw_count(&p173) < 8u)
             return -836;
       }
+      /* tick174: G3 pass23 barrier/inv helpers */
+      {
+         struct nv_push p174;
+         uint32_t b174[256];
+         memset(b174, 0, sizeof(b174));
+         nv_push_init(&p174, b174, (uint32_t)(sizeof(b174) / 4));
+         if (nv_3d_emit_g3_barrier_all_pass23(&p174, 0x590000ull, 1u,
+                                              NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -837;
+         if (nv_3d_emit_g3_inv_wfi_host_sema_pass23(
+                &p174, 0x5a0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+                true) != 0)
+            return -838;
+         if (nv_push_dw_count(&p174) < 16u)
+            return -839;
+      }
    }
 
    if (trace_push && trace_dwords) {
