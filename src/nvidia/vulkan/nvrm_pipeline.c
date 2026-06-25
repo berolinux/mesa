@@ -631,7 +631,9 @@ nvrm_compile_stage(struct nvrm_device *dev,
       nv_shader_set_nir(sh, nir, true);
       if (nv_shader_compile_nir(sh, nir) != 0)
          nv_shader_compile_nir_stub(sh);
-   } else {
+   } else if (sh->kind == NV_SHADER_KIND_COMPUTE) {
+      (void)nv_shader_upload_compute_smoke(sh, 0, 0, 0, 16);
+   } else if (nv_shader_upload_graphics_smoke(sh, 8) != 0) {
       nv_shader_compile_nir_stub(sh);
    }
    return sh;
@@ -723,15 +725,17 @@ nvrm_CreateGraphicsPipelines(VkDevice _device, VkPipelineCache pipelineCache,
             pipe->program_region_base = sh->code_gpu_addr;
       }
 
-      /* Ensure at least stub shaders exist for bind */
+      /* Ensure at least SPH+EXIT smoke shaders exist for bind (tick121) */
       if (!pipe->vs) {
          pipe->vs = nv_shader_create(device->rm, NV_SHADER_KIND_VERTEX);
-         if (pipe->vs)
+         if (pipe->vs &&
+             nv_shader_upload_graphics_smoke(pipe->vs, 8) != 0)
             nv_shader_compile_nir_stub(pipe->vs);
       }
       if (!pipe->fs) {
          pipe->fs = nv_shader_create(device->rm, NV_SHADER_KIND_FRAGMENT);
-         if (pipe->fs)
+         if (pipe->fs &&
+             nv_shader_upload_graphics_smoke(pipe->fs, 8) != 0)
             nv_shader_compile_nir_stub(pipe->fs);
       }
       /* Pipeline-create tess/GS meta: ensure stage meta is valid even if NIR
