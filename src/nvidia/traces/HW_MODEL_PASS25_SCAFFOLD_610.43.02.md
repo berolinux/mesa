@@ -10,6 +10,8 @@
 |------|-------------|
 | 180 | Pass25 RE constants; pass24 gpucomp interim RE |
 | 181 | G0–G4 pass25 symmetry; pass25 G2 launch/dispatch; channel pass25-first ladder |
+| 182 | G1/G3/G4 pass25 emitters; channel G1/G3 pass25 retry |
+| 183 | Implementation audit (`nv_pass25_implementation_audit_ok`); wire complete flag |
 
 ## G0–G4 (pass25)
 

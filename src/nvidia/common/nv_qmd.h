@@ -195,6 +195,14 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS25_RE_PATH_C_STILL_GATED          NV_PASS24_RE_PATH_C_STILL_GATED
 #define NV_PASS25_RE_FULL_DISASM_PENDING         1
 #define NV_PASS25_IMPL_INHERITS_PASS24_WIRE      NV_PASS24_IMPL_WIRE_COMPLETE
+/* tick183: pass25 implementation audit (RE full disasm still pending) */
+#define NV_PASS25_IMPL_AUDIT_TICK183             1
+#define NV_PASS25_IMPL_SCAFFOLD_TICK180          1
+#define NV_PASS25_IMPL_G0_G4_SYMMETRY_TICK181    1
+#define NV_PASS25_IMPL_G1_G3_G4_TICK182          1
+#define NV_PASS25_IMPL_G2_CHANNEL_TICK181        1
+#define NV_PASS25_IMPL_WIRE_COMPLETE             1
+#define NV_PASS25_RE_TRACE_SCAFFOLD_TICK183      1
 
 static inline bool
 nv_pass24_explicit_emit_required(void)

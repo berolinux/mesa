@@ -4380,6 +4380,20 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
                 true) != 0)
             return -889;
       }
+      /* tick183: pass25 implementation audit */
+      if (!NV_PASS25_IMPL_AUDIT_TICK183 || !NV_PASS25_RE_TRACE_SCAFFOLD_TICK183)
+         return -890;
+      if (!nv_pass25_implementation_audit_ok())
+         return -891;
+      if (!NV_PASS25_IMPL_WIRE_COMPLETE || !NV_PASS25_IMPL_G1_G3_G4_TICK182)
+         return -892;
+      if (!NV_PASS25_IMPL_G0_G4_SYMMETRY_TICK181 ||
+          !NV_PASS25_IMPL_G2_CHANNEL_TICK181)
+         return -893;
+      if (NV_PASS25_RE_FULL_DISASM_PENDING == 0)
+         return -894;
+      if (!nv_pass25_g0_g4_symmetry_ok() || !nv_pass25_policy_ok())
+         return -895;
    }
 
    if (trace_push && trace_dwords) {

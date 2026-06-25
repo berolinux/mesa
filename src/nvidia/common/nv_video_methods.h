@@ -4144,6 +4144,8 @@ nv_g4_emit_nvenc_bringup_pass21(struct nv_push *p, uint32_t class_nvenc,
 #define NV_PASS24_RE_GPUCOMP_FOCUS_TICK180   1
 #define NV_PASS25_RE_SCAFFOLD                1
 #define NV_PASS25_RE_INHERITS_PASS24         1
+#define NV_PASS25_IMPL_WIRE_COMPLETE         1
+#define NV_PASS25_RE_TRACE_SCAFFOLD_TICK183  1
 
 /**
  * tick168 / pass23: G4 NVDEC bringup with pass22 explicit-emit policy check.
