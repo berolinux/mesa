@@ -22,9 +22,7 @@
 #include <assert.h>
 
 #include "nv_push.h"
-
-/* Forward decl for apply_device_gr_limits / smoke_dispatch_gr (nv_device_info.h) */
-struct nv_device_info;
+#include "nv_device_info.h"
 
 #ifdef __cplusplus
 extern "C" {
