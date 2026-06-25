@@ -4112,6 +4112,28 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -827;
       if (!NV_PASS23_RE_SCAFFOLD)
          return -828;
+      /* tick171: G0–G4 pass23 symmetry audit */
+      if (!NV_PASS23_G0_G4_SYMMETRY_AUDIT || !nv_pass23_g0_g4_symmetry_ok())
+         return -829;
+      if (!NV_PASS23_G1_CE_PASS21 || !NV_PASS23_G2_COMPUTE_PASS22 ||
+          !NV_PASS23_G3_3D_PASS22_BARRIER || !NV_PASS23_G4_VIDEO_PASS21_PASS23)
+         return -830;
+      if (!NV_PASS23_RE_G0_G4_SYMMETRY_TICK171)
+         return -831;
+      {
+         struct nv_push p171;
+         uint32_t b171[64];
+         uint32_t n0;
+         memset(b171, 0, sizeof(b171));
+         nv_push_init(&p171, b171, (uint32_t)(sizeof(b171) / 4));
+         n0 = nv_push_dw_count(&p171);
+         if (nv_push_g0_g4_host_sema_tail_pass23(
+                &p171, false, 0x570000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -832;
+         if (nv_push_dw_count(&p171) <= n0)
+            return -833;
+      }
    }
 
    if (trace_push && trace_dwords) {

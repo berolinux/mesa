@@ -116,6 +116,8 @@ nv_pass23_explicit_emit_required(void)
    return NV_PASS23_RE_SCAFFOLD != 0 && nv_pass22_explicit_emit_required();
 }
 
+#define NV_PASS23_RE_G0_G4_SYMMETRY_TICK171  1
+
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8

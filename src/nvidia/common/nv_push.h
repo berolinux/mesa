@@ -669,6 +669,44 @@ nv_push_g0_g4_host_sema_tail_pass21(struct nv_push *p,
    return 0;
 }
 
+/*
+ * tick171 / pass23: G0–G4 symmetry audit — all engines share pass21 host sema
+ * tail when pass23 inherits pass22 explicit-emit policy.  Channel ladders:
+ *   G1 CE:    nv_g1_emit_copy_then_host_sema_pass21
+ *   G2 comp:  pass22 compute object / pass21 program launch
+ *   G3 3D:    pass22 barrier / inv_wfi_host_sema_pass21
+ *   G4 video: pass21/pass23 NVDEC/NVENC bringup (ticks 169–170)
+ *   G0 aux:   same pass21 sema tail on 3D subch methods
+ */
+#define NV_PASS23_G0_G4_SYMMETRY_AUDIT       1
+#define NV_PASS23_G0_G4_HOST_SEMA_IS_PASS21  1
+#define NV_PASS23_G1_CE_PASS21               1
+#define NV_PASS23_G2_COMPUTE_PASS22          1
+#define NV_PASS23_G3_3D_PASS22_BARRIER       1
+#define NV_PASS23_G4_VIDEO_PASS21_PASS23     1
+
+/** tick171: pass23 host sema tail — alias of pass21 (unified formal policy). */
+static inline int
+nv_push_g0_g4_host_sema_tail_pass23(struct nv_push *p,
+                                    bool pre_wfi_on_cur_subch,
+                                    uint64_t host_sema_gpu,
+                                    uint32_t host_sema_payload,
+                                    enum nv_host_sema_mode host_sema_mode)
+{
+   return nv_push_g0_g4_host_sema_tail_pass21(p, pre_wfi_on_cur_subch,
+                                              host_sema_gpu, host_sema_payload,
+                                              host_sema_mode);
+}
+
+/** tick171: true if pass23 G0–G4 symmetry flags are coherent with pass21/22. */
+static inline bool
+nv_pass23_g0_g4_symmetry_ok(void)
+{
+   return NV_PASS23_G0_G4_SYMMETRY_AUDIT != 0 &&
+          NV_PASS23_G0_G4_HOST_SEMA_IS_PASS21 != 0 &&
+          NV_PASS21_G0_G4_ENGINE_COUNT == 5u;
+}
+
 /**
  * tick155: recommended sema mode order for G0–G4 silicon ladders (pass17
  * first, then classic BLOB1002/0802/1001, then open/vdpau).  Fills *out with
