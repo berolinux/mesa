@@ -3969,11 +3969,12 @@ nv_nvdec_emit_smoke_slice_pass17(struct nv_push *p, uint32_t class_nvdec,
    if (r != 0)
       return r;
    if (host_sema_gpu) {
-      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
-      nv_push_sema_release_mode_pass17(
-         p, host_sema_gpu,
-         host_sema_payload ? host_sema_payload : 1u,
-         host_sema_mode);
+      /* tick157: pass21 unified tail (same formal policy as pass17 direct) */
+      if (nv_push_g0_g4_host_sema_tail_pass21(
+             p, false, host_sema_gpu,
+             host_sema_payload ? host_sema_payload : 1u,
+             host_sema_mode) != 0)
+         return -1;
    }
    return 0;
 }
@@ -4004,11 +4005,12 @@ nv_nvenc_emit_h264_smoke_slice_pass17(struct nv_push *p, uint32_t class_nvenc,
    if (r != 0)
       return r;
    if (host_sema_gpu && p) {
-      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
-      nv_push_sema_release_mode_pass17(
-         p, host_sema_gpu,
-         host_sema_payload ? host_sema_payload : 1u,
-         host_sema_mode);
+      /* tick157: pass21 unified host sema tail (symmetric with NVDEC pass21) */
+      if (nv_push_g0_g4_host_sema_tail_pass21(
+             p, false, host_sema_gpu,
+             host_sema_payload ? host_sema_payload : 1u,
+             host_sema_mode) != 0)
+         return -1;
    }
    return 0;
 }
@@ -4061,6 +4063,66 @@ nv_g4_emit_nvenc_bringup_pass17(struct nv_push *p, uint32_t class_nvenc,
                                          status_gpu, width, height, sema_gpu,
                                          sema_payload, status_cpu);
 }
+
+/**
+ * tick157 / pass21: G4 NVDEC/NVENC bring-up with symmetric pass21 host sema tail.
+ * Engine sema in the video kick, then optional host sema on the same VA via
+ * nv_push_g0_g4_host_sema_tail_pass21 (formal pass17 1004-first policy).
+ */
+static inline int
+nv_g4_emit_nvdec_bringup_pass21(struct nv_push *p, uint32_t class_nvdec,
+                                const struct nv_nvdec_pic_setup *pic,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   int r;
+
+   if (!p || !pic || !sema_gpu)
+      return -1;
+   r = nv_nvdec_emit_smoke_slice(p, class_nvdec, pic, sema_gpu,
+                                 sema_payload ? sema_payload : 1u, status_cpu);
+   if (r != 0)
+      return r;
+   if (!add_host_sema_tail)
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, false, sema_gpu, sema_payload ? sema_payload : 1u, host_sema_mode);
+}
+
+static inline int
+nv_g4_emit_nvenc_bringup_pass21(struct nv_push *p, uint32_t class_nvenc,
+                                uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                                uint64_t bitstream_gpu, uint64_t status_gpu,
+                                uint32_t width, uint32_t height,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   int r;
+
+   if (!p || !pic_setup_gpu || !bitstream_gpu || !sema_gpu)
+      return -1;
+   r = nv_nvenc_emit_h264_smoke_slice(p, class_nvenc, pic_setup_gpu,
+                                      input_yuv_gpu, bitstream_gpu, status_gpu,
+                                      width, height, sema_gpu,
+                                      sema_payload ? sema_payload : 1u,
+                                      status_cpu);
+   if (r != 0)
+      return r;
+   if (!add_host_sema_tail)
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, false, sema_gpu, sema_payload ? sema_payload : 1u, host_sema_mode);
+}
+
+/* pass21 RE synthesis (ticks 155–157): single host sema policy across engines */
+#define NV_PASS21_RE_HOST_SEMA_DEFAULT_MODE  NV_PASS21_HOST_SEMA_DEFAULT_MODE
+#define NV_PASS21_RE_G0_G4_UNIFIED_TAIL      1
+#define NV_PASS21_RE_MME_RAM_DATA_SCAFFOLD   1
+#define NV_PASS21_RE_PATH_C_STILL_GATED      1
 
 #ifdef __cplusplus
 }

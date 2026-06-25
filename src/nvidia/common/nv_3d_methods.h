@@ -4267,6 +4267,59 @@ nv_3d_emit_g3_inv_wfi_host_sema_pass17(struct nv_push *p,
 }
 
 /**
+ * tick157 / pass21: G3 inv ladder + WFI on 3D, then unified pass21 host sema
+ * tail (formal pass17 policy via nv_push_g0_g4_host_sema_tail_pass21).
+ * Prefer this over pass17 for new Gallium/Vulkan barrier paths; pass17 kept
+ * for sema_emit preference ladder compatibility with channel silicon sticky.
+ * Returns 0 on success, -1 if sema missing.
+ */
+static inline int
+nv_3d_emit_g3_inv_wfi_host_sema_pass21(struct nv_push *p,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       enum nv_host_sema_mode sema_mode,
+                                       bool pre_wfi_on_3d)
+{
+   if (!p || !sema_gpu_addr)
+      return -1;
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
+                                               true, true);
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, pre_wfi_on_3d, sema_gpu_addr,
+      sema_payload ? sema_payload : 1u, sema_mode);
+}
+
+/**
+ * tick157: inv + report sema (0x1b00) + pass21 host sema tail (symmetric to
+ * pass19 inv_report_host but host tail is always pass21 formal path).
+ */
+static inline int
+nv_3d_emit_g3_inv_report_host_pass21(struct nv_push *p,
+                                     uint64_t report_sema_gpu_addr,
+                                     uint32_t report_sema_payload,
+                                     bool report_one_word,
+                                     uint64_t host_sema_gpu_addr,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode,
+                                     bool pre_wfi_before_host)
+{
+   if (!p)
+      return -1;
+   nv_3d_emit_g3_inv_all_wfi_pass19(p);
+   if (report_sema_gpu_addr) {
+      nv_3d_report_semaphore_release(p, report_sema_gpu_addr,
+                                     report_sema_payload ? report_sema_payload
+                                                         : 1u,
+                                     report_one_word);
+   }
+   if (!host_sema_gpu_addr)
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, pre_wfi_before_host, host_sema_gpu_addr,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/**
  * tick150 / pass19: full inv ladder + optional report sema (0x1b00 family) +
  * optional host sema pass17.  Composite for Gallium barrier/query paths that
  * need both 3D report sema and host sema without CB bind.

@@ -3440,6 +3440,138 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -703;
    }
 
+   /* tick157: G1/G3 pass21 sema tail adopt + G4 video symmetry + RE synthesis */
+   {
+      struct nv_push p1, p3, pv;
+      uint32_t b1[256], b3[512], bv[512], ni, li;
+      struct nv_nvdec_pic_setup pic;
+      bool saw_host = false, saw_launch = false, saw_inv = false;
+
+      if (!NV_PASS21_RE_G0_G4_UNIFIED_TAIL || !NV_PASS21_RE_MME_RAM_DATA_SCAFFOLD ||
+          !NV_PASS21_RE_PATH_C_STILL_GATED)
+         return -704;
+      if (NV_PASS21_RE_HOST_SEMA_DEFAULT_MODE != NV_PASS21_HOST_SEMA_DEFAULT_MODE)
+         return -705;
+
+      /* G1: copy then pass21 host sema */
+      memset(b1, 0, sizeof(b1));
+      nv_push_init(&p1, b1, (uint32_t)(sizeof(b1) / 4));
+      if (nv_g1_emit_copy_then_host_sema_pass21(
+             &p1, 0xc5b5u, 0x100000ull, 0x200000ull, 64u, false, true,
+             0x500000ull, 0x42u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -706;
+      ni = nv_push_dw_count(&p1);
+      if (ni < 10)
+         return -707;
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = b1[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_LAUNCH_DMA)
+            saw_launch = true;
+         if (method == NVC36F_SEMAPHOREC && b1[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_launch || !saw_host)
+         return -708;
+      if (nv_g1_emit_copy_then_host_sema_pass21(
+             &p1, 0xc5b5u, 0x100000ull, 0x200000ull, 64u, false, false,
+             0, 1, NV_PASS21_HOST_SEMA_DEFAULT_MODE) == 0)
+         return -709; /* reject null host sema */
+
+      /* G1 dual fence */
+      memset(b1, 0, sizeof(b1));
+      nv_push_init(&p1, b1, (uint32_t)(sizeof(b1) / 4));
+      if (nv_g1_emit_copy_engine_and_host_sema_pass21(
+             &p1, 0xc5b5u, 0x100000ull, 0x200000ull, 64u, 0x510000ull, 0x11u,
+             false, 0x520000ull, 0x22u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -710;
+
+      /* G3 inv + pass21 host sema */
+      memset(b3, 0, sizeof(b3));
+      nv_push_init(&p3, b3, (uint32_t)(sizeof(b3) / 4));
+      if (nv_3d_emit_g3_inv_wfi_host_sema_pass21(
+             &p3, 0x600000ull, 0x33u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+             true) != 0)
+         return -711;
+      ni = nv_push_dw_count(&p3);
+      saw_host = false;
+      saw_inv = false;
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = b3[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == 0x021cu || method == 0x1330u)
+            saw_inv = true;
+         if (method == NVC36F_SEMAPHOREC && b3[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_inv || !saw_host)
+         return -712;
+      if (nv_3d_emit_g3_inv_wfi_host_sema_pass21(
+             &p3, 0, 1, NV_PASS21_HOST_SEMA_DEFAULT_MODE, false) == 0)
+         return -713;
+
+      /* G3 inv+report+host pass21 */
+      memset(b3, 0, sizeof(b3));
+      nv_push_init(&p3, b3, (uint32_t)(sizeof(b3) / 4));
+      if (nv_3d_emit_g3_inv_report_host_pass21(
+             &p3, 0x610000ull, 0x44u, true, 0x620000ull, 0x55u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE, false) != 0)
+         return -714;
+
+      /* G4 pass21 NVDEC/NVENC bringup symmetry */
+      nv_nvdec_pic_setup_init_h264_smoke(&pic, 0x800000ull, 0x810000ull, 0);
+      memset(bv, 0, sizeof(bv));
+      nv_push_init(&pv, bv, (uint32_t)(sizeof(bv) / 4));
+      if (nv_g4_emit_nvdec_bringup_pass21(
+             &pv, NV_VIDEO_CLASS_NVDEC_C9B0, &pic, 0x900000ull, 0x77u, NULL,
+             true, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -715;
+      ni = nv_push_dw_count(&pv);
+      saw_host = false;
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = bv[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && bv[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_host)
+         return -716;
+
+      memset(bv, 0, sizeof(bv));
+      nv_push_init(&pv, bv, (uint32_t)(sizeof(bv) / 4));
+      if (nv_g4_emit_nvenc_bringup_pass21(
+             &pv, NV_VIDEO_CLASS_NVENC_C9B7, 0xa00000ull, 0xb00000ull,
+             0xc00000ull, 0xd00000ull, 64, 64, 0x910000ull, 0x88u, NULL, true,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -717;
+      ni = nv_push_dw_count(&pv);
+      saw_host = false;
+      for (li = 0; li + 1 < ni; li++) {
+         uint32_t hdr = bv[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && bv[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_host)
+         return -718;
+
+      /* engine-only pass21 (no host tail) still succeeds */
+      memset(bv, 0, sizeof(bv));
+      nv_push_init(&pv, bv, (uint32_t)(sizeof(bv) / 4));
+      if (nv_g4_emit_nvdec_bringup_pass21(
+             &pv, NV_VIDEO_CLASS_NVDEC_C9B0, &pic, 0x900000ull, 0x77u, NULL,
+             false, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -719;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
