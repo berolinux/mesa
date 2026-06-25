@@ -4187,6 +4187,29 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -846;
       if (!nv_pass23_explicit_emit_required())
          return -847;
+      /* tick176: pass24 RE scaffold + pass23/24 policy gate + NIR pass24 ladder */
+      if (!NV_PASS24_RE_SCAFFOLD || !NV_PASS24_RE_INHERITS_PASS23)
+         return -848;
+      if (!nv_pass24_policy_ok() || !nv_pass24_explicit_emit_required())
+         return -849;
+      if (!nv_pass23_24_emit_policy_gate())
+         return -850;
+      if (NV_PASS24_RE_FULL_DISASM_PENDING == 0)
+         return -851; /* pass24 full RE not done yet; must remain pending */
+      if (NV_PASS24_GPUCOMP_RAM_DATA_IMM_CAPPED != 127u ||
+          NV_PASS24_SEMA_FORMAL_BASE_GLCORE != 0x11e30c0u)
+         return -852;
+      if (!NV_PASS24_NIR_REQUIRES_PASS23_POLICY ||
+          NV_PASS24_NIR_DEFAULT_KIND != NV_PASS22_NIR_DEFAULT_KIND)
+         return -853;
+      if (!NV_PASS24_RE_WIRED || !NV_PASS24_RE_PATH_C_STILL_GATED)
+         return -854;
+      {
+         struct nv_pass21_compute_object sc[5];
+         if (nv_pass24_nir_depth_ladder_build_all(
+                sc, 0x100000ull, 0x200000ull, 0x210000ull, 0x300000ull) != 0)
+            return -855;
+      }
    }
 
    if (trace_push && trace_dwords) {

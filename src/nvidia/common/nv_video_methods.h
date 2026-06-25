@@ -4134,6 +4134,11 @@ nv_g4_emit_nvenc_bringup_pass21(struct nv_push *p, uint32_t class_nvenc,
 #define NV_PASS23_RE_PATH_C_STILL_GATED      NV_PASS22_RE_PATH_C_STILL_GATED
 #define NV_PASS23_RE_G0_G4_UNIFIED_TAIL      NV_PASS21_RE_G0_G4_UNIFIED_TAIL
 #define NV_PASS23_RE_WIRED                   1
+/* tick176 / pass24 scaffold — inherits pass23; full disasm pending */
+#define NV_PASS24_RE_SCAFFOLD                1
+#define NV_PASS24_RE_INHERITS_PASS23         1
+#define NV_PASS24_RE_WIRED                   1
+#define NV_PASS24_RE_PATH_C_STILL_GATED      NV_PASS23_RE_PATH_C_STILL_GATED
 
 /**
  * tick168 / pass23: G4 NVDEC bringup with pass22 explicit-emit policy check.

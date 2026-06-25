@@ -1258,6 +1258,14 @@ nv_pass21_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
 #define NV_PASS22_NIR_MAX_KIND                 NV_PASS21_CS_S2R_STORE_IMM_BAR
 /* tick163: ladder uses hand SPH/SASS smoke until full nv_nir AST per kind */
 #define NV_PASS22_NIR_USES_HAND_SPH_LADDER     1
+/* tick176: pass23/24 NIR defaults inherit pass22 ladder; hand SPH until real isel */
+#define NV_PASS23_NIR_USES_HAND_SPH_LADDER     NV_PASS22_NIR_USES_HAND_SPH_LADDER
+#define NV_PASS23_NIR_DEFAULT_KIND             NV_PASS22_NIR_DEFAULT_KIND
+#define NV_PASS23_NIR_DEPTH_LADDER_KIND_COUNT  NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT
+#define NV_PASS24_NIR_USES_HAND_SPH_LADDER     NV_PASS23_NIR_USES_HAND_SPH_LADDER
+#define NV_PASS24_NIR_DEFAULT_KIND             NV_PASS23_NIR_DEFAULT_KIND
+#define NV_PASS24_NIR_DEPTH_LADDER_KIND_COUNT  NV_PASS23_NIR_DEPTH_LADDER_KIND_COUNT
+#define NV_PASS24_NIR_REQUIRES_PASS23_POLICY   1
 
 /** tick162: pass21 kinds in silicon/NIR bringup order (includes BAR depth). */
 static inline unsigned
@@ -1349,6 +1357,41 @@ nv_pass22_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
        (after - before) >= NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE)
       return -14;
    return 0;
+}
+
+/**
+ * tick176: pass24 G2 launch — pass22 emit plus pass23/24 RE policy gate.
+ * Returns pass22 codes, or -15 if pass23/24 policy gate fails.
+ */
+static inline int
+nv_pass24_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
+                                     struct nv_pass21_compute_object *obj,
+                                     uint64_t lmem_gpu_addr, bool post_wfi,
+                                     uint64_t host_sema_gpu,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass23_24_emit_policy_gate())
+      return -15;
+   if (!nv_pass24_policy_ok())
+      return -15;
+   return nv_pass22_compute_object_emit_launch(p, class_compute, obj,
+                                               lmem_gpu_addr, post_wfi,
+                                               host_sema_gpu, host_sema_payload,
+                                               host_sema_mode);
+}
+
+static inline int
+nv_pass24_nir_depth_ladder_build_all(struct nv_pass21_compute_object *scratch,
+                                     uint64_t program_gpu, uint64_t qmd_gpu,
+                                     uint64_t qmd_sema_gpu, uint64_t store_gpu)
+{
+   if (!NV_PASS24_NIR_REQUIRES_PASS23_POLICY || !nv_pass23_24_emit_policy_gate())
+      return -30;
+   if (NV_PASS24_NIR_DEPTH_LADDER_KIND_COUNT != NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT)
+      return -31;
+   return nv_pass22_nir_depth_ladder_build_all(scratch, program_gpu, qmd_gpu,
+                                               qmd_sema_gpu, store_gpu);
 }
 
 /**

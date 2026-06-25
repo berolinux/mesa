@@ -151,6 +151,54 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS23_RE_FULL_DISASM_PENDING     0  /* tick175: pass23 deep RE done */
 #define NV_PASS23_RE_DEEP_DISASM_TICK175     1
 
+/* tick176 / pass24 RE scaffold — inherits pass23 deep model; targets gpucomp-only
+ * MME/caller CFG depth + silicon probe hooks. Multi-hour disasm TBD under re_pass24/.
+ */
+#define NV_PASS24_RE_SCAFFOLD                    1
+#define NV_PASS24_RE_INHERITS_PASS23             1
+#define NV_PASS24_RE_EXPLICIT_EMIT_POLICY        NV_PASS23_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS24_RE_ORDERED_TEMPLATES_ABSENT    NV_PASS23_RE_ORDERED_TEMPLATES_ABSENT
+#define NV_PASS24_RE_PATH_C_STILL_GATED          NV_PASS23_RE_PATH_C_STILL_GATED
+#define NV_PASS24_RE_SEMA_FORMAL_11_11           NV_PASS23_RE_SEMA_FORMAL_11_11
+#define NV_PASS24_RE_G0_G4_SYMMETRY             NV_PASS23_RE_G0_G4_SYMMETRY_RECONFIRMED
+#define NV_PASS24_RE_FULL_DISASM_PENDING         1
+#define NV_PASS24_RE_GPUCOMP_MME_FOCUS           1
+#define NV_PASS24_INLINE_TO_PCAS_MEDIAN_GLCORE   NV_PASS23_INLINE_TO_PCAS_MEDIAN_GLCORE
+#define NV_PASS24_SEMA_FORMAL_BASE_GLCORE        NV_PASS23_SEMA_FORMAL_BASE_GLCORE
+#define NV_PASS24_SEMA_FORMAL_BASE_EGLCORE       NV_PASS23_SEMA_FORMAL_BASE_EGLCORE
+#define NV_PASS24_SEMA_FORMAL_BASE_VKSC          NV_PASS23_SEMA_FORMAL_BASE_VKSC
+#define NV_PASS24_GPUCOMP_RAM_DATA_IMM_CAPPED    NV_PASS23_GPUCOMP_RAM_DATA_IMM_CAPPED
+#define NV_PASS24_GPUCOMP_HOST_SEM_C_IMM_CAPPED  NV_PASS23_GPUCOMP_HOST_SEM_C_IMM_CAPPED
+
+static inline bool
+nv_pass24_explicit_emit_required(void)
+{
+   return NV_PASS24_RE_SCAFFOLD != 0 && nv_pass23_explicit_emit_required();
+}
+
+static inline bool
+nv_pass24_policy_ok(void)
+{
+   return NV_PASS24_RE_SCAFFOLD != 0 &&
+          NV_PASS24_RE_INHERITS_PASS23 != 0 &&
+          nv_pass23_deep_disasm_complete() &&
+          NV_PASS24_RE_PATH_C_STILL_GATED != 0 &&
+          NV_PASS24_RE_EXPLICIT_EMIT_POLICY != 0;
+}
+
+/** tick176: gate for channel/G2 paths that require pass23/24 RE policy alignment */
+static inline bool
+nv_pass23_24_emit_policy_gate(void)
+{
+   if (!nv_pass23_explicit_emit_required())
+      return false;
+   if (!nv_pass23_deep_disasm_complete())
+      return false;
+   if (NV_PASS24_RE_SCAFFOLD && !nv_pass24_explicit_emit_required())
+      return false;
+   return true;
+}
+
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8
