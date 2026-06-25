@@ -4107,6 +4107,9 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -825;
       if (!NV_PASS23_RE_G0_G4_UNIFIED_TAIL)
          return -826;
+      /* pass23 G4 entry delegates to pass21 when policy on */
+      if (!nv_pass22_explicit_emit_required())
+         return -827;
    }
 
    if (trace_push && trace_dwords) {
