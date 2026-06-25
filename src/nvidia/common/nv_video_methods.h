@@ -218,12 +218,126 @@ nv_nvdec_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
    nv_push_method(p, NV_NVDEC_SEMAPHORE_C, payload);
 }
 
-/** Zero host-mapped status/sema before submit (clear stale completion). */
+/** Zero host-mapped sema/status dword before submit (clear stale completion). */
 static inline void
 nv_nvdec_status_reset_cpu(volatile uint32_t *status_cpu)
 {
    if (status_cpu)
       *status_cpu = 0;
+}
+
+/*
+ * tick126 / pass11: NVDEC status BO (open-gpu-doc nvdec_drv.h nvdec_status_s).
+ * Programmed via SET_NVDEC_STATUS_OFFSET (0x0424); HW writes after EXECUTE.
+ * First dword may also serve as sema payload when drivers alias sema+status.
+ *
+ * Layout (LE dwords, common header then codec union):
+ *   +0x00 mbs_correctly_decoded
+ *   +0x04 mbs_in_error
+ *   +0x08 cycle_count
+ *   +0x0c error_status
+ *   +0x10.. codec-specific (hevc/vp9 frame_status_*)
+ *   +0x34 slice_header_error_code (after 9-dword hevc/vp9 union tail)
+ */
+#define NV_NVDEC_STATUS_BO_MIN_BYTES       64u
+#define NV_NVDEC_STATUS_DW_MBS_OK          0
+#define NV_NVDEC_STATUS_DW_MBS_ERR         1
+#define NV_NVDEC_STATUS_DW_CYCLE_COUNT     2
+#define NV_NVDEC_STATUS_DW_ERROR_STATUS    3
+#define NV_NVDEC_STATUS_DW_CODEC_BASE      4   /* start of hevc/vp9 union */
+#define NV_NVDEC_STATUS_DW_SLICE_HDR_ERR   13  /* after 9-dword union @ +0x10..+0x33 */
+#define NV_NVDEC_STATUS_DWORDS             16
+
+struct nv_nvdec_status_snapshot {
+   uint32_t mbs_correctly_decoded;
+   uint32_t mbs_in_error;
+   uint32_t cycle_count;
+   uint32_t error_status;
+   uint32_t slice_header_error_code;
+   /* HEVC/VP9 union (first fields; refine on silicon) */
+   uint32_t frame_status_intra_cnt;
+   uint32_t frame_status_inter_cnt;
+   uint32_t frame_status_skip_cnt;
+   bool     valid;
+   bool     hw_error;   /* error_status != 0 or mbs_in_error > 0 */
+   bool     sema_only;  /* only first dword non-zero (completion marker path) */
+};
+
+/** Zero full NVDEC status BO (prefer over single-dword reset when BO mapped). */
+static inline void
+nv_nvdec_status_bo_reset_cpu(void *status_cpu, uint32_t status_bytes)
+{
+   if (!status_cpu || !status_bytes)
+      return;
+   memset(status_cpu, 0, status_bytes < NV_NVDEC_STATUS_BO_MIN_BYTES ?
+          status_bytes : NV_NVDEC_STATUS_BO_MIN_BYTES);
+}
+
+/**
+ * Parse host-mapped NVDEC status BO.
+ * Returns 0 on success, -1 if buffer too small / null.
+ * If only dword0 is set and rest zero, treats as sema-alias completion (sema_only).
+ */
+static inline int
+nv_nvdec_status_read(const void *status_cpu, uint32_t status_bytes,
+                     struct nv_nvdec_status_snapshot *out)
+{
+   const uint32_t *dw;
+   uint32_t i, nonzero_tail = 0;
+
+   if (!out)
+      return -1;
+   memset(out, 0, sizeof(*out));
+   if (!status_cpu || status_bytes < 4u)
+      return -1;
+
+   dw = (const uint32_t *)status_cpu;
+   out->mbs_correctly_decoded = dw[NV_NVDEC_STATUS_DW_MBS_OK];
+   if (status_bytes >= 8u)
+      out->mbs_in_error = dw[NV_NVDEC_STATUS_DW_MBS_ERR];
+   if (status_bytes >= 12u)
+      out->cycle_count = dw[NV_NVDEC_STATUS_DW_CYCLE_COUNT];
+   if (status_bytes >= 16u)
+      out->error_status = dw[NV_NVDEC_STATUS_DW_ERROR_STATUS];
+   if (status_bytes >= 20u)
+      out->frame_status_intra_cnt = dw[NV_NVDEC_STATUS_DW_CODEC_BASE];
+   if (status_bytes >= 24u)
+      out->frame_status_inter_cnt = dw[NV_NVDEC_STATUS_DW_CODEC_BASE + 1];
+   if (status_bytes >= 28u)
+      out->frame_status_skip_cnt = dw[NV_NVDEC_STATUS_DW_CODEC_BASE + 2];
+   if (status_bytes >= 56u)
+      out->slice_header_error_code = dw[NV_NVDEC_STATUS_DW_SLICE_HDR_ERR];
+
+   for (i = 1; i < (status_bytes / 4u) && i < NV_NVDEC_STATUS_DWORDS; i++) {
+      if (dw[i])
+         nonzero_tail++;
+   }
+   if (dw[0] && !nonzero_tail && status_bytes >= 4u &&
+       !out->mbs_in_error && !out->error_status)
+      out->sema_only = true;
+
+   out->hw_error = (out->error_status != 0) || (out->mbs_in_error != 0) ||
+                   (out->slice_header_error_code != 0);
+   out->valid = true;
+   return 0;
+}
+
+/** Synthetic status for host tests (full header, no codec tail required). */
+static inline void
+nv_nvdec_status_write_synthetic(void *status_cpu, uint32_t status_bytes,
+                                uint32_t mbs_ok, uint32_t mbs_err,
+                                uint32_t cycle_count, uint32_t error_status)
+{
+   uint32_t *dw;
+   if (!status_cpu || status_bytes < 16u)
+      return;
+   dw = (uint32_t *)status_cpu;
+   memset(dw, 0, status_bytes < NV_NVDEC_STATUS_BO_MIN_BYTES ?
+          status_bytes : NV_NVDEC_STATUS_BO_MIN_BYTES);
+   dw[NV_NVDEC_STATUS_DW_MBS_OK] = mbs_ok;
+   dw[NV_NVDEC_STATUS_DW_MBS_ERR] = mbs_err;
+   dw[NV_NVDEC_STATUS_DW_CYCLE_COUNT] = cycle_count;
+   dw[NV_NVDEC_STATUS_DW_ERROR_STATUS] = error_status;
 }
 
 /**
@@ -1352,6 +1466,13 @@ nv_nvenc_gpu_addr_hi32(uint64_t gpu_addr)
    return (uint32_t)(gpu_addr >> 32);
 }
 
+/**
+ * pass10/11 canonical NVENC method order (glcore/gpucomp RE + C9B7 doc):
+ *   APP_ID(0x200) → CTRL(0x400) → PIC_SETUP(0x404) → IN(0x408) →
+ *   BS(0x40c) → RC(0x410) → STATUS(0x414) → OUT_ST(0x718) → OUT_BS(0x71c) →
+ *   EXECUTE(0x300) → WFI
+ * pass11 gpucomp: OUT_ST immediately followed by OUT_BS in table sequences.
+ */
 static inline void
 nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *fs)
 {
@@ -1381,7 +1502,7 @@ nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *
    if (fs->status_gpu_addr)
       nv_push_method(p, NV_NVENC_SET_STATUS_OFFSET,
                      (uint32_t)(fs->status_gpu_addr >> 8));
-   /* pass10: C9B7-style upper outs (harmless no-op payload on older if ignored) */
+   /* pass10/11: C9B7-style upper outs; order OUT_ST then OUT_BS (gpucomp sig) */
    if (emit_out && fs->status_gpu_addr)
       nv_push_method(p, NV_NVENC_SET_OUT_ENC_STATUS,
                      nv_nvenc_gpu_addr_hi32(fs->status_gpu_addr));
@@ -1391,6 +1512,19 @@ nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *
    nv_push_method(p, NV_NVENC_EXECUTE,
                   fs->execute_flags ? fs->execute_flags : 1u);
    nv_push_wfi(p);
+}
+
+/** tick126: ensure control_params default when only pic_setup path used. */
+static inline void
+nv_nvenc_frame_setup_ensure_control_defaults(struct nv_nvenc_frame_setup *fs)
+{
+   if (!fs)
+      return;
+   /* pass11: many gl/egl windows always program CTRL+PIC_SETUP; default 1 keeps EXECUTE valid */
+   if (!fs->control_params && fs->pic_setup_gpu_addr)
+      fs->control_params = 1u;
+   if (!fs->execute_flags)
+      fs->execute_flags = 1u;
 }
 
 /**
@@ -3655,9 +3789,22 @@ nv_nvenc_emit_encode_frame(struct nv_push *p, uint32_t class_nvenc,
                            uint64_t sema_gpu, uint32_t sema_payload,
                            volatile uint32_t *status_cpu)
 {
+   struct nv_nvenc_frame_setup local;
+   const struct nv_nvenc_frame_setup *use = fs;
+
    if (!p || !fs)
       return -1;
-   nv_nvenc_emit_frame_kick(p, class_nvenc, fs, sema_gpu, sema_payload,
+   /* tick126: apply control/exec defaults without mutating caller's struct if const path */
+   if (!fs->control_params && fs->pic_setup_gpu_addr) {
+      local = *fs;
+      nv_nvenc_frame_setup_ensure_control_defaults(&local);
+      use = &local;
+   } else if (!fs->execute_flags) {
+      local = *fs;
+      local.execute_flags = 1u;
+      use = &local;
+   }
+   nv_nvenc_emit_frame_kick(p, class_nvenc, use, sema_gpu, sema_payload,
                             status_cpu);
    return 0;
 }

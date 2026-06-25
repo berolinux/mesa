@@ -1223,6 +1223,72 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -386;
    }
 
+   /* tick126: NVDEC status BO parse (nvdec_status_s) */
+   {
+      uint8_t dstbuf[NV_NVDEC_STATUS_BO_MIN_BYTES];
+      struct nv_nvdec_status_snapshot dsnap;
+
+      memset(dstbuf, 0, sizeof(dstbuf));
+      nv_nvdec_status_bo_reset_cpu(dstbuf, sizeof(dstbuf));
+      if (nv_nvdec_status_read(dstbuf, sizeof(dstbuf), &dsnap) != 0 || !dsnap.valid)
+         return -387;
+      if (dsnap.hw_error)
+         return -388;
+
+      nv_nvdec_status_write_synthetic(dstbuf, sizeof(dstbuf), 100u, 0, 5000u, 0);
+      if (nv_nvdec_status_read(dstbuf, sizeof(dstbuf), &dsnap) != 0)
+         return -389;
+      if (dsnap.mbs_correctly_decoded != 100u || dsnap.cycle_count != 5000u)
+         return -390;
+      if (dsnap.hw_error)
+         return -391;
+
+      nv_nvdec_status_write_synthetic(dstbuf, sizeof(dstbuf), 50u, 3u, 100u, 0x2u);
+      if (nv_nvdec_status_read(dstbuf, sizeof(dstbuf), &dsnap) != 0)
+         return -392;
+      if (!dsnap.hw_error || dsnap.mbs_in_error != 3u || dsnap.error_status != 0x2u)
+         return -393;
+
+      /* sema-only: first dword set, rest zero */
+      memset(dstbuf, 0, sizeof(dstbuf));
+      ((uint32_t *)dstbuf)[0] = 0x11u;
+      if (nv_nvdec_status_read(dstbuf, sizeof(dstbuf), &dsnap) != 0)
+         return -394;
+      if (!dsnap.sema_only || dsnap.hw_error)
+         return -395;
+
+      if (nv_nvdec_status_read(NULL, 0, &dsnap) == 0)
+         return -396;
+   }
+
+   /* tick126: NVENC control_params default when pic_setup present */
+   {
+      struct nv_nvenc_frame_setup efs3;
+      uint32_t buf11[160];
+      uint32_t n11, i11;
+      bool saw_ctrl = false;
+
+      nv_nvenc_frame_setup_init_h264_smoke(&efs3, 0x710000ull, 0x800000ull,
+                                           0x810000ull, 32, 32);
+      efs3.control_params = 0; /* force default path */
+      efs3.status_gpu_addr = 0x300000ull;
+      memset(buf11, 0, sizeof(buf11));
+      nv_push_init(&p, buf11, (uint32_t)(sizeof(buf11) / 4));
+      if (nv_nvenc_emit_encode_frame(&p, 0xc8b7u, &efs3, 0, 0, NULL) != 0)
+         return -397;
+      n11 = nv_push_dw_count(&p);
+      for (i11 = 0; i11 + 1 < n11; i11++) {
+         uint32_t hdr = buf11[i11];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVENC_SET_CONTROL_PARAMS && buf11[i11 + 1] == 1u)
+            saw_ctrl = true;
+      }
+      if (!saw_ctrl)
+         return -398;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

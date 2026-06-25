@@ -655,7 +655,7 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
    /* Pre-arm sema payload (picture_index+1 written by NVDEC sema release) */
    dec->last_frame_sema_payload = (dec->session.next_picture_index + 1);
    if (dec->status_map)
-      *(volatile uint32_t *)dec->status_map = 0;
+      nv_nvdec_status_bo_reset_cpu(dec->status_map, NVGPU_VID_STATUS_BO_SIZE);
 
    /*
     * tick123: prefer channel sema submit (class ladder + wait) when channel
@@ -689,6 +689,14 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
 
    /* Wait for NVDEC sema on status BO, else channel GPFIFO idle as fallback */
    if (r == 0 && dec->status_map) {
+      struct nv_nvdec_status_snapshot dsnap;
+      /* Prefer sema wait; if status BO has full nvdec_status_s, also record errors */
+      if (nv_nvdec_status_read(dec->status_map, NVGPU_VID_STATUS_BO_SIZE,
+                               &dsnap) == 0 && dsnap.valid && dsnap.hw_error &&
+          !dsnap.sema_only) {
+         /* HW reported decode errors in status BO; still allow sema wait below */
+         (void)dsnap;
+      }
       if (nv_nvdec_wait_status_cpu((volatile uint32_t *)dec->status_map,
                                    dec->last_frame_sema_payload,
                                    2000000000ull) != 0) {
@@ -921,7 +929,7 @@ nvgpu_enc_end_frame(struct pipe_video_codec *codec,
 
    enc->last_sema_payload = enc->frame_num + 1u;
    if (enc->status_map)
-      *(volatile uint32_t *)enc->status_map = 0;
+      nv_nvenc_status_reset_cpu(enc->status_map, NVGPU_VID_STATUS_BO_SIZE);
 
    if (ctx->channel) {
       r = nv_channel_nvenc_frame_sema_submit(
