@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-25  
 **Driver:** NVIDIA-Linux-x86_64-610.43.02  
-**Status:** Scaffold only — full multi-hour `re_pass23/` disasm not completed this tick series.
+**Status:** Scaffold superseded by tick175 — see `HW_MODEL_PASS23_DEEP_DISASM_610.43.02.md` and `/tmp/nvidia-reveng-pp-v2/re_pass23/`.
 
 ## Inherited from pass22 (authoritative)
 
@@ -37,7 +37,7 @@
 
 ## Still blocked / next RE
 
-1. Full pass23 multi-lib disasm (`/tmp/nvidia-reveng-pp-v2/re_pass23/`)
+1. ~~Full pass23 multi-lib disasm~~ — **done tick175** (`re_pass23/`, 16 libs)
 2. Real NIR AST isel (still SASS smoke / hand SPH for pass22 kinds)
 3. Silicon sema/MME/PCAS order on `/dev/nvidia*`
 4. Live MME ISA to unlock path C

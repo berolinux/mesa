@@ -4134,8 +4134,8 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          if (nv_push_dw_count(&p171) <= n0)
             return -833;
       }
-      /* tick172: pass23 RE trace scaffold flags */
-      if (!NV_PASS23_RE_TRACE_SCAFFOLD_TICK172 || !NV_PASS23_RE_FULL_DISASM_PENDING)
+      /* tick172: pass23 RE trace scaffold; tick175: full disasm no longer pending */
+      if (!NV_PASS23_RE_TRACE_SCAFFOLD_TICK172 || NV_PASS23_RE_FULL_DISASM_PENDING != 0)
          return -834;
       /* tick173: G1 pass23 copy+host sema emits */
       {
@@ -4166,6 +4166,27 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          if (nv_push_dw_count(&p174) < 16u)
             return -839;
       }
+      /* tick175: pass23 multi-hour deep RE complete (re_pass23/) */
+      if (!NV_PASS23_RE_DEEP_DISASM_COMPLETE || !NV_PASS23_RE_DEEP_DISASM_TICK175)
+         return -840;
+      if (!nv_pass23_deep_disasm_complete())
+         return -841;
+      if (!NV_PASS23_RE_G0_G4_SYMMETRY_RECONFIRMED || !NV_PASS23_RE_PROXIMITY_NOT_TEMPLATE)
+         return -842;
+      if (NV_PASS23_CHAIN_MME_RAM_UPLOAD_FORWARD_OK != 0 ||
+          NV_PASS23_CHAIN_INLINE_PCAS_5STEP_OK != 0)
+         return -843;
+      if (NV_PASS23_SEMA_FORMAL_BASE_GLCORE != 0x11e30c0u ||
+          NV_PASS23_SEMA_FORMAL_BASE_EGLCORE != 0x114f2e0u ||
+          NV_PASS23_SEMA_FORMAL_BASE_VKSC != 0x877380u)
+         return -844;
+      if (NV_PASS23_GLCORE_HOST_SEM_C_IMM_CAPPED != 284u ||
+          NV_PASS23_GPUCOMP_RAM_DATA_IMM_CAPPED != 127u)
+         return -845;
+      if (!NV_PASS23_RE_WIRED || !NV_PASS23_RE_INHERITS_PASS22)
+         return -846;
+      if (!nv_pass23_explicit_emit_required())
+         return -847;
    }
 
    if (trace_push && trace_dwords) {

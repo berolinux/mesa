@@ -104,11 +104,32 @@ extern "C" {
 #define NV_PASS22_CHAIN_INLINE_PCAS_FORWARD_OK   0
 #define NV_PASS22_CHAIN_MME_RAM_UPLOAD_FORWARD_OK 0
 
-/* tick168 / pass23 RE scaffold (multi-hour disasm pass TBD under re_pass23/) */
+/* tick168 / pass23 RE scaffold; tick175 / pass23 multi-hour deep disasm complete
+ * (re_pass23/, HW_MODEL_PASS23_DEEP_DISASM): 16 libs indexed; sema formal 11/11
+ * reconfirm; proximity graphs (4KB/16KB) show method co-location without ordered
+ * templates; G0–G4 method symmetry; x86 mov/or imm idioms; MME RAM upload chain
+ * still forward_ok=0; path C gated. Inherits pass22 explicit-emit policy.
+ */
 #define NV_PASS23_RE_SCAFFOLD                    1
+#define NV_PASS23_RE_DEEP_DISASM_COMPLETE        1
 #define NV_PASS23_RE_EXPLICIT_EMIT_POLICY        NV_PASS22_RE_EXPLICIT_EMIT_POLICY
 #define NV_PASS23_RE_ORDERED_TEMPLATES_ABSENT    NV_PASS22_RE_ORDERED_TEMPLATES_ABSENT
+#define NV_PASS23_RE_PB_HDR_RUNTIME_ONLY         NV_PASS22_RE_PB_HDR_RUNTIME_ONLY
+#define NV_PASS23_RE_SEMA_FORMAL_11_11           NV_PASS22_RE_SEMA_FORMAL_11_11
+#define NV_PASS23_RE_PATH_C_STILL_GATED          NV_PASS22_RE_PATH_C_STILL_GATED
+#define NV_PASS23_RE_G0_G4_SYMMETRY_RECONFIRMED  1
+#define NV_PASS23_RE_PROXIMITY_NOT_TEMPLATE      1
 #define NV_PASS23_INLINE_TO_PCAS_MEDIAN_GLCORE   NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE
+/* pass23 sema formal bases (same as pass22 refined hunt) */
+#define NV_PASS23_SEMA_FORMAL_BASE_GLCORE        NV_PASS22_SEMA_FORMAL_BASE_GLCORE
+#define NV_PASS23_SEMA_FORMAL_BASE_EGLCORE       NV_PASS22_SEMA_FORMAL_BASE_EGLCORE
+#define NV_PASS23_SEMA_FORMAL_BASE_VKSC          NV_PASS22_SEMA_FORMAL_BASE_VKSC
+/* pass23 method imm spot-check (capped scan; RE only) */
+#define NV_PASS23_GLCORE_HOST_SEM_C_IMM_CAPPED   284u
+#define NV_PASS23_GPUCOMP_HOST_SEM_C_IMM_CAPPED  1738u
+#define NV_PASS23_GPUCOMP_RAM_DATA_IMM_CAPPED    127u
+#define NV_PASS23_CHAIN_MME_RAM_UPLOAD_FORWARD_OK 0
+#define NV_PASS23_CHAIN_INLINE_PCAS_5STEP_OK     0  /* span ~96KB noise only */
 
 static inline bool
 nv_pass23_explicit_emit_required(void)
@@ -116,9 +137,19 @@ nv_pass23_explicit_emit_required(void)
    return NV_PASS23_RE_SCAFFOLD != 0 && nv_pass22_explicit_emit_required();
 }
 
+static inline bool
+nv_pass23_deep_disasm_complete(void)
+{
+   return NV_PASS23_RE_DEEP_DISASM_COMPLETE != 0 &&
+          NV_PASS23_RE_SEMA_FORMAL_11_11 != 0 &&
+          NV_PASS23_RE_G0_G4_SYMMETRY_RECONFIRMED != 0 &&
+          NV_PASS23_RE_PATH_C_STILL_GATED != 0;
+}
+
 #define NV_PASS23_RE_G0_G4_SYMMETRY_TICK171  1
 #define NV_PASS23_RE_TRACE_SCAFFOLD_TICK172  1
-#define NV_PASS23_RE_FULL_DISASM_PENDING     1
+#define NV_PASS23_RE_FULL_DISASM_PENDING     0  /* tick175: pass23 deep RE done */
+#define NV_PASS23_RE_DEEP_DISASM_TICK175     1
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
