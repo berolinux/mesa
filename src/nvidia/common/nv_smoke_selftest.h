@@ -4489,6 +4489,15 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -915;
       if (!nv_pass26_g0_g4_symmetry_ok() || !nv_pass26_policy_ok())
          return -916;
+      /* tick188: pass26 G4 channel + pass27 scaffold */
+      if (!NV_PASS26_IMPL_G4_CHANNEL_TICK188)
+         return -917;
+      if (!NV_PASS27_RE_SCAFFOLD || !NV_PASS27_RE_INHERITS_PASS26)
+         return -918;
+      if (!nv_pass27_policy_ok() || NV_PASS27_RE_FULL_DISASM_PENDING == 0)
+         return -919;
+      if (NV_PASS27_IMPL_INHERITS_PASS26_WIRE != NV_PASS26_IMPL_WIRE_COMPLETE)
+         return -920;
    }
 
    if (trace_push && trace_dwords) {
