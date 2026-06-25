@@ -987,13 +987,16 @@ nvgpu_enc_flush(struct pipe_video_codec *codec)
 
 static void
 nvgpu_enc_get_feedback(struct pipe_video_codec *codec,
-                       void *feedback, unsigned *size)
+                       void *feedback, unsigned *size,
+                       struct pipe_enc_feedback_metadata *metadata)
 {
    struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
    (void)feedback;
+   (void)enc;
    if (size)
       *size = 0; /* unknown until status/bitstream size ring is reverse-engineered */
-   (void)enc;
+   if (metadata)
+      memset(metadata, 0, sizeof(*metadata));
 }
 
 static struct pipe_video_codec *
