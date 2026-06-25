@@ -3019,6 +3019,80 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -638;
    }
 
+   /* tick151: query begin/end pass19 (occlusion + timestamp shapes) */
+   {
+      struct nv_push qbp, qep;
+      uint32_t qbb[32], qeb[48], qbn, qen, qi;
+      bool saw_zpass_on = false, saw_rep_a = false, saw_wfi = false;
+
+      memset(qbb, 0, sizeof(qbb));
+      nv_push_init(&qbp, qbb, (uint32_t)(sizeof(qbb) / 4));
+      nv_3d_emit_g3_query_begin_occlusion_pass19(&qbp, true);
+      qbn = nv_push_dw_count(&qbp);
+      if (qbn < 2)
+         return -639;
+      for (qi = 0; qi + 1 < qbn; qi++) {
+         uint32_t hdr = qbb[qi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_ZPASS_PIXEL_COUNT && qbb[qi + 1] != 0)
+            saw_zpass_on = true;
+      }
+      if (!saw_zpass_on)
+         return -640;
+
+      memset(qeb, 0, sizeof(qeb));
+      nv_push_init(&qep, qeb, (uint32_t)(sizeof(qeb) / 4));
+      nv_3d_emit_g3_query_end_report_pass19(&qep, 0xd00000ull, 1, true, false,
+                                            true);
+      qen = nv_push_dw_count(&qep);
+      if (qen < 6)
+         return -641;
+      for (qi = 0; qi + 1 < qen; qi++) {
+         uint32_t hdr = qeb[qi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_WAIT_FOR_IDLE)
+            saw_wfi = true;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_A)
+            saw_rep_a = true;
+      }
+      if (!saw_wfi || !saw_rep_a)
+         return -642;
+   }
+
+   /* tick151: VS/FS multi-CB bind helper */
+   {
+      struct nv_push cbp;
+      uint32_t cbb[64], cbn, ci;
+      unsigned nbind;
+      bool saw_cba = false, saw_bind = false;
+
+      memset(cbb, 0, sizeof(cbb));
+      nv_push_init(&cbp, cbb, (uint32_t)(sizeof(cbb) / 4));
+      nbind = nv_3d_emit_g3_cb_bind_vs_fs_pass18(&cbp, 0xa00000ull, 256u, 0,
+                                                 0xb00000ull, 128u, 0, true);
+      if (nbind != 2)
+         return -643;
+      cbn = nv_push_dw_count(&cbp);
+      if (cbn < 8)
+         return -644;
+      for (ci = 0; ci + 1 < cbn; ci++) {
+         uint32_t hdr = cbb[ci];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_CONSTANT_BUFFER_SELECTOR_A)
+            saw_cba = true;
+         if (method == NVC597_BIND_GROUP_CONSTANT_BUFFER(0))
+            saw_bind = true;
+      }
+      if (!saw_cba || !saw_bind)
+         return -645;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

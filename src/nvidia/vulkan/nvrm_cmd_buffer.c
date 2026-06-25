@@ -975,8 +975,9 @@ nvrm_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    cmd->active_query_index = query;
    cmd->active_query_is_occlusion = (qp->kind == NVRM_QUERY_OCCLUSION);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
+   /* tick151 / pass19: inv const + zpass enable (Gallium/Vulkan parity) */
    if (cmd->active_query_is_occlusion)
-      nv_3d_set_zpass_pixel_count(&cmd->push, true);
+      nv_3d_emit_g3_query_begin_occlusion_pass19(&cmd->push, true);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -993,11 +994,14 @@ nvrm_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
       return;
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
    if (qp->kind == NVRM_QUERY_OCCLUSION) {
-      nv_3d_report_query_release(&cmd->push, addr, 0, true, true);
+      /* tick151: pass19 WFI + zpass report sema (one-word avail payload) */
+      nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, true, true,
+                                            true);
       nv_3d_set_zpass_pixel_count(&cmd->push, false);
    } else {
-      /* Timestamp / stats: pipeline semaphore release with 4-word structure */
-      nv_3d_report_query_release(&cmd->push, addr, 0, false, false);
+      /* Timestamp / stats: 4-word structure via pass19 query end ladder */
+      nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, false, false,
+                                            true);
    }
    if (cmd->active_query_pool == qp)
       cmd->active_query_pool = NULL;
@@ -1017,9 +1021,9 @@ nvrm_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    addr = nvrm_query_slot_addr(qp, query);
    if (!addr)
       return;
-   nv_push_wfi(&cmd->push);
-   nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_3d_report_query_release(&cmd->push, addr, 0, false, false);
+   /* tick151: pass19 query end (WFI embedded) — timestamp write */
+   nv_3d_emit_g3_query_end_report_pass19(&cmd->push, addr, 0, false, false,
+                                         true);
 }
 
 VKAPI_ATTR void VKAPI_CALL

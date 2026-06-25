@@ -269,6 +269,10 @@ extern "C" {
 #define NV_3D_PUSH_CONST_SHADER_SLOT            0
 #define NV_3D_PUSH_CONST_BIND_GROUP_VS          NV_3D_BIND_GROUP_VERTEX
 #define NV_3D_PUSH_CONST_BIND_GROUP_FS          NV_3D_BIND_GROUP_PIXEL
+/* tick151: tess/geom bind groups (nv_shader.c / class ladder; not in all headers) */
+#define NV_3D_BIND_GROUP_TESSELLATION_INIT      1
+#define NV_3D_BIND_GROUP_TESSELLATION           2
+#define NV_3D_BIND_GROUP_GEOMETRY               3
 
 /* Report semaphore (3D engine completion signal; nvidia-3d / nvkms-headsurface) */
 #define NVC597_SET_REPORT_SEMAPHORE_A           0x1b00
@@ -4282,6 +4286,41 @@ nv_3d_emit_g3_cb_bind_group_pass18(struct nv_push *p, uint32_t size_bytes,
 }
 
 /**
+ * tick151: multi-slot CB bind for VS/FS using pass18 selector+bind_group.
+ * Inv const cache once at end if any bind succeeded.  Returns CBs bound count.
+ */
+static inline unsigned
+nv_3d_emit_g3_cb_bind_vs_fs_pass18(struct nv_push *p,
+                                   uint64_t vs_cb_gpu, uint32_t vs_cb_size,
+                                   unsigned vs_slot,
+                                   uint64_t fs_cb_gpu, uint32_t fs_cb_size,
+                                   unsigned fs_slot,
+                                   bool inv_const_cache)
+{
+   unsigned n = 0;
+   if (!p)
+      return 0;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (vs_cb_gpu && vs_cb_size) {
+      nv_3d_emit_g3_cb_bind_group_pass18(p, (vs_cb_size + 255u) & ~255u,
+                                         vs_cb_gpu,
+                                         NV_3D_PUSH_CONST_BIND_GROUP_VS,
+                                         vs_slot, false);
+      n++;
+   }
+   if (fs_cb_gpu && fs_cb_size) {
+      nv_3d_emit_g3_cb_bind_group_pass18(p, (fs_cb_size + 255u) & ~255u,
+                                         fs_cb_gpu,
+                                         NV_3D_PUSH_CONST_BIND_GROUP_FS,
+                                         fs_slot, false);
+      n++;
+   }
+   if (n && inv_const_cache)
+      nv_3d_invalidate_shader_caches(p, false, false, true);
+   return n;
+}
+
+/**
  * tick149 / pass18: 3D report sema A–D ladder (distinct from host sema 0x200).
  * pass18 RE: imm present for 0x0d00.. family; NVC597 uses 0x1b00..0x1b0c.
  */
@@ -4297,6 +4336,44 @@ nv_3d_emit_g3_report_sema_pass18(struct nv_push *p, uint64_t sema_gpu_addr,
       nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
    nv_3d_report_semaphore_release(p, sema_gpu_addr,
                                   sema_payload ? sema_payload : 1u, one_word);
+}
+
+/**
+ * tick151 / pass19: end-of-query — WFI + report sema with zpass/timestamp D.
+ * one_word=true for simple occlusion/fence; false for 4-word timestamp.
+ * zpass_counter selects REPORT_ZPASS_PIXEL_CNT in D (occlusion end).
+ */
+static inline void
+nv_3d_emit_g3_query_end_report_pass19(struct nv_push *p,
+                                      uint64_t sema_gpu_addr,
+                                      uint32_t sema_payload,
+                                      bool zpass_counter,
+                                      bool one_word,
+                                      bool do_wfi_before)
+{
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (do_wfi_before)
+      nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+   nv_3d_report_query_release(p, sema_gpu_addr,
+                              sema_payload ? sema_payload : 1u,
+                              zpass_counter, one_word);
+}
+
+/**
+ * tick151: begin occlusion query — optional inv const + enable zpass counter.
+ */
+static inline void
+nv_3d_emit_g3_query_begin_occlusion_pass19(struct nv_push *p,
+                                           bool inv_const_cache)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (inv_const_cache)
+      nv_3d_invalidate_shader_caches(p, false, false, true);
+   nv_3d_set_zpass_pixel_count(p, true);
 }
 
 /**

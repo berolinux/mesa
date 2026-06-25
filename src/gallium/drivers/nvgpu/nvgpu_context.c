@@ -39,6 +39,9 @@
 #include <stdio.h>
 #include <string.h>
 
+/* tick151: used by set_constant_buffer before full emit helpers below */
+static unsigned nvgpu_shader_bind_group(mesa_shader_stage stage);
+
 /* ---- transfer ---- */
 
 static void *
@@ -201,11 +204,34 @@ nvgpu_set_constant_buffer(struct pipe_context *pctx,
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    struct pipe_constant_buffer *dst;
+   struct nv_push push;
+   struct nvgpu_resource *res;
+   uint64_t addr;
+   uint32_t sz;
+   unsigned bind_group;
 
    if (shader >= NVGPU_SHADER_STAGES || index >= PIPE_MAX_CONSTANT_BUFFERS)
       return;
    dst = &ctx->cb[shader][index];
    util_copy_constant_buffer(dst, cb);
+
+   /* tick151: eager pass18 CB bind when resource has GPU VA (draw path also
+    * re-emits via nvgpu_emit_all_cbs_pass18 for full multi-slot state). */
+   if (!cb || !cb->buffer || !ctx->channel)
+      return;
+   res = nvgpu_resource(cb->buffer);
+   addr = (res ? res->gpu_offset : 0) + cb->buffer_offset;
+   sz = cb->buffer_size;
+   if (!sz && res)
+      sz = (uint32_t)res->b.b.width0;
+   if (!addr || !sz)
+      return;
+   bind_group = nvgpu_shader_bind_group(shader);
+   if (!nvgpu_push_start(ctx, &push, 32))
+      return;
+   nv_3d_emit_g3_cb_bind_group_pass18(&push, (sz + 255u) & ~255u, addr,
+                                      bind_group, index, true);
+   nvgpu_push_finish(ctx, &push, false);
 }
 
 #define NVGPU_BIND_STATE(name, field) \
@@ -852,23 +878,90 @@ nvgpu_emit_host_sema_release(struct nvgpu_context *ctx, struct nv_push *push,
                                               mode, emit_pref);
 }
 
+/* tick151: stage → NVC597 bind_group (VS/FS/GS primary; others as VS). */
+static unsigned
+nvgpu_shader_bind_group(mesa_shader_stage stage)
+{
+   switch (stage) {
+   case MESA_SHADER_FRAGMENT:
+      return NV_3D_PUSH_CONST_BIND_GROUP_FS;
+   case MESA_SHADER_GEOMETRY:
+      return NV_3D_BIND_GROUP_GEOMETRY;
+   case MESA_SHADER_TESS_CTRL:
+      return NV_3D_BIND_GROUP_TESSELLATION_INIT;
+   case MESA_SHADER_TESS_EVAL:
+      return NV_3D_BIND_GROUP_TESSELLATION;
+   case MESA_SHADER_VERTEX:
+   default:
+      return NV_3D_PUSH_CONST_BIND_GROUP_VS;
+   }
+}
+
+/* Bind one constant buffer slot via pass18 selector+bind_group (NVC597 0x238x/0x2410). */
+static void
+nvgpu_emit_cb_slot(struct nvgpu_context *ctx, struct nv_push *push,
+                   mesa_shader_stage stage, unsigned index,
+                   unsigned bind_group, bool inv_const)
+{
+   struct pipe_constant_buffer *pcb;
+   struct nvgpu_resource *res;
+   uint64_t addr;
+   uint32_t sz;
+
+   if (!ctx || !push || stage >= NVGPU_SHADER_STAGES ||
+       index >= PIPE_MAX_CONSTANT_BUFFERS)
+      return;
+   pcb = &ctx->cb[stage][index];
+   if (!pcb->buffer)
+      return;
+   res = nvgpu_resource(pcb->buffer);
+   addr = (res ? res->gpu_offset : 0) + pcb->buffer_offset;
+   sz = pcb->buffer_size;
+   if (!sz && res)
+      sz = (uint32_t)res->b.b.width0;
+   if (!addr || !sz)
+      return;
+   /* tick151 / pass18: class-correct CB selector + bind (not imm-family 0x1280) */
+   nv_3d_emit_g3_cb_bind_group_pass18(push, (sz + 255u) & ~255u, addr,
+                                      bind_group, index, inv_const);
+}
+
 /* Bind CB0 for a shader stage if present. */
 static void
 nvgpu_emit_cb0(struct nvgpu_context *ctx, struct nv_push *push,
                mesa_shader_stage stage, unsigned bind_group)
 {
-   if (!ctx->cb[stage][0].buffer)
+   nvgpu_emit_cb_slot(ctx, push, stage, 0, bind_group, false);
+}
+
+/* tick151: emit all non-empty CB slots for VS/FS/GS (pass18 bind per slot). */
+static void
+nvgpu_emit_all_cbs_pass18(struct nvgpu_context *ctx, struct nv_push *push,
+                          bool inv_const_once)
+{
+   static const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_GEOMETRY,
+      MESA_SHADER_TESS_CTRL, MESA_SHADER_TESS_EVAL,
+   };
+   unsigned si, idx;
+   bool any = false;
+
+   if (!ctx || !push)
       return;
-   struct nvgpu_resource *res = nvgpu_resource(ctx->cb[stage][0].buffer);
-   uint64_t addr = (res ? res->gpu_offset : 0) + ctx->cb[stage][0].buffer_offset;
-   uint32_t sz = ctx->cb[stage][0].buffer_size;
-   if (!sz && res)
-      sz = (uint32_t)res->b.b.width0;
-   if (sz) {
-      /* tick142: unified select+bind (matches Vulkan t141 helper) */
-      nv_3d_select_and_bind_push_constants(push, addr, (sz + 255u) & ~255u,
-                                           bind_group, 0);
+   for (si = 0; si < ARRAY_SIZE(stages); si++) {
+      mesa_shader_stage st = stages[si];
+      unsigned bg = nvgpu_shader_bind_group(st);
+      if (st >= NVGPU_SHADER_STAGES)
+         continue;
+      for (idx = 0; idx < PIPE_MAX_CONSTANT_BUFFERS; idx++) {
+         if (!ctx->cb[st][idx].buffer)
+            continue;
+         nvgpu_emit_cb_slot(ctx, push, st, idx, bg, false);
+         any = true;
+      }
    }
+   if (any && inv_const_once)
+      nv_3d_invalidate_shader_caches(push, false, false, true);
 }
 
 /* Ensure indirect shadow BO exists for GPU-only indirect buffers (path B). */
@@ -959,15 +1052,11 @@ nvgpu_emit_shaders(struct nvgpu_context *ctx, struct nv_push *push)
    if (fs && fs->nvsh && fs->nvsh->uploaded)
       nv_shader_emit_bind(push, fs->nvsh, region_once ? region : 0, -1);
 
-   /* Application constant buffers: CB0 per active stage */
-   nvgpu_emit_cb0(ctx, push, MESA_SHADER_VERTEX, NV_3D_BIND_GROUP_VERTEX);
-   if (tcs)
-      nvgpu_emit_cb0(ctx, push, MESA_SHADER_TESS_CTRL, NV_3D_BIND_GROUP_VERTEX);
-   if (tes)
-      nvgpu_emit_cb0(ctx, push, MESA_SHADER_TESS_EVAL, NV_3D_BIND_GROUP_VERTEX);
-   if (gs)
-      nvgpu_emit_cb0(ctx, push, MESA_SHADER_GEOMETRY, NV_3D_BIND_GROUP_VERTEX);
-   nvgpu_emit_cb0(ctx, push, MESA_SHADER_FRAGMENT, NV_3D_BIND_GROUP_PIXEL);
+   /* tick151: all non-empty CB slots via pass18 NVC597 selector+bind + const inv */
+   (void)tcs;
+   (void)tes;
+   (void)gs;
+   nvgpu_emit_all_cbs_pass18(ctx, push, true);
 }
 
 static void
@@ -2101,11 +2190,19 @@ nvgpu_begin_query(struct pipe_context *pctx, struct pipe_query *pq)
    if (q->type == PIPE_QUERY_OCCLUSION_COUNTER ||
        q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
        q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE) {
-      if (!nvgpu_push_start(ctx, &push, 16))
+      if (!nvgpu_push_start(ctx, &push, 24))
          return false;
-      nv_3d_set_zpass_pixel_count(&push, true);
+      /* tick151 / pass19: inv const + enable zpass counter */
+      nv_3d_emit_g3_query_begin_occlusion_pass19(&push, true);
       nvgpu_push_finish(ctx, &push, false);
       ctx->active_occlusion = pq;
+   } else if (q->type == PIPE_QUERY_TIME_ELAPSED) {
+      /* Store begin timestamp in second 16B of query BO (slot+16) */
+      if (q->gpu_addr && nvgpu_push_start(ctx, &push, 24)) {
+         nv_3d_emit_g3_query_end_report_pass19(&push, q->gpu_addr + 16, 0,
+                                               false, false, true);
+         nvgpu_push_finish(ctx, &push, false);
+      }
    }
    return true;
 }
@@ -2125,16 +2222,22 @@ nvgpu_end_query(struct pipe_context *pctx, struct pipe_query *pq)
             q->type == PIPE_QUERY_OCCLUSION_PREDICATE ||
             q->type == PIPE_QUERY_OCCLUSION_PREDICATE_CONSERVATIVE);
 
-   if (!nvgpu_push_start(ctx, &push, 32))
+   if (!nvgpu_push_start(ctx, &push, 48))
       return false;
    if (zpass) {
-      nv_3d_report_query_release(&push, q->gpu_addr, 1, true, false);
+      /* tick151 / pass19: WFI + report sema A–D with zpass pixel cnt */
+      nv_3d_emit_g3_query_end_report_pass19(&push, q->gpu_addr, 1, true, false,
+                                            true);
       nv_3d_set_zpass_pixel_count(&push, false);
       if (ctx->active_occlusion == pq)
          ctx->active_occlusion = NULL;
+   } else if (q->type == PIPE_QUERY_GPU_FINISHED) {
+      /* One-word completion payload (matches pass18 report sema ladder) */
+      nv_3d_emit_g3_report_sema_pass18(&push, q->gpu_addr, 1, true, true);
    } else {
-      /* timestamp / gpu_finished: non-zpass report release */
-      nv_3d_report_query_release(&push, q->gpu_addr, 1, false, false);
+      /* timestamp / time_elapsed end: 4-word structure at query slot */
+      nv_3d_emit_g3_query_end_report_pass19(&push, q->gpu_addr, 1, false, false,
+                                            true);
    }
    nvgpu_push_finish(ctx, &push, true);
 
