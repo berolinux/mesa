@@ -3723,7 +3723,7 @@ nv_channel_g3_draw_rt_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      for (pass = 0; pass < 4; pass++) {
+      for (pass = 0; pass < 5; pass++) {
          if (sema_reset && sema_cpu)
             sema_cpu[0] = 0;
 
@@ -3748,6 +3748,12 @@ nv_channel_g3_draw_rt_sema_submit(struct nv_channel *ch,
                &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c, zt_gpu_addr,
                ct_w, ct_h, zt_format, 0, false, sema_gpu_addr, sema_payload,
                true);
+         else if (pass == 3)
+            /* tick129: shader-path smoke (viewport/clip + VS/PS bind if prog set) */
+            nv_3d_emit_g3_shader_draw_sema(
+               &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c,
+               0, 0, 0, 0, 0, vb_gpu_addr, vb_size_bytes,
+               sema_gpu_addr, sema_payload, true);
          else
             nv_3d_emit_g3_sema_only_wfi_bracket(&push, c3, sema_gpu_addr,
                                                 sema_payload);

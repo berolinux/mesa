@@ -1439,6 +1439,38 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       (void)saw_mme_ptr;
    }
 
+   /* tick129: host sema ladder fill (pass8-10 default order + preferred first) */
+   {
+      enum nv_host_sema_mode ladder[NV_HOST_SEMA_MODE_COUNT];
+      unsigned nl, il;
+      bool has_blob = false, has_vdpau = false;
+
+      nl = nv_host_sema_ladder_fill(ladder, -1);
+      if (nl != NV_HOST_SEMA_MODE_COUNT)
+         return -417;
+      if (ladder[0] != NV_HOST_SEMA_MODE_BLOB_ALIGN4)
+         return -418;
+      if (ladder[1] != NV_HOST_SEMA_MODE_BLOB_SHIFT2)
+         return -419;
+
+      nl = nv_host_sema_ladder_fill(ladder, (int)NV_HOST_SEMA_MODE_VDPAU_ALIGN4);
+      if (nl != NV_HOST_SEMA_MODE_COUNT)
+         return -420;
+      if (ladder[0] != NV_HOST_SEMA_MODE_VDPAU_ALIGN4)
+         return -421;
+      for (il = 0; il < nl; il++) {
+         if (ladder[il] == NV_HOST_SEMA_MODE_BLOB_ALIGN4)
+            has_blob = true;
+         if (ladder[il] == NV_HOST_SEMA_MODE_VDPAU_SHIFT2)
+            has_vdpau = true;
+      }
+      if (!has_blob || !has_vdpau)
+         return -422;
+      if (!nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB_ALIGN4) ||
+          nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB_ALIGN4)[0] == '\0')
+         return -423;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

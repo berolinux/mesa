@@ -84,6 +84,61 @@ enum nv_host_sema_mode {
    NV_HOST_SEMA_MODE_COUNT        = 6,
 };
 
+/**
+ * tick129 / pass8-10: default bring-up order for host sema modes.
+ * Prefer blob 0x1001 (glcore/vksc) then vdpau 0x2, then open-header modes.
+ * If preferred_mode is in range, it is tried first (cached channel win).
+ * Writes up to NV_HOST_SEMA_MODE_COUNT modes into out[]; returns count.
+ */
+static inline unsigned
+nv_host_sema_ladder_fill(enum nv_host_sema_mode out[NV_HOST_SEMA_MODE_COUNT],
+                         int preferred_mode)
+{
+   static const enum nv_host_sema_mode k_default[NV_HOST_SEMA_MODE_COUNT] = {
+      NV_HOST_SEMA_MODE_BLOB_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+      NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
+      NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
+      NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+      NV_HOST_SEMA_MODE_OPEN_SHIFT2,
+   };
+   unsigned n = 0, i;
+   bool seen[NV_HOST_SEMA_MODE_COUNT];
+
+   if (!out)
+      return 0;
+   for (i = 0; i < NV_HOST_SEMA_MODE_COUNT; i++)
+      seen[i] = false;
+
+   if (preferred_mode >= 0 && preferred_mode < (int)NV_HOST_SEMA_MODE_COUNT) {
+      out[n++] = (enum nv_host_sema_mode)preferred_mode;
+      seen[preferred_mode] = true;
+   }
+   for (i = 0; i < NV_HOST_SEMA_MODE_COUNT; i++) {
+      enum nv_host_sema_mode m = k_default[i];
+      if (seen[m])
+         continue;
+      out[n++] = m;
+      seen[m] = true;
+   }
+   return n;
+}
+
+/** Human-readable sema mode name for logs / smoke_hw. */
+static inline const char *
+nv_host_sema_mode_name(enum nv_host_sema_mode mode)
+{
+   switch (mode) {
+   case NV_HOST_SEMA_MODE_OPEN_SHIFT2:  return "open_shift2";
+   case NV_HOST_SEMA_MODE_OPEN_ALIGN4:  return "open_align4";
+   case NV_HOST_SEMA_MODE_BLOB_SHIFT2:  return "blob_shift2_0x1001";
+   case NV_HOST_SEMA_MODE_BLOB_ALIGN4:  return "blob_align4_0x1001";
+   case NV_HOST_SEMA_MODE_VDPAU_SHIFT2: return "vdpau_shift2_0x2";
+   case NV_HOST_SEMA_MODE_VDPAU_ALIGN4: return "vdpau_align4_0x2";
+   default: return "unknown";
+   }
+}
+
 /* GPFIFO entry (NV506F/NVC36F) */
 #define NV_GP_ENTRY_SIZE               8
 #define NV_GP_ENTRY0_GET_SHIFT         2
