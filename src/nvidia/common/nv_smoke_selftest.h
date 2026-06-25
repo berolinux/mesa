@@ -2284,6 +2284,83 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -544;
    }
 
+   /* tick142 / pass15: GPFIFO/NVDEC/NVENC ladders; sema 0802→A slot; NVENC pick */
+   {
+      uint32_t gpf_lad[24], nvdec_lad[24], nvenc_lad[24];
+      unsigned gpf_n = 24, nvdec_n = 24, nvenc_n = 24, ni;
+      bool saw_ca6f = false, saw_c56f = false, saw_b8b0 = false;
+      bool saw_d1b7 = false, saw_cfb7 = false;
+      bool saw_exec_a = false;
+      struct nv_push p2;
+      uint32_t g2buf[64], n2, ii;
+      enum nv_host_sema_mode m0802 = NV_HOST_SEMA_MODE_BLOB0802_ALIGN4;
+
+      nv_device_info_fill_class_ladder(5 /* gpfifo */, 0, gpf_lad, &gpf_n);
+      if (gpf_n < 8)
+         return -545;
+      /* pass15: head is CA6F; C56F appears before synthetic C86F/C76F alts */
+      if (gpf_lad[0] != 0x0000ca6fu)
+         return -546;
+      for (ni = 0; ni < gpf_n; ni++) {
+         if (gpf_lad[ni] == 0x0000ca6fu)
+            saw_ca6f = true;
+         if (gpf_lad[ni] == 0x0000c56fu)
+            saw_c56f = true;
+      }
+      if (!saw_ca6f || !saw_c56f)
+         return -547;
+
+      nv_device_info_fill_class_ladder(3 /* nvdec */, 0, nvdec_lad, &nvdec_n);
+      if (nvdec_n < 8 || nvdec_lad[0] != 0x0000d1b0u)
+         return -548;
+      for (ni = 0; ni < nvdec_n && ni < 10; ni++) {
+         if (nvdec_lad[ni] == 0x0000b8b0u)
+            saw_b8b0 = true;
+      }
+      /* B8B0 should appear early (pass15 rodata order near C9B0/C7B0) */
+      if (!saw_b8b0)
+         return -549;
+
+      nv_device_info_fill_class_ladder(4 /* nvenc */, 0, nvenc_lad, &nvenc_n);
+      if (nvenc_n < 6 || nvenc_lad[0] != 0x0000d1b7u)
+         return -550;
+      for (ni = 0; ni < nvenc_n; ni++) {
+         if (nvenc_lad[ni] == 0x0000d1b7u)
+            saw_d1b7 = true;
+         if (nvenc_lad[ni] == 0x0000cfb7u)
+            saw_cfb7 = true;
+      }
+      if (!saw_d1b7 || !saw_cfb7)
+         return -551;
+      if (nv_video_pick_nvenc_class(0x9a) != NV_VIDEO_CLASS_NVENC_D1B7)
+         return -552;
+      if (nv_video_pick_nvenc_class(0x95) != NV_VIDEO_CLASS_NVENC_CFB7)
+         return -553;
+      if (nv_video_pick_nvenc_class(0x92) != NV_VIDEO_CLASS_NVENC_CEB7)
+         return -554;
+
+      /* pass15 table: 0x0802 executes on SEMAPHOREA (slot A), not only D */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_host_semaphore_release_wfi_mode_ex(&p2, 0xa00000ull, 7u, false,
+                                                 m0802, 0 /* auto/slot */);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 6)
+         return -555;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         uint32_t imm = g2buf[ii + 1];
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREA &&
+             imm == NVC36F_SEMAPHORED_RELEASE_BLOB_0802)
+            saw_exec_a = true;
+      }
+      if (!saw_exec_a)
+         return -556;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

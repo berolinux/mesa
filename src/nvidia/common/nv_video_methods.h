@@ -56,6 +56,10 @@ extern "C" {
 #define NV_VIDEO_CLASS_NVENC_C9B7        0x0000C9B7
 #define NV_VIDEO_CLASS_NVENC_C8B7        0x0000C8B7
 #define NV_VIDEO_CLASS_NVENC_C7B7        0x0000C7B7
+/* pass15 glcore @ 0x1238ba0: newer NVENC *B7 ladder head */
+#define NV_VIDEO_CLASS_NVENC_D1B7        0x0000D1B7
+#define NV_VIDEO_CLASS_NVENC_CFB7        0x0000CFB7
+#define NV_VIDEO_CLASS_NVENC_CEB7        0x0000CEB7
 
 #define NV_NVDEC_SET_OBJECT              0x0000
 #define NV_NVDEC_NOP                     0x0100
@@ -134,6 +138,13 @@ nv_video_pick_nvdec_class(uint8_t sm_version)
 static inline uint32_t
 nv_video_pick_nvenc_class(uint8_t sm_version)
 {
+   /* pass15 rodata prefers D1B7/CFB7/CEB7 before C9B7; RmAlloc tries ladder alts */
+   if (sm_version >= 0x9a)
+      return NV_VIDEO_CLASS_NVENC_D1B7;
+   if (sm_version >= 0x95)
+      return NV_VIDEO_CLASS_NVENC_CFB7;
+   if (sm_version >= 0x92)
+      return NV_VIDEO_CLASS_NVENC_CEB7;
    if (sm_version >= 0x90)
       return NV_VIDEO_CLASS_NVENC_C9B7;
    if (sm_version >= 0x80)

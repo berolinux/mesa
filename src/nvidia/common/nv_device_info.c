@@ -17,9 +17,9 @@
  *   DMA:    CAB5 C9B5 C8B5 C7B5 C6B5 C5B5 C3B5 C1B5 C0B5 B0B5
  *   COMP:   CEC0 CDC0 CBC0 C9C0 C7C0 C6C0 C5C0 C3C0 C1C0 C0C0 B1C0 B0C0
  *   3D:     CE97 CD97 CB97 C997 C797 C697 C597 C397 C197 C097 B197 B097
- *   GPFIFO: CA6F C96F C56F C46F C36F C06F B06F A06F A26F 906F 506F
- *   NVENC:  D1B7 CFB7 CEB7 C9B7 C8B7 C7B7 (B6B7 B4B7 C5B7 C4B7 side table)
- *   NVDEC:  C9B0..C4B0 (+ B8B0 in NVENC side table; CBB0/CAB0 in global hit map)
+ *   GPFIFO: CA6F C96F C56F C46F C36F C06F B06F A06F A26F 906F @ 0x1238b60 (pass15)
+ *   NVENC:  C5B7 C4B7 B4B7 B6B7 C7B7 C8B7 C9B7 CEB7 CFB7 D1B7 @ 0x1238ba0
+ *   NVDEC:  C4B0 C6B0 C7B0 B8B0 C9B0 CDB0 CEB0 CFB0 D1B0 @ 0x1238be0 (pass15)
  */
 #define KEPLER_A_COMPUTE_A          0x0000a0c0
 #define MAXWELL_COMPUTE_A           0x0000b0c0
@@ -388,24 +388,26 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
       0x0000c497u, 0x0000c397u, 0x0000c197u, 0x0000c097u, 0x0000b197u,
       0x0000b097u,
    };
-   /* pass11 glcore @ 0x1238b70: CA6F C96F C56F..506F; cuda alt C86F; pass9 C66F/C36E */
+   /* pass15 glcore @ 0x1238b60: CA6F C96F C56F C46F C36F C06F B06F A06F A26F 906F
+    * (pass13/14 listed mid-ladder at 0x1238b70; + cuda/pass9 C86F/C76F/C66F/C36E alts) */
    static const uint32_t ladder_gpfifo[] = {
-      0x0000ca6fu, 0x0000c96fu, 0x0000c86fu, 0x0000c76fu, 0x0000c66fu,
-      0x0000c56fu, 0x0000c46fu, 0x0000c36fu, 0x0000c36eu, 0x0000c06fu,
-      0x0000b06fu, 0x0000a26fu, 0x0000a16fu, 0x0000a06fu, 0x0000906fu,
+      0x0000ca6fu, 0x0000c96fu, 0x0000c56fu, 0x0000c46fu, 0x0000c36fu,
+      0x0000c06fu, 0x0000b06fu, 0x0000a26fu, 0x0000a06fu, 0x0000906fu,
+      0x0000c86fu, 0x0000c76fu, 0x0000c66fu, 0x0000c36eu, 0x0000a16fu,
    };
-   /* pass14 glcore @ 0x1238bf0: D1B0 CFB0 CEB0 CDB0 C9B0..; pass11 alts CBB0/CAB0/B8B0 */
+   /* pass15 glcore @ 0x1238be0 rodata order: C4B0 C6B0 C7B0 B8B0 C9B0 CDB0 CEB0 CFB0 D1B0
+    * mesa tries newest-first; B8B0 kept early (between C9/C7 in rodata, not monotonic) */
    static const uint32_t ladder_nvdec[] = {
-      0x0000d1b0u, 0x0000cfb0u, 0x0000ceb0u, 0x0000cdb0u, 0x0000cbb0u,
-      0x0000cab0u, 0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u, 0x0000c6b0u,
-      0x0000c5b0u, 0x0000c4b0u, 0x0000c3b0u, 0x0000c2b0u, 0x0000c1b0u,
-      0x0000c0b0u, 0x0000b8b0u, 0x0000b6b0u, 0x0000b0b0u, 0x0000a0b0u,
+      0x0000d1b0u, 0x0000cfb0u, 0x0000ceb0u, 0x0000cdb0u, 0x0000c9b0u,
+      0x0000b8b0u, 0x0000c7b0u, 0x0000c6b0u, 0x0000c4b0u, 0x0000cbb0u,
+      0x0000cab0u, 0x0000c8b0u, 0x0000c5b0u, 0x0000c3b0u, 0x0000c2b0u,
+      0x0000c1b0u, 0x0000c0b0u, 0x0000b6b0u, 0x0000b0b0u, 0x0000a0b0u,
    };
-   /* pass11 glcore @ 0x1238bb4: D1B7 CFB7 CEB7 C9B7 C8B7 C7B7 + C5B7 C4B7 B6B7 B4B7 */
+   /* pass15 glcore @ 0x1238ba0: C5B7 C4B7 B4B7 B6B7 C7B7 C8B7 C9B7 CEB7 CFB7 D1B7 */
    static const uint32_t ladder_nvenc[] = {
       0x0000d1b7u, 0x0000cfb7u, 0x0000ceb7u, 0x0000c9b7u, 0x0000c8b7u,
-      0x0000c7b7u, 0x0000c6b7u, 0x0000c5b7u, 0x0000c4b7u, 0x0000c1b7u,
-      0x0000c0b7u, 0x0000b6b7u, 0x0000b4b7u,
+      0x0000c7b7u, 0x0000c5b7u, 0x0000c4b7u, 0x0000b6b7u, 0x0000b4b7u,
+      0x0000c6b7u, 0x0000c1b7u, 0x0000c0b7u,
    };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;

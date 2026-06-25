@@ -832,6 +832,28 @@ nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
       nv_tex_invalidate_caches(push);
 }
 
+/* tick142 / pass14/15: host sema on GPFIFO subch using channel emit_pref (slot/classic/auto). */
+static void
+nvgpu_emit_host_sema_release(struct nvgpu_context *ctx, struct nv_push *push,
+                             uint64_t sema_gpu, uint32_t payload, bool wfi_after)
+{
+   enum nv_host_sema_mode mode = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
+   int emit_pref = 0;
+
+   if (!push || !sema_gpu)
+      return;
+   if (ctx && ctx->channel) {
+      if (ctx->channel->host_sema_mode_pref >= 0 &&
+          ctx->channel->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+         mode = (enum nv_host_sema_mode)ctx->channel->host_sema_mode_pref;
+      if (ctx->channel->host_sema_emit_pref >= 0 &&
+          ctx->channel->host_sema_emit_pref <= 2)
+         emit_pref = ctx->channel->host_sema_emit_pref;
+   }
+   nv_push_host_semaphore_release_wfi_mode_ex(push, sema_gpu, payload, wfi_after,
+                                              mode, emit_pref);
+}
+
 /* Bind CB0 for a shader stage if present. */
 static void
 nvgpu_emit_cb0(struct nvgpu_context *ctx, struct nv_push *push,
@@ -845,8 +867,9 @@ nvgpu_emit_cb0(struct nvgpu_context *ctx, struct nv_push *push,
    if (!sz && res)
       sz = (uint32_t)res->b.b.width0;
    if (sz) {
-      nv_3d_set_constant_buffer_selector(push, (sz + 255u) & ~255u, addr);
-      nv_3d_bind_group_constant_buffer(push, bind_group, 0, true);
+      /* tick142: unified select+bind (matches Vulkan t141 helper) */
+      nv_3d_select_and_bind_push_constants(push, addr, (sz + 255u) & ~255u,
+                                           bind_group, 0);
    }
 }
 
@@ -1027,6 +1050,10 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
       uint32_t payload = nv_fence_alloc_seq(ctx->fence);
       nv_3d_report_semaphore_release(&push, ctx->fence->sema_gpu_addr,
                                      payload, true);
+      /* tick142: also host/GPFIFO sema with channel slot/classic policy (pass15 ngrams) */
+      if (ctx->channel)
+         nvgpu_emit_host_sema_release(ctx, &push, ctx->fence->sema_gpu_addr,
+                                      payload, false);
       ctx->last_fence_seq = payload;
    }
    nv_push_wfi(&push);
@@ -1193,6 +1220,10 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             uint32_t payload = nv_fence_alloc_seq(ctx->fence);
             nv_3d_report_semaphore_release(&push, ctx->fence->sema_gpu_addr,
                                            payload, true);
+            /* tick142: host sema ladder parity with channel (pass15 SEMA_A/WFI idioms) */
+            if (ctx->channel)
+               nvgpu_emit_host_sema_release(ctx, &push, ctx->fence->sema_gpu_addr,
+                                            payload, false);
             ctx->last_fence_seq = payload;
          }
       }
