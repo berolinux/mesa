@@ -164,6 +164,48 @@ nv_sph_build_compute_exit_only(struct nv_sph_blob *blob, uint16_t regs)
 }
 
 /**
+ * tick137: compute MOV R0, imm + EXIT smoke (aligns with pass12/gpucomp
+ * 0x5c98/0x7918 signatures via approximate MOV32I + EXIT encoding).
+ * Non-trivial SASS stream without global store — useful bind/trace target
+ * when store_imm target VA is unavailable.
+ */
+static inline void
+nv_sph_build_compute_mov_imm_exit(struct nv_sph_blob *blob, uint32_t imm_value,
+                                  uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   info.does_global_store = false;
+   info.barrier_count = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+#define NV_SPH_SASS_MOV32I_HI(rd)  (0x01000000u | ((uint32_t)(rd) & 0xffu))
+   s[n++] = imm_value;
+   s[n++] = NV_SPH_SASS_MOV32I_HI(0);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_SASS_MOV32I_HI
+
+   blob->sass_dwords = n;
+   code_off = NV_SPH_BYTES;
+   total = code_off + n * 4u;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+   (void)code_off;
+}
+
+/**
  * tick121: minimal graphics stage smoke — correct SPH type + EXIT only.
  * Used when NIR/SASS is unavailable so bind/draw still has a valid program
  * object (HW may still fault on shader I/O; fixed-func path remains preferred

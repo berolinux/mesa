@@ -825,6 +825,24 @@ nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
                                          bool check_notifier,
                                          uint32_t *class_used_out);
 
+/**
+ * tick137: NVDEC smoke slice submit (nv_nvdec_emit_smoke_slice).
+ * Tries NVDEC class ladder (CBB0..C8B0..); sets class_nvdec_bound on success.
+ * pic may be NULL only if caller provides a temporary on-stack setup via
+ * pic_setup_gpu (then uses h264 smoke pic init).
+ */
+int
+nv_channel_nvdec_smoke_slice_submit(struct nv_channel *ch,
+                                    uint32_t class_nvdec,
+                                    const struct nv_nvdec_pic_setup *pic,
+                                    uint64_t sema_gpu_addr,
+                                    volatile uint32_t *sema_cpu,
+                                    uint32_t sema_payload,
+                                    bool sema_reset,
+                                    uint64_t wait_timeout_ns,
+                                    bool check_notifier,
+                                    uint32_t *class_used_out);
+
 #ifdef __cplusplus
 }
 #endif

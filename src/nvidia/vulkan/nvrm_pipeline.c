@@ -1720,6 +1720,9 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
    if (!cmd->channel_init_done) {
       bool mme_ok = nv_3d_emit_channel_init_with_mme(&cmd->push, 5, 3, 5, 3);
       cmd->mme_ram_primed = mme_ok;
+      /* tick137 / pass12: SPA+inv+WFI; path C CALL only if non-stub MME ready */
+      nv_3d_emit_g3_channel_prep(&cmd->push, class_3d, 5, 3, false);
+      (void)nv_mme_emit_path_c_calls_if_ready(&cmd->push);
       /* Do not set device->mme_indirect_uploaded: that flag means path C ready
        * with non-stub microcode; RAM prime alone is insufficient. */
       cmd->channel_init_done = true;
@@ -2016,6 +2019,9 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (!cmd->channel_init_done) {
       bool mme_ok = nv_3d_emit_channel_init_with_mme(&cmd->push, 5, 3, 5, 3);
       cmd->mme_ram_primed = mme_ok;
+      /* tick137: align with pipeline bind path — G3 channel_prep + path C gate */
+      nv_3d_emit_g3_channel_prep(&cmd->push, class_3d, 5, 3, false);
+      (void)nv_mme_emit_path_c_calls_if_ready(&cmd->push);
       cmd->channel_init_done = true;
    }
 

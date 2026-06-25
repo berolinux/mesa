@@ -636,6 +636,8 @@ nvgpu_ensure_3d_init(struct nvgpu_context *ctx, struct nv_push *push)
       /* tick136 / pass12: SPA + inv + WFI after MME prime (complements channel_init) */
       nv_3d_emit_g3_channel_prep(push, class_3d, (uint8_t)spa_maj,
                                  (uint8_t)spa_min, false /* MME already above */);
+      /* tick137: path C CALL only if non-stub (always 0 until real MME ISA) */
+      (void)nv_mme_emit_path_c_calls_if_ready(push);
       ctx->channel_init_emitted = true;
    }
 

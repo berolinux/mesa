@@ -733,6 +733,61 @@ nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
    return true;
 }
 
+/**
+ * tick137: path C gate — CALL_MME_MACRO only when program is *not* stub_end_only.
+ * Returns true if CALL was emitted (real microcode path); false if skipped
+ * (caller must use host path A/B/C' method emission instead).
+ * Until RE validates MME opcodes, all builders set is_stub_end_only=true so
+ * this always returns false — production draws/clears stay on host methods.
+ */
+static inline bool
+nv_mme_emit_call_macro_if_ready(struct nv_push *p,
+                                const struct nv_mme_program *prog,
+                                uint32_t data0)
+{
+   if (!p || !prog || prog->insn_count == 0)
+      return false;
+   if (prog->is_stub_end_only)
+      return false;
+   nv_mme_emit_call_macro_only(p, prog->slot, data0);
+   return true;
+}
+
+/**
+ * tick137: after RAM prime, optionally CALL clear/channel-init slots only if
+ * non-stub.  Returns count of CALLs emitted (0 while stubs remain).
+ * Host clear/draw remains authoritative when 0.
+ */
+static inline unsigned
+nv_mme_emit_path_c_calls_if_ready(struct nv_push *p)
+{
+   struct nv_mme_program clr, init;
+   unsigned n = 0;
+
+   if (!p)
+      return 0;
+   nv_mme_build_clear_helper_program_stub(&clr, 48);
+   nv_mme_build_channel_init_program_stub(&init, 64);
+   if (nv_mme_emit_call_macro_if_ready(p, &clr, 0))
+      n++;
+   if (nv_mme_emit_call_macro_if_ready(p, &init, 0))
+      n++;
+   return n;
+}
+
+/**
+ * tick137: upload full MME table then attempt path C CALLs (no-op while stubs).
+ * Returns true if any CALL was emitted (path C active); false = host-only.
+ */
+static inline bool
+nv_mme_emit_upload_and_path_c_try(struct nv_push *p)
+{
+   if (!p)
+      return false;
+   nv_mme_emit_upload_full_table_only(p);
+   return nv_mme_emit_path_c_calls_if_ready(p) > 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

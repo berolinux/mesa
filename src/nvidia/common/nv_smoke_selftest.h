@@ -1856,6 +1856,105 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -472;
    }
 
+   /* pass13 RE: sema rodata table execute modes 0x1004 / 0x0804 / 0x0802 */
+   {
+      enum nv_host_sema_mode ladder[NV_HOST_SEMA_MODE_COUNT];
+      unsigned nl, i, has_1004 = 0, has_0804 = 0, has_0802 = 0;
+      int pos_1001 = -1, pos_1002 = -1, pos_1004 = -1;
+
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0x1004u)
+         return -482;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB1004_SHIFT2) != 0x1004u)
+         return -483;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB0804_ALIGN4) != 0x0804u)
+         return -484;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB0802_SHIFT2) != 0x0802u)
+         return -485;
+      if (!nv_host_sema_mode_uses_shift2(NV_HOST_SEMA_MODE_BLOB1004_SHIFT2))
+         return -486;
+      if (nv_host_sema_mode_uses_shift2(NV_HOST_SEMA_MODE_BLOB1004_ALIGN4))
+         return -487;
+      if (!nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) ||
+          nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB1004_ALIGN4)[0] == '\0')
+         return -488;
+
+      nl = nv_host_sema_ladder_fill(ladder, -1);
+      if (nl != NV_HOST_SEMA_MODE_COUNT || nl < 16)
+         return -489;
+      for (i = 0; i < nl; i++) {
+         uint32_t ex = nv_host_sema_execute(ladder[i]);
+         if (ex == 0x1001u && pos_1001 < 0)
+            pos_1001 = (int)i;
+         if (ex == 0x1002u && pos_1002 < 0)
+            pos_1002 = (int)i;
+         if (ex == 0x1004u && pos_1004 < 0)
+            pos_1004 = (int)i;
+         if (ex == 0x1004u)
+            has_1004 = 1;
+         if (ex == 0x0804u)
+            has_0804 = 1;
+         if (ex == 0x0802u)
+            has_0802 = 1;
+      }
+      if (!has_1004 || !has_0804 || !has_0802)
+         return -490;
+      /* pass13 order: 0x1001 before 0x1002 before 0x1004 */
+      if (pos_1001 < 0 || pos_1002 < 0 || pos_1004 < 0 ||
+          pos_1001 > pos_1002 || pos_1002 > pos_1004)
+         return -491;
+      if (ladder[0] != NV_HOST_SEMA_MODE_BLOB_ALIGN4)
+         return -492;
+      if (ladder[2] != NV_HOST_SEMA_MODE_BLOB1002_ALIGN4)
+         return -493;
+      if (ladder[4] != NV_HOST_SEMA_MODE_BLOB1004_ALIGN4)
+         return -494;
+   }
+
+   /* tick137: MME path C gate + compute MOV-imm SPH + nvdec smoke emit shape */
+   {
+      struct nv_mme_program clr;
+      struct nv_sph_blob cb;
+      struct nv_push p2;
+      uint32_t pbuf[96], np, ii;
+      bool saw_dec = false;
+      struct nv_nvdec_pic_setup vpic;
+
+      nv_mme_build_clear_helper_program_stub(&clr, 48);
+      if (!clr.is_stub_end_only)
+         return -473; /* stubs must remain gated until real ISA */
+      memset(pbuf, 0, sizeof(pbuf));
+      nv_push_init(&p2, pbuf, (uint32_t)(sizeof(pbuf) / 4));
+      if (nv_mme_emit_call_macro_if_ready(&p2, &clr, 0))
+         return -474; /* must not CALL while stub */
+      if (nv_mme_emit_path_c_calls_if_ready(&p2) != 0)
+         return -475;
+      if (nv_mme_emit_upload_and_path_c_try(&p2))
+         return -476; /* upload ok but path C must still be false */
+
+      nv_sph_build_compute_mov_imm_exit(&cb, 0xcfu, 16);
+      if (nv_sph_smoke_validate_blob(&cb, NV_SPH_TYPE_COMPUTE) != 0)
+         return -477;
+      if (cb.sass_dwords < 4)
+         return -478;
+
+      nv_nvdec_pic_setup_init_h264_smoke(&vpic, 0x700000ull, 0x700000ull, 0);
+      memset(pbuf, 0, sizeof(pbuf));
+      nv_push_init(&p2, pbuf, (uint32_t)(sizeof(pbuf) / 4));
+      if (nv_nvdec_emit_smoke_slice(&p2, 0xc8b0u, &vpic, 0xe00000ull, 11u,
+                                    NULL) != 0)
+         return -479;
+      np = nv_push_dw_count(&p2);
+      if (np < 4)
+         return -480;
+      for (ii = 0; ii + 1 < np; ii++) {
+         uint32_t hdr = pbuf[ii];
+         if ((hdr >> 29) == 0)
+            saw_dec = true;
+      }
+      if (!saw_dec)
+         return -481;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

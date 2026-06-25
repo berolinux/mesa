@@ -354,8 +354,16 @@ nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
    sh->kind = NV_SHADER_KIND_COMPUTE;
    nv_shader_fill_stage_defaults(sh);
 
+   /*
+    * mode 0: EXIT only
+    * mode 1: store_imm at store_addr (requires non-zero store_addr)
+    * mode 2: MOV imm + EXIT (tick137; non-trivial without global store)
+    */
    if (mode == 1 && store_addr)
       nv_sph_build_compute_store_imm(&blob, store_imm, store_addr, (uint16_t)regs);
+   else if (mode == 2)
+      nv_sph_build_compute_mov_imm_exit(&blob, store_imm ? store_imm : 0xcfu,
+                                        (uint16_t)regs);
    else
       nv_sph_build_compute_exit_only(&blob, (uint16_t)regs);
 

@@ -1016,16 +1016,27 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
          nv_channel_notifier_reset(ch);
-         res.g4_nvdec_rc = nv_channel_nvdec_frame_sema_submit(
+         /* tick137: prefer pass12 nvdec smoke_slice; fall back to frame sema */
+         res.g4_nvdec_rc = nv_channel_nvdec_smoke_slice_submit(
             ch, 0, &vpic, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
-            true, to, check_notifier);
+            true, to, check_notifier, &dec_class);
+         if (res.g4_nvdec_rc != 0) {
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            nv_channel_notifier_reset(ch);
+            res.g4_nvdec_rc = nv_channel_nvdec_frame_sema_submit(
+               ch, 0, &vpic, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+               true, to, check_notifier);
+         }
          if (res.g4_nvdec_rc == 0) {
-            res.g4_class_nvdec = ch->class_nvdec_bound
-                                    ? ch->class_nvdec_bound
-                                    : nv_channel_resolve_class_nvdec(ch, 0);
+            if (dec_class)
+               res.g4_class_nvdec = dec_class;
+            else
+               res.g4_class_nvdec = ch->class_nvdec_bound
+                                       ? ch->class_nvdec_bound
+                                       : nv_channel_resolve_class_nvdec(ch, 0);
             res.g4_rc = 0;
          }
-         (void)dec_class;
       }
 
       if (sc->sema_gpu) {
