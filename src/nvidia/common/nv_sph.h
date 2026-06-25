@@ -1387,6 +1387,35 @@ nv_pass22_nir_depth_ladder_build_all(struct nv_pass21_compute_object *scratch,
    return 0;
 }
 
+/**
+ * tick164 / pass22: after a compute dispatch (inline QMD/PCAS or materialized),
+ * emit unified G0–G4 host sema tail when pass22 explicit-emit policy is active
+ * and host_sema_gpu is set.  No-op if policy off or sema VA zero.  Returns 0
+ * always (best-effort; does not fail the dispatch).
+ */
+static inline int
+nv_pass22_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
+                                               uint64_t host_sema_gpu,
+                                               uint32_t host_sema_payload,
+                                               enum nv_host_sema_mode host_sema_mode,
+                                               bool pre_wfi)
+{
+   if (!p || !host_sema_gpu)
+      return 0;
+   if (!nv_pass22_explicit_emit_required())
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, pre_wfi, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u,
+      host_sema_mode);
+}
+
+/**
+ * tick164: Gallium/Vulkan compute path marker — pass22 policy applies to
+ * channel G2 program launch (tick163) and optional post-dispatch host sema.
+ */
+#define NV_PASS22_GALLIUM_VULKAN_DISPATCH_TAIL  1
+
 #ifdef __cplusplus
 }
 #endif

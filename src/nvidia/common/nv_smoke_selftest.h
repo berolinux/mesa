@@ -3971,6 +3971,43 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* tick164: Gallium/Vulkan pass22 dispatch host sema tail helper */
+   {
+      struct nv_push p164;
+      uint32_t b164[128];
+      uint32_t n0, n1;
+
+      if (!NV_PASS22_GALLIUM_VULKAN_DISPATCH_TAIL)
+         return -797;
+      memset(b164, 0, sizeof(b164));
+      nv_push_init(&p164, b164, (uint32_t)(sizeof(b164) / 4));
+      n0 = nv_push_dw_count(&p164);
+      if (nv_pass22_emit_compute_dispatch_host_sema_tail(
+             &p164, 0, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE, false) != 0)
+         return -798;
+      if (nv_push_dw_count(&p164) != n0)
+         return -799; /* zero sema VA = no-op */
+      if (nv_pass22_emit_compute_dispatch_host_sema_tail(
+             &p164, 0x440000ull, 0x99u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+             false) != 0)
+         return -800;
+      n1 = nv_push_dw_count(&p164);
+      if (n1 <= n0)
+         return -801; /* must emit host sema when policy + VA set */
+      /* inline QMD launch then pass22 tail (Gallium/Vulkan shape) */
+      {
+         uint32_t q164[NV_QMD_DWORDS];
+         memset(q164, 0, sizeof(q164));
+         q164[0] = 1u;
+         nv_compute_emit_inline_qmd_launch(&p164, 0x930000ull, q164, false);
+         n0 = nv_push_dw_count(&p164);
+         nv_pass22_emit_compute_dispatch_host_sema_tail(
+            &p164, 0x450000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
+         if (nv_push_dw_count(&p164) <= n0)
+            return -802;
+      }
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

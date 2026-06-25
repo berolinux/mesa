@@ -1942,6 +1942,10 @@ nvgpu_launch_grid(struct pipe_context *pctx,
             nv_push_set_subch(&push, NV_PUSH_SUBCH_COMPUTE);
          nv_compute_emit_invalidate_caches(&push);
          nv_compute_emit_inline_qmd_launch(&push, qmd_addr, qmd_tmp, true);
+         /* tick164 / pass22: explicit host sema tail after INLINE/PCAS (policy) */
+         if (sema_a)
+            nv_pass22_emit_compute_dispatch_host_sema_tail(
+               &push, sema_a, sema_v, NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
       } else {
          nv_compute_emit_dispatch_with_sema(&push, &desc, 0, NULL,
                                             class_compute, sema_a, sema_v,
@@ -1953,10 +1957,18 @@ nvgpu_launch_grid(struct pipe_context *pctx,
                                          class_compute,
                                          desc.sema_release0_addr,
                                          desc.sema_release0_value, true);
+      if (desc.sema_release0_addr)
+         nv_pass22_emit_compute_dispatch_host_sema_tail(
+            &push, desc.sema_release0_addr, desc.sema_release0_value,
+            NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
    } else {
       nv_compute_emit_dispatch_with_sema(&push, &desc, 0, NULL, class_compute,
                                          desc.sema_release0_addr,
                                          desc.sema_release0_value, true);
+      if (desc.sema_release0_addr)
+         nv_pass22_emit_compute_dispatch_host_sema_tail(
+            &push, desc.sema_release0_addr, desc.sema_release0_value,
+            NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
    }
    nv_push_wfi(&push);
    nvgpu_push_finish(ctx, &push, true);
