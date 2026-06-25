@@ -870,15 +870,20 @@ nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
 
    if (req->vram) {
       h_class = NV01_MEMORY_LOCAL_USER;
-      if (req->blocklinear && req->width && req->height) {
-         /* tick103: block-linear IMAGE/DEPTH; GPU-cacheable preferred for RT/tex */
-         attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_BL_NONCONTIG;
-         attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_YES_VAL;
-         align = req->alignment ? req->alignment : 512;
-         pitch_in = 0; /* BL: pitch is RM/gob internal, not linear row stride */
-      } else {
-         attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_NONCONTIG;
-         attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_NO_VAL;
+      {
+         /* tick105: prefer BIG/HUGE ATTR page size when GPU max_page_size allows */
+         uint32_t pgsz = nvidia_rm_os32_pick_attr_page_size(dev->info.max_page_size,
+                                                            size);
+         if (req->blocklinear && req->width && req->height) {
+            /* block-linear IMAGE/DEPTH; GPU-cacheable preferred for RT/tex */
+            attr = NV_OS32_ATTR_VIDMEM_UNCACHED_BL_NONCONTIG_PGSZ(pgsz);
+            attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_YES_VAL;
+            align = req->alignment ? req->alignment : 512;
+            pitch_in = 0; /* BL: pitch is RM/gob internal, not linear row stride */
+         } else {
+            attr = NV_OS32_ATTR_VIDMEM_UNCACHED_NONCONTIG_PGSZ(pgsz);
+            attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_NO_VAL;
+         }
       }
    } else {
       h_class = NV01_MEMORY_SYSTEM;

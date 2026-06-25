@@ -204,11 +204,12 @@ nvrm_BeginCommandBuffer(VkCommandBuffer commandBuffer,
       req.map_gpu_va = true;
       cmd->qmd_bo = nv_rm_bo_alloc(cmd->device->rm, &req);
    }
-   /* Global LMEM backing sized for SM count * per-SM window (conservative spill) */
+   /* tick105: LMEM BO sized from GR probe (gpu_core_count, warps, stack scale) */
    info = cmd->device ? cmd->device->info : NULL;
-   if (info && info->tpc_count)
-      sm_count = info->tpc_count;
-   lmem_need = nv_lmem_total_bo_bytes(0 /* min spill */, sm_count);
+   if (info)
+      lmem_need = nv_lmem_total_bo_bytes_from_info(info, 0 /* min spill */);
+   else
+      lmem_need = nv_lmem_total_bo_bytes(0, sm_count);
    if (lmem_need < NVRM_LMEM_SCRATCH_SIZE)
       lmem_need = NVRM_LMEM_SCRATCH_SIZE;
    if (lmem_need > 0x10000000ull) /* 256 MiB hard cap for cmd-buffer alloc */

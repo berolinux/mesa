@@ -849,6 +849,57 @@ nv_channel_add_usermode_slot(struct nv_channel *ch, volatile void *usermode_map)
    return 0;
 }
 
+int
+nv_channel_set_userd_handle(struct nv_channel *ch, unsigned slot,
+                            uint32_t h_userd_mem, uint64_t userd_offset)
+{
+   if (!ch || !h_userd_mem || slot >= NV_CHANNEL_MAX_USERD_HANDLES)
+      return -EINVAL;
+   ch->userd_handles[slot] = h_userd_mem;
+   ch->userd_handle_offsets[slot] = userd_offset;
+   if (slot + 1 > ch->userd_handle_count)
+      ch->userd_handle_count = slot + 1;
+   if (slot == 0)
+      ch->h_userd_mem = h_userd_mem;
+   return 0;
+}
+
+unsigned
+nv_channel_fill_userd_alloc_params(const struct nv_channel *ch,
+                                   uint32_t *h_userd_memory_out,
+                                   uint64_t *userd_offset_out,
+                                   unsigned max_slots)
+{
+   unsigned n = 0, i, lim;
+
+   if (!ch || !h_userd_memory_out || !max_slots)
+      return 0;
+   lim = max_slots;
+   if (lim > NV_CHANNEL_MAX_USERD_HANDLES)
+      lim = NV_CHANNEL_MAX_USERD_HANDLES;
+
+   if (ch->userd_handle_count) {
+      for (i = 0; i < ch->userd_handle_count && i < lim; i++) {
+         if (!ch->userd_handles[i])
+            continue;
+         h_userd_memory_out[n] = ch->userd_handles[i];
+         if (userd_offset_out)
+            userd_offset_out[n] = ch->userd_handle_offsets[i];
+         n++;
+      }
+      return n;
+   }
+
+   /* Default: single primary USERD at slot 0 */
+   if (ch->h_userd_mem) {
+      h_userd_memory_out[0] = ch->h_userd_mem;
+      if (userd_offset_out)
+         userd_offset_out[0] = 0;
+      return 1;
+   }
+   return 0;
+}
+
 uint32_t
 nv_channel_resolve_class_copy(const struct nv_channel *ch, uint32_t explicit_class)
 {
@@ -1083,9 +1134,13 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch_params.flags = 0;
    ch_params.hVASpace = ch->h_vaspace;
    ch_params.hContextShare = ch->h_ctxshare;
-   ch_params.hUserdMemory[0] = ch->h_userd_mem;
-   ch_params.userdOffset[0] = 0;
+   /* tick105: prime multi-USERD handle table (slot 0 = primary) */
+   if (!ch->userd_handle_count && ch->h_userd_mem)
+      (void)nv_channel_set_userd_handle(ch, 0, ch->h_userd_mem, 0);
    ch_params.engineType = ch->engine_type;
+   (void)nv_channel_fill_userd_alloc_params(ch, ch_params.hUserdMemory,
+                                            ch_params.userdOffset,
+                                            NV_CHANNEL_MAX_USERD_HANDLES);
 
    h_channel = 0;
    {
@@ -1097,16 +1152,18 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
       struct {
          bool use_tsg_parent;
          bool use_userd;
+         bool use_multi_userd; /* tick105: fill hUserdMemory[0..n] not only [0] */
          bool use_ctxshare;
          bool use_vaspace;
          bool use_error_ctxdma; /* false => notifier mem handle only */
       } attempts[] = {
-         { true,  true,  true,  true,  true  },
-         { true,  true,  false, true,  true  },
-         { false, true,  false, true,  true  },
-         { false, false, false, true,  true  },
-         { false, false, false, true,  false },
-         { false, false, false, false, false },
+         { true,  true,  true,  true,  true,  true  },
+         { true,  true,  false, true,  true,  true  },
+         { true,  true,  false, false, true,  true  },
+         { false, true,  false, false, true,  true  },
+         { false, false, false, false, true,  true  },
+         { false, false, false, false, true,  false },
+         { false, false, false, false, false, false },
       };
       uint32_t gpfifo_classes[12];
       unsigned n_gpf = sizeof(gpfifo_classes) / sizeof(gpfifo_classes[0]);
@@ -1139,9 +1196,15 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
                ch_params.hVASpace = ch->h_vaspace;
             if (attempts[ai].use_ctxshare && ch->h_ctxshare)
                ch_params.hContextShare = ch->h_ctxshare;
-            if (attempts[ai].use_userd && ch->h_userd_mem) {
-               ch_params.hUserdMemory[0] = ch->h_userd_mem;
-               ch_params.userdOffset[0] = 0;
+            if (attempts[ai].use_userd) {
+               if (attempts[ai].use_multi_userd) {
+                  (void)nv_channel_fill_userd_alloc_params(
+                     ch, ch_params.hUserdMemory, ch_params.userdOffset,
+                     NV_CHANNEL_MAX_USERD_HANDLES);
+               } else if (ch->h_userd_mem) {
+                  ch_params.hUserdMemory[0] = ch->h_userd_mem;
+                  ch_params.userdOffset[0] = 0;
+               }
             }
             if (attempts[ai].use_tsg_parent && ch->h_channel_group)
                h_parent = ch->h_channel_group;

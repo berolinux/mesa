@@ -31,6 +31,9 @@ struct nv_rm_bo;
 #define NV_CHANNEL_DEFAULT_PUSH_DWORDS     (64 * 1024)
 #define NV_CHANNEL_USERD_SIZE              4096
 #define NV_CHANNEL_NOTIFIER_SIZE           4096
+#define NV_CHANNEL_MAX_USERD_SLOTS         9
+/* NV_CHANNEL_ALLOC_PARAMS.hUserdMemory[] length is NV_MAX_SUBDEVICES (8) */
+#define NV_CHANNEL_MAX_USERD_HANDLES       8
 
 struct nv_channel {
    struct nv_rm_device *rm;
@@ -99,9 +102,12 @@ struct nv_channel {
     * Slot 0 mirrors userd; additional slots registered via nv_channel_add_userd_slot.
     * Kickoff passes all non-NULL slots to nvidia_gpfifo_submit_one_multi.
     */
-#define NV_CHANNEL_MAX_USERD_SLOTS  9
    volatile void *userd_slots[NV_CHANNEL_MAX_USERD_SLOTS];
    unsigned userd_slot_count;      /* 1..9; at least 1 when userd mapped */
+   /* tick105: RM handles for NV_CHANNEL_ALLOC_PARAMS.hUserdMemory[0..7] */
+   uint32_t userd_handles[NV_CHANNEL_MAX_USERD_HANDLES];
+   uint64_t userd_handle_offsets[NV_CHANNEL_MAX_USERD_HANDLES];
+   unsigned userd_handle_count;    /* 0 = use h_userd_mem only at slot 0 */
    volatile void *error_notifier;  /* mapped notifier memory (nvidia_notification_t) */
    uint32_t *gpfifo_cpu;           /* GPFIFO ring (pairs of dwords) */
    uint32_t *push_cpu;             /* pushbuffer backing */
@@ -129,6 +135,19 @@ struct nv_channel {
 int nv_channel_add_userd_slot(struct nv_channel *ch, volatile void *userd_map);
 /** Register an additional usermode/doorbell page (MIG multi-subdevice). */
 int nv_channel_add_usermode_slot(struct nv_channel *ch, volatile void *usermode_map);
+
+/**
+ * tick105: register RM memory handle for multi-USERD channel alloc (hUserdMemory[i]).
+ * Slot 0 is always primary h_userd_mem; slots 1..7 are optional MIG/subdevice USERD BOs.
+ * Handles are applied at channel RmAlloc time via nv_channel_fill_userd_alloc_params().
+ */
+int nv_channel_set_userd_handle(struct nv_channel *ch, unsigned slot,
+                                uint32_t h_userd_mem, uint64_t userd_offset);
+/** Copy registered handles/offsets into channel alloc params (up to 8 slots). */
+unsigned nv_channel_fill_userd_alloc_params(const struct nv_channel *ch,
+                                            uint32_t *h_userd_memory_out,
+                                            uint64_t *userd_offset_out,
+                                            unsigned max_slots);
 
 struct nv_channel *
 nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,

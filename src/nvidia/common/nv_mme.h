@@ -61,6 +61,15 @@ extern "C" {
 #define NV_MME_SLOT_DRAW_INDEXED_INDIRECT    1
 #define NV_MME_SLOT_COUNT                    2
 
+/* tick105: additional macro slots observed / reserved (not indirect path) */
+#define NV_MME_SLOT_CHANNEL_INIT_SCRATCH     2  /* tentative channel-init macro */
+#define NV_MME_SLOT_CLEAR_HELPER             3  /* tentative clear/blit helper */
+#define NV_MME_SLOT_EXTENDED_COUNT           4
+
+/* Method offsets for CALL_MME_DATA / SET_MME_SHADOW (NVC597 family subset) */
+#define NV_MME_METHOD_CALL_DATA_BASE         0x3880u  /* CALL_MME_DATA(0) approx */
+#define NV_MME_METHOD_SET_MME_SHADOW_SCRATCH 0x3400u  /* SET_MME_SHADOW_SCRATCH(i) base */
+
 /*
  * Pass5 glcore method-off frequency (inc1 s0 CALL_MME-ish headers):
  *   0x3800 base (hdr 0x20010e00) — 5 hits
@@ -194,6 +203,67 @@ nv_mme_build_pass5_hot_program_stub(struct nv_mme_program *prog,
 }
 
 /**
+ * tick105: encode a single "emit method" pseudo-instruction (RE scaffold).
+ * Intended shape once validated: low nibble EMIT_METHOD, imm16 = method offset
+ * (byte offset into 3D class method space), high reg fields = imm/data source.
+ * Still stub — do not ship in production paths without silicon validation.
+ */
+static inline uint32_t
+nv_mme_insn_emit_method(uint16_t method_off, uint8_t reg_src)
+{
+   return NV_MME_INSN_OP(NV_MME_OP_EMIT_METHOD) |
+          NV_MME_INSN_IMM16(method_off) |
+          NV_MME_INSN_REG(reg_src, 0) |
+          NV_MME_INSN_MERGE_CLASS;
+}
+
+/**
+ * tick105: channel-init macro scaffold (slot 2) — mirrors proprietary pattern
+ * of a short macro that may prime shadow scratch / method state then END.
+ * Host path remains authoritative; this only exercises LOAD/START/CALL plumbing.
+ */
+static inline void
+nv_mme_build_channel_init_program_stub(struct nv_mme_program *prog,
+                                       uint32_t ram_offset)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = NV_MME_SLOT_CHANNEL_INIT_SCRATCH;
+   prog->ram_offset = ram_offset;
+   /* Pseudo: shadow/scratch touch, tentative method emit, branch skip, END */
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   prog->insns[1] = nv_mme_insn_emit_method(0x0200u /* SET_OBJECT-ish */, 0);
+   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_ALU) | NV_MME_INSN_REG(0, 0) |
+                    NV_MME_INSN_ALU_CLASS;
+   prog->insns[3] = NV_MME_INSN_OP(NV_MME_OP_BRANCH) | NV_MME_INSN_IMM16(5) |
+                    NV_MME_INSN_BRANCH_CLASS;
+   prog->insns[4] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 5;
+   prog->is_stub_end_only = true;
+}
+
+/** tick105: clear/blit helper macro scaffold (slot 3) — END-terminated stub. */
+static inline void
+nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
+                                       uint32_t ram_offset)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = NV_MME_SLOT_CLEAR_HELPER;
+   prog->ram_offset = ram_offset;
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(0x0540u /* CLEAR surface method band */) |
+                    NV_MME_INSN_MERGE_CLASS;
+   prog->insns[1] = nv_mme_insn_emit_method(0x0548u, 1);
+   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 3;
+   prog->is_stub_end_only = true;
+}
+
+/**
  * Build both indirect macros into caller-provided array (size >= SLOT_COUNT).
  * Returns number of programs filled (2).
  */
@@ -292,6 +362,42 @@ nv_mme_emit_prime_indirect_stubs(struct nv_push *p)
    nv_mme_build_indirect_draw_programs(progs);
    for (i = 0; i < NV_MME_SLOT_COUNT; i++)
       nv_mme_emit_load_and_call_end_stub(p, &progs[i]);
+}
+
+/**
+ * tick105: upload/call one program, optionally emit CALL_MME_DATA(0)=data0 first
+ * (indirect draw data0 = draw_count | (stride<<16) pattern from pass5 traces).
+ */
+static inline void
+nv_mme_emit_load_call_with_data0(struct nv_push *p,
+                                 const struct nv_mme_program *prog,
+                                 uint32_t data0)
+{
+   if (!p || !prog)
+      return;
+   if (data0) {
+#ifdef NVC597_CALL_MME_DATA
+      nv_push_method(p, NVC597_CALL_MME_DATA(0), data0);
+#else
+      nv_push_method(p, NV_MME_METHOD_CALL_DATA_BASE, data0);
+#endif
+   }
+   nv_mme_emit_load_and_call_end_stub(p, prog);
+}
+
+/** Prime channel-init + clear helper stubs (in addition to indirect slots). */
+static inline void
+nv_mme_emit_prime_extended_stubs(struct nv_push *p)
+{
+   struct nv_mme_program init_prog, clear_prog;
+   if (!p)
+      return;
+   nv_mme_build_channel_init_program_stub(&init_prog,
+                                          2u * NV_MME_RAM_SLOT_STRIDE);
+   nv_mme_build_clear_helper_program_stub(&clear_prog,
+                                          3u * NV_MME_RAM_SLOT_STRIDE);
+   nv_mme_emit_load_and_call_end_stub(p, &init_prog);
+   nv_mme_emit_load_and_call_end_stub(p, &clear_prog);
 }
 
 #ifdef __cplusplus

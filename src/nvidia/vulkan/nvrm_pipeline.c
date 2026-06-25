@@ -2739,7 +2739,9 @@ nvrm_ensure_compute_lmem(struct nvrm_cmd_buffer *cmd)
    if (!cmd || cmd->lmem_programmed || !cmd->lmem_bo)
       return;
    info = cmd->device ? cmd->device->info : NULL;
-   if (info && info->tpc_count)
+   if (info)
+      sm_count = nv_lmem_sm_count_from_info(info);
+   else if (info && info->tpc_count)
       sm_count = info->tpc_count;
    /* Prefer per-thread requirement from bound compute pipeline / shader */
    cp = cmd->bound_compute_pipeline;
@@ -2754,10 +2756,15 @@ nvrm_ensure_compute_lmem(struct nvrm_cmd_buffer *cmd)
    lmem_addr = nv_rm_bo_gpu_offset(cmd->lmem_bo);
    if (!lmem_addr)
       return;
-   /* Program per-SM window sized from local_req; BO must cover sm_count * per_sm */
-   nv_compute_set_shader_local_memory_for_shader(&cmd->push, lmem_addr,
-                                                 local_req, sm_count);
+   /* tick105: per-SM window from GR probe when available */
+   if (info)
+      nv_compute_set_shader_local_memory_from_info(&cmd->push, lmem_addr,
+                                                   local_req, info);
+   else
+      nv_compute_set_shader_local_memory_for_shader(&cmd->push, lmem_addr,
+                                                    local_req, sm_count);
    cmd->lmem_programmed = true;
+   (void)sm_count;
 }
 
 static void

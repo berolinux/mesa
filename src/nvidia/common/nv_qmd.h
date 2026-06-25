@@ -701,6 +701,8 @@ nv_qmd_prepare_indirect_placeholder(uint32_t qmd[NV_QMD_DWORDS],
 #define NV_LMEM_THREADS_PER_SM_CONSERVATIVE  2048u
 #define NV_LMEM_SM_GRANULE_BYTES             0x10000u  /* 64 KiB */
 #define NV_LMEM_MIN_PER_SM_BYTES             0x10000u
+#define NV_LMEM_SM_COUNT_FALLBACK            1u
+#define NV_LMEM_SM_COUNT_CAP                 256u      /* sanity for alloc sizing */
 
 static inline uint32_t
 nv_lmem_align_u32(uint32_t v, uint32_t align)
@@ -708,12 +710,77 @@ nv_lmem_align_u32(uint32_t v, uint32_t align)
    return (v + align - 1u) & ~(align - 1u);
 }
 
+/**
+ * tick105: derive concurrent threads/SM from GR probe when available.
+ * max_warps_per_sm * max_threads_per_warp (default 32) is occupancy ceiling;
+ * fall back to 2048 conservative if probe missing.
+ */
 static inline uint32_t
-nv_lmem_per_sm_bytes(uint32_t local_mem_low_bytes)
+nv_lmem_threads_per_sm_from_gr(uint32_t max_warps_per_sm,
+                               uint32_t max_threads_per_warp)
+{
+   uint32_t tw = max_threads_per_warp ? max_threads_per_warp : 32u;
+   uint64_t thr;
+
+   if (!max_warps_per_sm)
+      return NV_LMEM_THREADS_PER_SM_CONSERVATIVE;
+   thr = (uint64_t)max_warps_per_sm * (uint64_t)tw;
+   if (thr < 32u)
+      thr = 32u;
+   if (thr > NV_LMEM_THREADS_PER_SM_CONSERVATIVE)
+      thr = NV_LMEM_THREADS_PER_SM_CONSERVATIVE; /* keep conservative upper bound */
+   if (thr > 0xffffffffu)
+      thr = 0xffffffffu;
+   return (uint32_t)thr;
+}
+
+/** tick105: SM/core count for LMEM window — prefer gpu_core_count, then tpc_count. */
+static inline uint32_t
+nv_lmem_sm_count_from_info(const struct nv_device_info *info)
+{
+   uint32_t n = NV_LMEM_SM_COUNT_FALLBACK;
+   if (!info)
+      return n;
+   if (info->gpu_core_count)
+      n = info->gpu_core_count;
+   else if (info->tpc_count)
+      n = info->tpc_count;
+   else if (info->gpc_count)
+      n = info->gpc_count;
+   if (n > NV_LMEM_SM_COUNT_CAP)
+      n = NV_LMEM_SM_COUNT_CAP;
+   if (!n)
+      n = NV_LMEM_SM_COUNT_FALLBACK;
+   return n;
+}
+
+/**
+ * Effective local_mem_low including thread_stack_scaling floor (tick102/105).
+ * Callers pass shader spill size; probe scale ensures minimum stack reservation.
+ */
+static inline uint32_t
+nv_lmem_effective_local_bytes(uint32_t local_mem_low_bytes,
+                              uint32_t thread_stack_scaling)
+{
+   uint32_t floor_lmem = 0;
+   if (thread_stack_scaling) {
+      floor_lmem = thread_stack_scaling * 16u;
+      if (floor_lmem < 16u)
+         floor_lmem = 16u;
+   }
+   return local_mem_low_bytes > floor_lmem ? local_mem_low_bytes : floor_lmem;
+}
+
+static inline uint32_t
+nv_lmem_per_sm_bytes_ex(uint32_t local_mem_low_bytes,
+                        uint32_t max_warps_per_sm,
+                        uint32_t max_threads_per_warp)
 {
    uint32_t per_thread = local_mem_low_bytes ?
       nv_lmem_align_u32(local_mem_low_bytes, 16u) : 16u; /* at least one spill slot */
-   uint64_t per_sm = (uint64_t)per_thread * (uint64_t)NV_LMEM_THREADS_PER_SM_CONSERVATIVE;
+   uint32_t thr_sm = nv_lmem_threads_per_sm_from_gr(max_warps_per_sm,
+                                                    max_threads_per_warp);
+   uint64_t per_sm = (uint64_t)per_thread * (uint64_t)thr_sm;
    if (per_sm < NV_LMEM_MIN_PER_SM_BYTES)
       per_sm = NV_LMEM_MIN_PER_SM_BYTES;
    if (per_sm > 0xffffffffu)
@@ -721,12 +788,45 @@ nv_lmem_per_sm_bytes(uint32_t local_mem_low_bytes)
    return nv_lmem_align_u32((uint32_t)per_sm, NV_LMEM_SM_GRANULE_BYTES);
 }
 
+static inline uint32_t
+nv_lmem_per_sm_bytes(uint32_t local_mem_low_bytes)
+{
+   return nv_lmem_per_sm_bytes_ex(local_mem_low_bytes, 0, 0);
+}
+
+static inline uint64_t
+nv_lmem_total_bo_bytes_ex(uint32_t local_mem_low_bytes, uint32_t sm_count,
+                          uint32_t max_warps_per_sm,
+                          uint32_t max_threads_per_warp)
+{
+   uint32_t per_sm = nv_lmem_per_sm_bytes_ex(local_mem_low_bytes,
+                                             max_warps_per_sm,
+                                             max_threads_per_warp);
+   uint32_t nsm = sm_count ? sm_count : NV_LMEM_SM_COUNT_FALLBACK;
+   if (nsm > NV_LMEM_SM_COUNT_CAP)
+      nsm = NV_LMEM_SM_COUNT_CAP;
+   return (uint64_t)per_sm * (uint64_t)nsm;
+}
+
 static inline uint64_t
 nv_lmem_total_bo_bytes(uint32_t local_mem_low_bytes, uint32_t sm_count)
 {
-   uint32_t per_sm = nv_lmem_per_sm_bytes(local_mem_low_bytes);
-   uint32_t nsm = sm_count ? sm_count : 1u;
-   return (uint64_t)per_sm * (uint64_t)nsm;
+   return nv_lmem_total_bo_bytes_ex(local_mem_low_bytes, sm_count, 0, 0);
+}
+
+/** tick105: size LMEM BO from full nv_device_info + shader local requirement */
+static inline uint64_t
+nv_lmem_total_bo_bytes_from_info(const struct nv_device_info *info,
+                                 uint32_t local_mem_low_bytes)
+{
+   uint32_t eff, sm;
+   if (!info)
+      return nv_lmem_total_bo_bytes(local_mem_low_bytes, NV_LMEM_SM_COUNT_FALLBACK);
+   eff = nv_lmem_effective_local_bytes(local_mem_low_bytes,
+                                       info->thread_stack_scaling);
+   sm = nv_lmem_sm_count_from_info(info);
+   return nv_lmem_total_bo_bytes_ex(eff, sm, info->max_warps_per_sm,
+                                    info->max_threads_per_warp);
 }
 
 /**
@@ -777,6 +877,29 @@ nv_compute_set_shader_local_memory_for_shader(struct nv_push *p,
 {
    uint32_t per_sm = nv_lmem_per_sm_bytes(local_mem_low_bytes);
    nv_compute_set_shader_local_memory(p, lmem_gpu_addr, per_sm, sm_count);
+}
+
+/** tick105: program LMEM using GR probe (threads/SM, core count, stack scale) */
+static inline void
+nv_compute_set_shader_local_memory_from_info(struct nv_push *p,
+                                             uint64_t lmem_gpu_addr,
+                                             uint32_t local_mem_low_bytes,
+                                             const struct nv_device_info *info)
+{
+   uint32_t eff, sm, per_sm;
+   if (!p || !lmem_gpu_addr)
+      return;
+   if (!info) {
+      nv_compute_set_shader_local_memory_for_shader(p, lmem_gpu_addr,
+                                                    local_mem_low_bytes, 1);
+      return;
+   }
+   eff = nv_lmem_effective_local_bytes(local_mem_low_bytes,
+                                       info->thread_stack_scaling);
+   sm = nv_lmem_sm_count_from_info(info);
+   per_sm = nv_lmem_per_sm_bytes_ex(eff, info->max_warps_per_sm,
+                                    info->max_threads_per_warp);
+   nv_compute_set_shader_local_memory(p, lmem_gpu_addr, per_sm, sm);
 }
 
 /**
