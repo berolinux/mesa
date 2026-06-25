@@ -193,6 +193,7 @@ struct nvrm_cmd_buffer {
    struct nvrm_graphics_pipeline *bound_gfx_pipeline;
    struct nvrm_compute_pipeline *bound_compute_pipeline;
    bool channel_init_done;
+   bool mme_ram_primed; /* tick120: MME instruction RAM uploaded (stubs, no CALL) */
    bool compute_init_done;
    bool in_render_pass;
    uint32_t render_width;

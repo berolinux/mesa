@@ -2164,6 +2164,38 @@ nv_3d_emit_channel_init_defaults(struct nv_push *p, uint32_t spa_major,
    nv_push_method(p, NVC597_SET_FILL_MODE, NVC597_SET_FILL_MODE_V_SOLID);
 }
 
+/**
+ * tick120: channel init + optional MME RAM prime (upload only, no CALL).
+ * upload_mme: when true, loads indirect + extended + pass5-hot stubs into MME
+ * instruction RAM so later path C can CALL once ISA is real; host A/B still
+ * required while nv_3d_mme_indirect_is_stub() is true.
+ * Returns true if MME table was uploaded (caller may set mme_uploaded flag).
+ */
+static inline bool
+nv_3d_emit_channel_init_defaults_ex(struct nv_push *p, uint32_t spa_major,
+                                    uint32_t spa_minor, uint32_t sph_cur,
+                                    uint32_t sph_oldest, bool upload_mme)
+{
+   bool mme_ok = false;
+
+   if (!p)
+      return false;
+   nv_3d_emit_channel_init_defaults(p, spa_major, spa_minor, sph_cur, sph_oldest);
+   if (upload_mme)
+      mme_ok = nv_3d_mme_upload_extended_table_only(p);
+   return mme_ok;
+}
+
+/** tick120: full init with MME RAM prime (default for Gallium/Vulkan first-use). */
+static inline bool
+nv_3d_emit_channel_init_with_mme(struct nv_push *p, uint32_t spa_major,
+                                 uint32_t spa_minor, uint32_t sph_cur,
+                                 uint32_t sph_oldest)
+{
+   return nv_3d_emit_channel_init_defaults_ex(p, spa_major, spa_minor, sph_cur,
+                                              sph_oldest, true);
+}
+
 /** Map pipe_compare_func (0..7) to OGL depth/stencil func value. */
 static inline uint32_t
 nv_3d_ogl_cmp_func(unsigned pipe_func)

@@ -1714,7 +1714,10 @@ nvrm_cmd_emit_pipeline_state(struct nvrm_cmd_buffer *cmd,
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
 
    if (!cmd->channel_init_done) {
-      nv_3d_emit_channel_init_defaults(&cmd->push, 5, 3, 5, 3);
+      bool mme_ok = nv_3d_emit_channel_init_with_mme(&cmd->push, 5, 3, 5, 3);
+      cmd->mme_ram_primed = mme_ok;
+      /* Do not set device->mme_indirect_uploaded: that flag means path C ready
+       * with non-stub microcode; RAM prime alone is insufficient. */
       cmd->channel_init_done = true;
    }
 
@@ -2007,7 +2010,8 @@ nvrm_CmdBeginRendering(VkCommandBuffer commandBuffer,
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
 
    if (!cmd->channel_init_done) {
-      nv_3d_emit_channel_init_defaults(&cmd->push, 5, 3, 5, 3);
+      bool mme_ok = nv_3d_emit_channel_init_with_mme(&cmd->push, 5, 3, 5, 3);
+      cmd->mme_ram_primed = mme_ok;
       cmd->channel_init_done = true;
    }
 

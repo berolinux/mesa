@@ -71,6 +71,7 @@ struct nvgpu_context {
    uint64_t program_region_base;
    bool program_region_emitted;
    bool channel_init_emitted;
+   bool mme_ram_primed; /* tick120: MME instruction RAM uploaded (stubs, no CALL) */
 
    /* Texture/sampler header pool (shared across draws) */
    struct nv_tex_pool *tex_pool;

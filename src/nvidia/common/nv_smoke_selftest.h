@@ -887,6 +887,44 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -336;
    }
 
+   /* tick120: channel_init_with_mme emits SPA/SPH + MME LOAD without CALL_MME */
+   {
+      uint32_t buf_ci[256];
+      uint32_t nci, ici;
+      bool saw_spa = false, saw_sph = false, saw_mme_ptr = false, saw_call = false;
+      bool mme_ok;
+
+      memset(buf_ci, 0, sizeof(buf_ci));
+      nv_push_init(&p, buf_ci, (uint32_t)(sizeof(buf_ci) / 4));
+      mme_ok = nv_3d_emit_channel_init_with_mme(&p, 5, 3, 5, 3);
+      if (!mme_ok)
+         return -337;
+      nci = nv_push_dw_count(&p);
+      if (nci < 20)
+         return -338;
+      for (ici = 0; ici + 1 < nci; ici++) {
+         uint32_t hdr = buf_ci[ici];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_SPA_VERSION)
+            saw_spa = true;
+         if (method == NVC597_SET_SPH_VERSION)
+            saw_sph = true;
+         if (method == NVC597_LOAD_MME_INSTRUCTION_RAM_POINTER)
+            saw_mme_ptr = true;
+         if (method >= NVC597_CALL_MME_MACRO(0) &&
+             method <= NVC597_CALL_MME_MACRO(31))
+            saw_call = true;
+      }
+      if (!saw_spa || !saw_sph || !saw_mme_ptr)
+         return -339;
+      if (saw_call)
+         return -340;
+      if (!nv_3d_mme_indirect_is_stub())
+         return -341; /* until real ISA, stubs must remain true */
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

@@ -623,11 +623,14 @@ nvgpu_ensure_3d_init(struct nvgpu_context *ctx, struct nv_push *push)
 
    if (!ctx->channel_init_emitted) {
       uint32_t spa_maj = 5, spa_min = 3; /* Ampere-class default; refined by arch later */
+      bool mme_ok;
       if (di) {
          if (di->architecture >= 0x170) { spa_maj = 7; spa_min = 0; }
          else if (di->architecture >= 0x160) { spa_maj = 6; spa_min = 0; }
       }
-      nv_3d_emit_channel_init_defaults(push, spa_maj, spa_min, 5, 3);
+      /* tick120: prime MME RAM (upload_only); indirect draws still host path A/B */
+      mme_ok = nv_3d_emit_channel_init_with_mme(push, spa_maj, spa_min, 5, 3);
+      ctx->mme_ram_primed = mme_ok;
       ctx->channel_init_emitted = true;
    }
 
