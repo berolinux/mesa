@@ -148,9 +148,12 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.sm_version = gi.sm_version;
       dev->info.gpc_count = gi.gpc_count;
       dev->info.tpc_count = gi.tpc_count;
-      /* tick102: GR warps / thread-stack scale for compute QMD limits */
+      /* tick102/104: GR topology + QMD limits */
       dev->info.max_warps_per_sm = gi.max_warps_per_sm;
       dev->info.thread_stack_scaling = gi.thread_stack_scaling;
+      dev->info.max_threads_per_warp = gi.max_threads_per_warp;
+      dev->info.max_sp_per_sm = gi.max_sp_per_sm;
+      dev->info.gpu_core_count = gi.gpu_core_count;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
       /* tick101: BAR1/heap/ECC for mapping policy */

@@ -198,27 +198,6 @@ nv_nvdec_emit_pic_setup(struct nv_push *p, const struct nv_nvdec_pic_setup *s)
       nv_push_method(p, NV_NVDEC_SET_DISPLAY_BUF_SIZE, s->display_buf_size);
 }
 
-/** SET_OBJECT + pic setup + sema + EXECUTE — full vertical slice without codec payload. */
-static inline void
-nv_nvdec_emit_frame_kick(struct nv_push *p, uint32_t class_nvdec,
-                         const struct nv_nvdec_pic_setup *s,
-                         uint64_t sema_gpu, uint32_t sema_payload,
-                         volatile uint32_t *status_cpu)
-{
-   if (!p)
-      return;
-   if (class_nvdec)
-      nv_nvdec_set_object(p, class_nvdec);
-   if (s)
-      nv_nvdec_emit_pic_setup(p, s);
-   if (sema_gpu)
-      nv_nvdec_emit_semaphore_release_reset(p, sema_gpu, sema_payload, status_cpu);
-   if (s)
-      nv_push_method(p, NV_NVDEC_EXECUTE, s->execute_flags);
-   else
-      nv_push_method(p, NV_NVDEC_EXECUTE, 0);
-}
-
 /** NVDEC completion sema (SEMAPHORE_A/B/C) before EXECUTE — payload = done marker. */
 static inline void
 nv_nvdec_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
@@ -253,6 +232,27 @@ nv_nvdec_emit_semaphore_release_reset(struct nv_push *p,
 {
    nv_nvdec_status_reset_cpu(status_cpu);
    nv_nvdec_emit_semaphore_release(p, sema_gpu_addr, payload);
+}
+
+/** SET_OBJECT + pic setup + sema + EXECUTE — full vertical slice without codec payload. */
+static inline void
+nv_nvdec_emit_frame_kick(struct nv_push *p, uint32_t class_nvdec,
+                         const struct nv_nvdec_pic_setup *s,
+                         uint64_t sema_gpu, uint32_t sema_payload,
+                         volatile uint32_t *status_cpu)
+{
+   if (!p)
+      return;
+   if (class_nvdec)
+      nv_nvdec_set_object(p, class_nvdec);
+   if (s)
+      nv_nvdec_emit_pic_setup(p, s);
+   if (sema_gpu)
+      nv_nvdec_emit_semaphore_release_reset(p, sema_gpu, sema_payload, status_cpu);
+   if (s)
+      nv_push_method(p, NV_NVDEC_EXECUTE, s->execute_flags);
+   else
+      nv_push_method(p, NV_NVDEC_EXECUTE, 0);
 }
 
 /**
@@ -398,6 +398,46 @@ struct nv_nvdec_frame_setup {
    uint8_t  h264_deblocking_filter_control_present_flag;
    int8_t   h264_pic_init_qp_minus26;
    int8_t   h264_chroma_qp_index_offset;
+   /* tick104: HEVC / AV1 SPS/PPS subset (refine bit layout on silicon) */
+   uint32_t hevc_sps_flags;      /* direct override; 0 = build from fields */
+   uint32_t hevc_pps_flags;
+   uint8_t  hevc_log2_min_luma_coding_block_size_minus3; /* +3 => min CB size */
+   uint8_t  hevc_log2_diff_max_min_luma_coding_block_size;
+   uint8_t  hevc_max_transform_hierarchy_depth_inter;
+   uint8_t  hevc_max_transform_hierarchy_depth_intra;
+   uint8_t  hevc_pcm_enabled_flag;
+   uint8_t  hevc_amp_enabled_flag;
+   uint8_t  hevc_sao_enabled_flag;
+   uint8_t  hevc_temporal_mvp_enabled_flag;
+   uint8_t  hevc_strong_intra_smoothing_enabled_flag;
+   uint8_t  hevc_dependent_slice_segments_enabled_flag;
+   uint8_t  hevc_sign_data_hiding_enabled_flag;
+   uint8_t  hevc_cabac_init_present_flag;
+   uint8_t  hevc_weighted_pred_flag;
+   uint8_t  hevc_weighted_bipred_flag;
+   uint8_t  hevc_transquant_bypass_enabled_flag;
+   uint8_t  hevc_tiles_enabled_flag;
+   uint8_t  hevc_entropy_coding_sync_enabled_flag;
+   uint8_t  hevc_loop_filter_across_tiles_enabled_flag;
+   uint8_t  hevc_pps_loop_filter_across_slices_enabled_flag;
+   uint8_t  hevc_deblocking_filter_override_enabled_flag;
+   int8_t   hevc_pps_cb_qp_offset;
+   int8_t   hevc_pps_cr_qp_offset;
+   /* AV1 frame header subset */
+   uint32_t av1_prof_tier_level; /* direct override dword; 0 = build */
+   uint32_t av1_frame_type_flags;
+   uint8_t  av1_profile;         /* 0=main 1=high 2=professional */
+   uint8_t  av1_level;           /* seq_level_idx */
+   uint8_t  av1_tier;            /* 0=main 1=high */
+   uint8_t  av1_frame_type;      /* 0=key 1=inter 2=intra-only 3=switch */
+   uint8_t  av1_show_frame;
+   uint8_t  av1_error_resilient_mode;
+   uint8_t  av1_disable_cdf_update;
+   uint8_t  av1_allow_screen_content_tools;
+   uint8_t  av1_force_integer_mv;
+   uint8_t  av1_allow_intrabc;
+   uint32_t av1_order_hint;
+   uint8_t  av1_primary_ref_frame; /* 0..7 or 7=none */
 };
 
 /*
@@ -562,6 +602,193 @@ nv_nvdec_pic_setup_apply_h264_sps_pps(uint32_t *pic_dwords,
 }
 
 /**
+ * tick104: HEVC SPS/PPS dwords (conservative proprietary subset).
+ *
+ * SPS (NV_HEVC_PS_SPS_FLAGS):
+ *   [2:0]   log2_min_luma_coding_block_size_minus3
+ *   [5:3]   log2_diff_max_min_luma_coding_block_size
+ *   [8:6]   max_transform_hierarchy_depth_inter
+ *   [11:9]  max_transform_hierarchy_depth_intra
+ *   [12]    pcm_enabled_flag
+ *   [13]    amp_enabled_flag
+ *   [14]    sample_adaptive_offset_enabled_flag
+ *   [15]    sps_temporal_mvp_enabled_flag
+ *   [16]    strong_intra_smoothing_enabled_flag
+ *   [19:17] chroma_format_idc
+ *   [23:20] bit_depth_luma_minus8
+ *   [27:24] bit_depth_chroma_minus8
+ *
+ * PPS (NV_HEVC_PS_PPS_FLAGS):
+ *   [0] dependent_slice_segments_enabled_flag
+ *   [1] sign_data_hiding_enabled_flag
+ *   [2] cabac_init_present_flag
+ *   [3] weighted_pred_flag
+ *   [4] weighted_bipred_flag
+ *   [5] transquant_bypass_enabled_flag
+ *   [6] tiles_enabled_flag
+ *   [7] entropy_coding_sync_enabled_flag
+ *   [8] loop_filter_across_tiles_enabled_flag
+ *   [9] pps_loop_filter_across_slices_enabled_flag
+ *   [10] deblocking_filter_override_enabled_flag
+ *   [15:11] (reserved)
+ *   [23:16] pps_cb_qp_offset + 128
+ *   [31:24] pps_cr_qp_offset + 128
+ */
+static inline uint32_t
+nv_hevc_pack_sps_flags(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t f = 0;
+   uint32_t chroma, bdl, bdc;
+   if (!fs)
+      return 0;
+   if (fs->hevc_sps_flags)
+      return fs->hevc_sps_flags;
+   f |= (fs->hevc_log2_min_luma_coding_block_size_minus3 & 7u);
+   f |= ((uint32_t)(fs->hevc_log2_diff_max_min_luma_coding_block_size & 7u)) << 3;
+   f |= ((uint32_t)(fs->hevc_max_transform_hierarchy_depth_inter & 7u)) << 6;
+   f |= ((uint32_t)(fs->hevc_max_transform_hierarchy_depth_intra & 7u)) << 9;
+   if (fs->hevc_pcm_enabled_flag) f |= 1u << 12;
+   if (fs->hevc_amp_enabled_flag) f |= 1u << 13;
+   if (fs->hevc_sao_enabled_flag) f |= 1u << 14;
+   if (fs->hevc_temporal_mvp_enabled_flag) f |= 1u << 15;
+   if (fs->hevc_strong_intra_smoothing_enabled_flag) f |= 1u << 16;
+   chroma = fs->h264_chroma_format_idc ? fs->h264_chroma_format_idc : 1;
+   bdl = fs->bit_depth_luma_minus8 & 0xfu;
+   bdc = fs->bit_depth_chroma_minus8 & 0xfu;
+   f |= (chroma & 7u) << 17;
+   f |= bdl << 20;
+   f |= bdc << 24;
+   /* default min CB 8 (minus3=0) and diff=3 => max 64 if all zero */
+   if (!fs->hevc_log2_min_luma_coding_block_size_minus3 &&
+       !fs->hevc_log2_diff_max_min_luma_coding_block_size &&
+       !fs->hevc_sps_flags)
+      f |= (3u << 3); /* log2_diff = 3 => 8..64 CTB range common default */
+   return f;
+}
+
+static inline uint32_t
+nv_hevc_pack_pps_flags(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t f = 0;
+   int cb, cr;
+   if (!fs)
+      return 0;
+   if (fs->hevc_pps_flags)
+      return fs->hevc_pps_flags;
+   if (fs->hevc_dependent_slice_segments_enabled_flag) f |= 1u;
+   if (fs->hevc_sign_data_hiding_enabled_flag) f |= 2u;
+   if (fs->hevc_cabac_init_present_flag) f |= 4u;
+   if (fs->hevc_weighted_pred_flag) f |= 8u;
+   if (fs->hevc_weighted_bipred_flag) f |= 16u;
+   if (fs->hevc_transquant_bypass_enabled_flag) f |= 32u;
+   if (fs->hevc_tiles_enabled_flag) f |= 64u;
+   if (fs->hevc_entropy_coding_sync_enabled_flag) f |= 128u;
+   if (fs->hevc_loop_filter_across_tiles_enabled_flag) f |= 256u;
+   if (fs->hevc_pps_loop_filter_across_slices_enabled_flag) f |= 512u;
+   if (fs->hevc_deblocking_filter_override_enabled_flag) f |= 1024u;
+   cb = (int)fs->hevc_pps_cb_qp_offset + 128;
+   cr = (int)fs->hevc_pps_cr_qp_offset + 128;
+   if (cb < 0) cb = 0;
+   if (cb > 255) cb = 255;
+   if (cr < 0) cr = 0;
+   if (cr > 255) cr = 255;
+   f |= ((uint32_t)cb) << 16;
+   f |= ((uint32_t)cr) << 24;
+   return f;
+}
+
+static inline void
+nv_nvdec_pic_setup_apply_hevc_sps_pps(uint32_t *pic_dwords,
+                                      uint32_t pic_dwords_cap,
+                                      const struct nv_nvdec_frame_setup *fs)
+{
+   if (!pic_dwords || !fs)
+      return;
+   if (pic_dwords_cap > NV_HEVC_PS_SPS_FLAGS)
+      pic_dwords[NV_HEVC_PS_SPS_FLAGS] = nv_hevc_pack_sps_flags(fs);
+   if (pic_dwords_cap > NV_HEVC_PS_PPS_FLAGS)
+      pic_dwords[NV_HEVC_PS_PPS_FLAGS] = nv_hevc_pack_pps_flags(fs);
+   /* log2 CTB size hint: min_cb + diff + 3 (bytes in coding block terms) */
+   if (pic_dwords_cap > NV_HEVC_PS_LOG2_CTB) {
+      uint32_t min3 = fs->hevc_log2_min_luma_coding_block_size_minus3 & 7u;
+      uint32_t diff = fs->hevc_log2_diff_max_min_luma_coding_block_size & 7u;
+      if (!diff && !min3)
+         diff = 3;
+      pic_dwords[NV_HEVC_PS_LOG2_CTB] = min3 + diff + 3u;
+   }
+}
+
+/**
+ * tick104: AV1 profile/tier/level + frame_type flags.
+ *
+ * PROF_TIER_LEVEL dword:
+ *   [2:0]  seq_profile
+ *   [7:3]  seq_level_idx
+ *   [8]    seq_tier
+ *   [12:9] bit_depth_luma_minus8 (reuse frame_setup bit depths)
+ *
+ * FRAME_TYPE_FLAGS:
+ *   [1:0]  frame_type
+ *   [2]    show_frame
+ *   [3]    error_resilient_mode
+ *   [4]    disable_cdf_update
+ *   [5]    allow_screen_content_tools
+ *   [6]    force_integer_mv
+ *   [7]    allow_intrabc
+ */
+static inline uint32_t
+nv_av1_pack_prof_tier_level(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t f;
+   if (!fs)
+      return 0;
+   if (fs->av1_prof_tier_level)
+      return fs->av1_prof_tier_level;
+   f = (fs->av1_profile & 7u) |
+       ((uint32_t)(fs->av1_level & 0x1fu)) << 3 |
+       ((uint32_t)(fs->av1_tier & 1u)) << 8 |
+       ((fs->bit_depth_luma_minus8 & 0xfu)) << 9;
+   return f;
+}
+
+static inline uint32_t
+nv_av1_pack_frame_type_flags(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t f = 0;
+   if (!fs)
+      return 0;
+   if (fs->av1_frame_type_flags)
+      return fs->av1_frame_type_flags;
+   f = fs->av1_frame_type & 3u;
+   if (fs->av1_show_frame) f |= 4u;
+   if (fs->av1_error_resilient_mode) f |= 8u;
+   if (fs->av1_disable_cdf_update) f |= 16u;
+   if (fs->av1_allow_screen_content_tools) f |= 32u;
+   if (fs->av1_force_integer_mv) f |= 64u;
+   if (fs->av1_allow_intrabc) f |= 128u;
+   return f;
+}
+
+static inline void
+nv_nvdec_pic_setup_apply_av1_header(uint32_t *pic_dwords,
+                                    uint32_t pic_dwords_cap,
+                                    const struct nv_nvdec_frame_setup *fs)
+{
+   if (!pic_dwords || !fs)
+      return;
+   if (pic_dwords_cap > NV_AV1_PS_PROF_TIER_LEVEL)
+      pic_dwords[NV_AV1_PS_PROF_TIER_LEVEL] = nv_av1_pack_prof_tier_level(fs);
+   if (pic_dwords_cap > NV_AV1_PS_FRAME_TYPE_FLAGS)
+      pic_dwords[NV_AV1_PS_FRAME_TYPE_FLAGS] = nv_av1_pack_frame_type_flags(fs);
+   if (pic_dwords_cap > NV_AV1_PS_ORDER_HINT)
+      pic_dwords[NV_AV1_PS_ORDER_HINT] = fs->av1_order_hint;
+   if (pic_dwords_cap > NV_AV1_PS_PRIMARY_REF)
+      pic_dwords[NV_AV1_PS_PRIMARY_REF] = fs->av1_primary_ref_frame;
+   if (fs->history_gpu_addr && pic_dwords_cap > NV_AV1_PS_CDF_OFF)
+      pic_dwords[NV_AV1_PS_CDF_OFF] = (uint32_t)(fs->history_gpu_addr >> 8);
+}
+
+/**
  * Populate a host-mapped pic_setup buffer with essential geometry/output
  * offsets from frame_setup.  Does not fill full reference lists (caller or
  * higher-level VA-API path must extend); provides a valid minimal header so
@@ -584,18 +811,38 @@ nv_nvdec_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
    case NV_NVDEC_APP_ID_HEVC:
       if (pic_dwords_cap > NV_HEVC_PS_PIC_WH)
          pic_dwords[NV_HEVC_PS_PIC_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      nv_nvdec_pic_setup_apply_hevc_sps_pps(pic_dwords, pic_dwords_cap, fs);
       if (pic_dwords_cap > NV_HEVC_PS_CURR_IDX)
          pic_dwords[NV_HEVC_PS_CURR_IDX] = fs->picture_index;
+      if (pic_dwords_cap > NV_HEVC_PS_NUM_REFL0)
+         pic_dwords[NV_HEVC_PS_NUM_REFL0] = fs->num_refl0;
+      if (pic_dwords_cap > NV_HEVC_PS_NUM_REFL1)
+         pic_dwords[NV_HEVC_PS_NUM_REFL1] = fs->num_refl1;
       if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_HEVC_PS_OUTPUT_LUMA_OFF)
          pic_dwords[NV_HEVC_PS_OUTPUT_LUMA_OFF] =
             (uint32_t)(fs->output_luma_gpu_addr >> 8);
       if (fs->output_chroma_gpu_addr && pic_dwords_cap > NV_HEVC_PS_OUTPUT_CHROMA_OFF)
          pic_dwords[NV_HEVC_PS_OUTPUT_CHROMA_OFF] =
             (uint32_t)(fs->output_chroma_gpu_addr >> 8);
+      /* DPB planes reuse H.264 slot arrays (same count limits) */
+      {
+         uint32_t si, n = fs->dpb_slot_count;
+         if (n > NV_H264_PS_MAX_DPB_SLOTS)
+            n = NV_H264_PS_MAX_DPB_SLOTS;
+         for (si = 0; si < n; si++) {
+            uint32_t dl = NV_H264_PS_DPB_LUMA_BASE + si;
+            uint32_t dc = NV_H264_PS_DPB_CHROMA_BASE + si;
+            if (dl < pic_dwords_cap && fs->dpb_luma_gpu_addr[si])
+               pic_dwords[dl] = (uint32_t)(fs->dpb_luma_gpu_addr[si] >> 8);
+            if (dc < pic_dwords_cap && fs->dpb_chroma_gpu_addr[si])
+               pic_dwords[dc] = (uint32_t)(fs->dpb_chroma_gpu_addr[si] >> 8);
+         }
+      }
       break;
    case NV_NVDEC_APP_ID_AV1:
       if (pic_dwords_cap > NV_AV1_PS_FRAME_WH)
          pic_dwords[NV_AV1_PS_FRAME_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      nv_nvdec_pic_setup_apply_av1_header(pic_dwords, pic_dwords_cap, fs);
       if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_AV1_PS_OUTPUT_LUMA_OFF)
          pic_dwords[NV_AV1_PS_OUTPUT_LUMA_OFF] =
             (uint32_t)(fs->output_luma_gpu_addr >> 8);

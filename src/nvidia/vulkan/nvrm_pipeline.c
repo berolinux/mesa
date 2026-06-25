@@ -2830,6 +2830,10 @@ nvrm_fill_compute_desc(struct nvrm_cmd_buffer *cmd, struct nv_qmd_desc *desc,
    desc->sm_global_caching = true;
    desc->invalidate_caches = !cmd->compute_init_done;
 
+   /* tick104: clamp CTA / local mem from GR probe (max warps, stack scale) */
+   if (info)
+      nv_qmd_desc_apply_device_gr_limits(desc, info);
+
    /* Ensure compute program object exists (smoke SPH+EXIT if still empty) */
    if (cs && !cs->uploaded && cs->rm)
       (void)nv_shader_upload_compute_smoke(cs, 0, 0, 0,

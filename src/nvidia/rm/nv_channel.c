@@ -2960,8 +2960,16 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
       }
    }
 
-   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count, sass_version,
-                          0, 0); /* no QMD sema — host sema completes */
+   /* tick104: host-sema G2 path also respects GR probe limits */
+   if (ch && ch->info) {
+      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
+                                sass_version, 0, 0,
+                                ch->info->max_warps_per_sm,
+                                ch->info->thread_stack_scaling);
+   } else {
+      nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
+                             sass_version, 0, 0); /* no QMD sema — host sema completes */
+   }
 
    for (i = 0; i < n; i++) {
       uint32_t cc = classes[i];

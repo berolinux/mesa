@@ -23,6 +23,9 @@
 
 #include "nv_push.h"
 
+/* Forward decl for apply_device_gr_limits / smoke_dispatch_gr (nv_device_info.h) */
+struct nv_device_info;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -921,6 +924,17 @@ nv_qmd_desc_init_smoke_gr(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
    nv_qmd_desc_apply_gr_limits(d, max_warps_per_sm, thread_stack_scaling);
 }
 
+/** tick104: apply GR limits from nv_device_info (NULL-safe). */
+static inline void
+nv_qmd_desc_apply_device_gr_limits(struct nv_qmd_desc *d,
+                                   const struct nv_device_info *info)
+{
+   if (!d || !info)
+      return;
+   nv_qmd_desc_apply_gr_limits(d, info->max_warps_per_sm,
+                               info->thread_stack_scaling);
+}
+
 /**
  * Full compute launch with optional method-level invalidates + sema on QMD.
  * When sema_gpu_addr is set, RELEASE_ENABLE0 is applied via encode_full.
@@ -963,14 +977,18 @@ nv_compute_emit_dispatch_with_sema(struct nv_push *p,
  * with sema, SEND_PCAS.  Returns sema_payload (pass-through) for CPU wait.
  * Does not submit GPFIFO — caller uses nv_channel_submit_wait_sema().
  */
+/**
+ * tick104: smoke dispatch with optional device GR limits (warps / stack scale).
+ */
 static inline uint32_t
-nv_compute_push_smoke_dispatch(struct nv_push *p, uint32_t class_compute,
-                               uint8_t spa_version,
-                               uint64_t program_gpu_addr,
-                               uint32_t register_count,
-                               uint64_t qmd_gpu_addr, void *qmd_host,
-                               uint64_t sema_gpu_addr, uint32_t sema_payload,
-                               bool emit_init)
+nv_compute_push_smoke_dispatch_gr(struct nv_push *p, uint32_t class_compute,
+                                  uint8_t spa_version,
+                                  uint64_t program_gpu_addr,
+                                  uint32_t register_count,
+                                  uint64_t qmd_gpu_addr, void *qmd_host,
+                                  uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                  bool emit_init,
+                                  const struct nv_device_info *info)
 {
    struct nv_qmd_desc desc;
 
@@ -980,12 +998,35 @@ nv_compute_push_smoke_dispatch(struct nv_push *p, uint32_t class_compute,
    if (emit_init)
       nv_compute_emit_init_state(p, class_compute, spa_version, 0);
 
-   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count, spa_version,
-                          sema_gpu_addr, sema_payload);
+   if (info) {
+      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
+                                spa_version, sema_gpu_addr, sema_payload,
+                                info->max_warps_per_sm,
+                                info->thread_stack_scaling);
+   } else {
+      nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
+                             spa_version, sema_gpu_addr, sema_payload);
+   }
    nv_compute_emit_dispatch_with_sema(p, &desc, qmd_gpu_addr, qmd_host,
                                       class_compute, sema_gpu_addr,
                                       sema_payload, true);
    return sema_payload;
+}
+
+static inline uint32_t
+nv_compute_push_smoke_dispatch(struct nv_push *p, uint32_t class_compute,
+                               uint8_t spa_version,
+                               uint64_t program_gpu_addr,
+                               uint32_t register_count,
+                               uint64_t qmd_gpu_addr, void *qmd_host,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               bool emit_init)
+{
+   return nv_compute_push_smoke_dispatch_gr(p, class_compute, spa_version,
+                                            program_gpu_addr, register_count,
+                                            qmd_gpu_addr, qmd_host,
+                                            sema_gpu_addr, sema_payload,
+                                            emit_init, NULL);
 }
 
 /**
