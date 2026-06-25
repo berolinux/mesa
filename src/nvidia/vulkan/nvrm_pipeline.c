@@ -2961,7 +2961,7 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
                                       false /* inv in channel_prep or prior */);
    /* tick164 / pass22: unified host sema tail when policy on + sema VA set */
    if (desc.sema_release0_addr)
-      nv_pass22_emit_compute_dispatch_host_sema_tail(
+      nv_pass24_emit_compute_dispatch_host_sema_tail(
          &cmd->push, desc.sema_release0_addr, desc.sema_release0_value,
          NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
    /* tick139 / pass13: post-launch invalidate wave (cuda-shaped) */
@@ -3073,13 +3073,13 @@ nvrm_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
          nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_COMPUTE);
       nv_compute_emit_inline_qmd_launch(&cmd->push, qmd_addr, qmd_tmp, true);
       if (desc.sema_release0_addr)
-         nv_pass22_emit_compute_dispatch_host_sema_tail(
+         nv_pass24_emit_compute_dispatch_host_sema_tail(
             &cmd->push, desc.sema_release0_addr, desc.sema_release0_value,
             NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
    } else {
       nv_compute_emit_dispatch(&cmd->push, &desc, qmd_addr, class_compute);
       if (desc.sema_release0_addr)
-         nv_pass22_emit_compute_dispatch_host_sema_tail(
+         nv_pass24_emit_compute_dispatch_host_sema_tail(
             &cmd->push, desc.sema_release0_addr, desc.sema_release0_value,
             NV_PASS21_HOST_SEMA_DEFAULT_MODE, false);
    }

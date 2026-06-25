@@ -4329,8 +4329,9 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
 
       /* tick158 / pass21: program launch (pass17 QMD + pass21 host sema tail).
        * tick163 / pass22: when pass22 explicit-emit policy is on, prefer
-       * nv_pass22_compute_object_emit_launch (default NIR depth kind); fall
-       * back to pass21 direct emit if pass22 build/launch fails. */
+       * nv_pass22_compute_object_emit_launch (default NIR depth kind).
+       * tick177 / pass24: try pass24 launch first when pass23/24 policy gate
+       * passes; fall back pass22 then pass21 direct emit. */
       if (program_gpu_addr && sema_gpu_addr) {
          uint32_t qmd_scratch[NV_QMD_DWORDS];
          enum nv_host_sema_mode hs_mode =
@@ -4349,7 +4350,7 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
          if (nv_pass22_explicit_emit_required()) {
             struct nv_pass21_compute_object p22obj;
             memset(&p22obj, 0, sizeof(p22obj));
-            p22obj.shader_kind = NV_PASS22_NIR_DEFAULT_KIND;
+            p22obj.shader_kind = NV_PASS24_NIR_DEFAULT_KIND;
             p22obj.program_gpu_addr = program_gpu_addr;
             p22obj.qmd_gpu_addr = qmd_gpu_addr;
             p22obj.qmd_sema_gpu = sema_gpu_addr;
@@ -4358,10 +4359,16 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
             p22obj.spa_version = sass_version;
             p22obj.grid_x = grid_x;
             p22obj.cta_x = cta_x;
-            if (nv_pass22_compute_object_build(&p22obj) == 0)
-               emit_ok = nv_pass22_compute_object_emit_launch(
-                  &push, cc_try, &p22obj, lmem_gpu_addr, true, sema_gpu_addr,
-                  sema_payload, hs_mode);
+            if (nv_pass22_compute_object_build(&p22obj) == 0) {
+               if (nv_pass23_24_emit_policy_gate() && nv_pass24_policy_ok())
+                  emit_ok = nv_pass24_compute_object_emit_launch(
+                     &push, cc_try, &p22obj, lmem_gpu_addr, true,
+                     sema_gpu_addr, sema_payload, hs_mode);
+               if (emit_ok != 0)
+                  emit_ok = nv_pass22_compute_object_emit_launch(
+                     &push, cc_try, &p22obj, lmem_gpu_addr, true,
+                     sema_gpu_addr, sema_payload, hs_mode);
+            }
          }
          if (emit_ok != 0) {
             emit_ok = nv_compute_emit_g2_program_launch_pass21(

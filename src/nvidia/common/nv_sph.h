@@ -1459,6 +1459,30 @@ nv_pass22_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
  */
 #define NV_PASS22_GALLIUM_VULKAN_DISPATCH_TAIL  1
 
+/**
+ * tick177: pass24 dispatch host sema tail — pass22 tail plus pass23/24 gate.
+ * No-op (returns 0) if gate fails so callers may still fall back to pass22.
+ */
+static inline int
+nv_pass24_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
+                                               uint64_t host_sema_gpu,
+                                               uint32_t host_sema_payload,
+                                               enum nv_host_sema_mode host_sema_mode,
+                                               bool pre_wfi)
+{
+   if (!p || !host_sema_gpu)
+      return 0;
+   if (!nv_pass23_24_emit_policy_gate())
+      return 0;
+   if (!nv_pass24_explicit_emit_required())
+      return 0;
+   return nv_pass22_emit_compute_dispatch_host_sema_tail(
+      p, host_sema_gpu, host_sema_payload, host_sema_mode, pre_wfi);
+}
+
+#define NV_PASS24_CHANNEL_G2_LAUNCH_LADDER     1
+#define NV_PASS24_GALLIUM_VULKAN_DISPATCH_TAIL 1
+
 #ifdef __cplusplus
 }
 #endif

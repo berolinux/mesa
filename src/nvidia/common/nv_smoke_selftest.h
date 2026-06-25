@@ -4210,6 +4210,45 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
                 sc, 0x100000ull, 0x200000ull, 0x210000ull, 0x300000ull) != 0)
             return -855;
       }
+      /* tick177: channel pass24 G2 ladder + pass24 dispatch tail wired */
+      if (!NV_PASS24_CHANNEL_G2_LAUNCH_LADDER ||
+          !NV_PASS24_GALLIUM_VULKAN_DISPATCH_TAIL)
+         return -856;
+      {
+         struct nv_push p177;
+         uint32_t b177[32];
+         memset(b177, 0, sizeof(b177));
+         nv_push_init(&p177, b177, (uint32_t)(sizeof(b177) / 4));
+         if (nv_pass24_emit_compute_dispatch_host_sema_tail(
+                &p177, 0x5b0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+                false) != 0)
+            return -857;
+         if (nv_push_dw_count(&p177) < 4u)
+            return -858;
+      }
+      {
+         struct nv_push p177b;
+         uint32_t b177b[256];
+         struct nv_pass21_compute_object o177;
+         memset(b177b, 0, sizeof(b177b));
+         memset(&o177, 0, sizeof(o177));
+         nv_push_init(&p177b, b177b, (uint32_t)(sizeof(b177b) / 4));
+         o177.shader_kind = NV_PASS24_NIR_DEFAULT_KIND;
+         o177.program_gpu_addr = 0x100000ull;
+         o177.qmd_gpu_addr = 0x200000ull;
+         o177.qmd_sema_gpu = 0x210000ull;
+         o177.qmd_sema_payload = 1u;
+         o177.register_count = 8u;
+         o177.spa_version = 0x0700u;
+         o177.grid_x = 1u;
+         o177.cta_x = 32u;
+         if (nv_pass22_compute_object_build(&o177) != 0)
+            return -859;
+         if (nv_pass24_compute_object_emit_launch(
+                &p177b, 0xc5c0u, &o177, 0x400000ull, true, 0x210000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -860;
+      }
    }
 
    if (trace_push && trace_dwords) {
