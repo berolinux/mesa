@@ -1263,6 +1263,16 @@ nv_nir_compile(const struct nir_shader *nir,
                  (int)has_tex, (int)has_store, (unsigned)regs);
 
       if (!isel_shader(&sass, nir, &ra)) {
+         /* tick167: compute isel failure — pass22 default depth via SASS smoke */
+         if (opts->stage == NV_COMPILER_STAGE_COMPUTE) {
+            nv_sass_buf_finish(&sass);
+            nv_ra_context_finish(&ra);
+            return nv_nir_compile_compute_pass22_default(0x57u, 0x300000ull,
+                                                        opts->min_registers
+                                                           ? opts->min_registers
+                                                           : 16,
+                                                        out);
+         }
          snprintf(out->error, sizeof(out->error), "SASS isel OOM");
          nv_sass_buf_finish(&sass);
          nv_ra_context_finish(&ra);

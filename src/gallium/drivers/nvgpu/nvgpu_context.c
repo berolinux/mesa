@@ -1285,7 +1285,8 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             if (ind_base)
                ind_dwords = (draw_count * ind_stride) / 4u;
             /* tick152: path C (MME, gated off while stubs) then path A/B shadow */
-            ladder_rc = nv_3d_emit_draw_indirect_ladder_pass20(
+            /* tick166 / pass22: same ladder; path C gated via pass22 MME policy */
+            ladder_rc = nv_3d_emit_draw_indirect_ladder_pass22(
                &push, ind_gpu, topo, info->index_size != 0,
                ind_base, ind_dwords, draw_count, ind_stride,
                true /* mme table primed in ensure_3d_init */,

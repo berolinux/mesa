@@ -4068,6 +4068,33 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -817; /* no shadow => 0; with mme stub still 0 from path C fail */
    }
 
+   /* tick167: Vulkan pass22 barrier entry + compute NIR default policy */
+   {
+      if (!NV_PASS22_G3_BARRIER_USES_PASS21)
+         return -818;
+      if (!NV_PASS22_RE_EXPLICIT_EMIT_POLICY)
+         return -819;
+      if (NV_PASS22_NIR_COMPUTE_DEFAULT_KIND != 3 &&
+          NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
+         return -820;
+      /* pass22 barrier with sema matches Vulkan heavy barrier + optional sema shape */
+      {
+         struct nv_push pv;
+         uint32_t bv[128];
+         uint32_t n0, n1;
+         memset(bv, 0, sizeof(bv));
+         nv_push_init(&pv, bv, (uint32_t)(sizeof(bv) / 4));
+         nv_3d_emit_g3_barrier_all_pass22(&pv, 0, 0,
+                                          NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+         n0 = nv_push_dw_count(&pv);
+         nv_3d_emit_g3_barrier_all_pass22(&pv, 0x560000ull, 2u,
+                                          NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+         n1 = nv_push_dw_count(&pv);
+         if (n1 <= n0)
+            return -821;
+      }
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

@@ -7,6 +7,7 @@
 
 #include "nv_rm.h"
 #include "nv_sph.h"
+#include "nv_nir.h" /* tick165: pass22 compute default compile fallback */
 
 /* Optional NIR compiler (linked when idep_nvidia_compiler available) */
 
@@ -336,7 +337,7 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
       if (nv_nir_compile_compute_pass22_default(0x57u, 0x300000ull,
                                                 (uint16_t)regs, &cres) &&
           cres.success && cres.code && cres.code_size) {
-         int ur = nv_shader_upload_code(sh, cres.code, cres.code_size);
+         int ur = nv_shader_upload_code(sh, cres.code, cres.code_size, regs);
          nv_compiler_result_finish(&cres);
          if (ur == 0) {
             sh->register_count = regs;

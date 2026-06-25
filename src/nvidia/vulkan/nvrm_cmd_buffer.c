@@ -413,13 +413,17 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       }
    }
 
-   /* Empty barrier: pass21 full inv+WFI (tick159; was pass18 full invalidate). */
+   /* Empty barrier: pass21/22 full inv+WFI (tick159/167). */
    if (!pDependencyInfo ||
        (pDependencyInfo->memoryBarrierCount == 0 &&
         pDependencyInfo->bufferMemoryBarrierCount == 0 &&
         pDependencyInfo->imageMemoryBarrierCount == 0)) {
       nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-      nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
+      if (NV_PASS22_G3_BARRIER_USES_PASS21)
+         nv_3d_emit_g3_barrier_all_pass22(&cmd->push, 0, 0,
+                                          NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+      else
+         nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
       return;
    }
 
@@ -495,10 +499,14 @@ nvrm_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    (void)tex_d;
 
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   /* tick159 / pass21: heavy/global barriers use NVC597 full inv ladder + WFI;
-    * narrower access uses fine-grained barrier_from_access (pass18 path). */
+   /* tick159 / pass21 + tick167 / pass22: heavy/global barriers use NVC597 full
+    * inv ladder + WFI; narrower access uses fine-grained pass21/pass18 path. */
    if (heavy_all || (need_tex && after_shader_write && before_shader_read)) {
-      nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
+      if (NV_PASS22_G3_BARRIER_USES_PASS21)
+         nv_3d_emit_g3_barrier_all_pass22(&cmd->push, 0, 0,
+                                          NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+      else
+         nv_3d_emit_g3_barrier_all_pass21(&cmd->push);
    } else if (before_shader_read || before_tex || after_shader_write ||
               after_transfer || after_color || after_depth || before_code) {
       shader_instr = before_code;
