@@ -3128,6 +3128,71 @@ nv_nvdec_session_emit_frame(struct nv_push *p, struct nv_nvdec_session *s,
 }
 
 /**
+ * tick123: build nv_nvdec_pic_setup method args from session + bitstream BO.
+ * Used by Gallium/channel sema submit path (nv_channel_nvdec_frame_sema_submit).
+ */
+static inline void
+nv_nvdec_session_fill_pic_setup_methods(const struct nv_nvdec_session *s,
+                                        uint64_t bitstream_gpu_addr,
+                                        uint32_t bitstream_size,
+                                        struct nv_nvdec_pic_setup *out)
+{
+   if (!out)
+      return;
+   memset(out, 0, sizeof(*out));
+   if (!s)
+      return;
+   out->app_id = s->app_id;
+   out->picture_index = s->next_picture_index;
+   out->pic_setup_gpu = s->pic_setup_gpu_addr;
+   out->bitstream_gpu = bitstream_gpu_addr;
+   out->execute_flags = 1u;
+   out->display_buf_size = bitstream_size;
+   if (s->status_gpu_addr)
+      out->history_gpu = 0; /* status is sema path, not history */
+   (void)bitstream_size;
+}
+
+/**
+ * tick123: emit frame via pic_setup methods + sema + EXECUTE (no WFI).
+ * Prefer when caller will wait on status sema (Gallium end_frame / channel path).
+ * Does not increment next_picture_index (caller does after successful submit).
+ */
+static inline int
+nv_nvdec_session_emit_frame_sema(struct nv_push *p, struct nv_nvdec_session *s,
+                                 uint64_t bitstream_gpu_addr,
+                                 uint32_t bitstream_size,
+                                 uint32_t sema_payload)
+{
+   struct nv_nvdec_pic_setup pic;
+   uint32_t payload;
+
+   if (!p || !s || !bitstream_gpu_addr || !bitstream_size)
+      return -1;
+
+   if (s->pic_setup_cpu_map && s->pic_setup_map_bytes >= 32)
+      nv_nvdec_session_pack_pic_setup(s);
+
+   nv_nvdec_session_fill_pic_setup_methods(s, bitstream_gpu_addr,
+                                           bitstream_size, &pic);
+   payload = sema_payload ? sema_payload : (s->next_picture_index + 1u);
+
+   if (!s->object_set && s->class_nvdec) {
+      nv_nvdec_set_object(p, s->class_nvdec);
+      s->object_set = true;
+   } else if (!s->object_set) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_NVDEC);
+   }
+
+   nv_nvdec_emit_pic_setup(p, &pic);
+   if (s->status_gpu_addr)
+      nv_nvdec_emit_semaphore_release_reset(p, s->status_gpu_addr, payload,
+                                            s->status_cpu_map);
+   nv_push_method(p, NV_NVDEC_EXECUTE, pic.execute_flags);
+   return 0;
+}
+
+/**
  * One-shot decode: init session, load PS from annexb if present in same buffer,
  * emit frame.  Useful for gallium/Vulkan video entrypoints.
  */

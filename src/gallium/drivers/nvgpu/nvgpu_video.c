@@ -647,6 +647,9 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
                                      dec->pic_setup_map,
                                      NVGPU_VID_PIC_SETUP_BO_SIZE);
    nv_nvdec_session_set_status_bo(&dec->session, st_gpu);
+   if (dec->status_map)
+      nv_nvdec_session_set_status_cpu_map(
+         &dec->session, (volatile uint32_t *)dec->status_map);
    nv_nvdec_session_pack_pic_setup(&dec->session);
 
    /* Pre-arm sema payload (picture_index+1 written by NVDEC sema release) */
@@ -654,12 +657,35 @@ nvgpu_video_end_frame(struct pipe_video_codec *codec,
    if (dec->status_map)
       *(volatile uint32_t *)dec->status_map = 0;
 
-   if (!nvgpu_push_start(ctx, &push, 256))
-      goto out_clear;
+   /*
+    * tick123: prefer channel sema submit (class ladder + wait) when channel
+    * exists; fall back to push-only session_emit_frame_sema / emit_frame.
+    */
+   if (ctx->channel) {
+      struct nv_nvdec_pic_setup vpic;
+      nv_nvdec_session_fill_pic_setup_methods(&dec->session, bs_gpu, bs_size,
+                                              &vpic);
+      r = nv_channel_nvdec_frame_sema_submit(
+         ctx->channel, dec->class_nvdec, &vpic, st_gpu,
+         dec->status_map ? (volatile uint32_t *)dec->status_map : NULL,
+         dec->last_frame_sema_payload, true, 2000000000ull, true);
+      if (r == 0 || r == -EAGAIN)
+         r = (r == -EAGAIN) ? -1 : 0;
+   }
 
-   if (nv_nvdec_session_emit_frame(&push, &dec->session, bs_gpu, bs_size) == 0)
-      r = 0;
-   nvgpu_push_finish(ctx, &push, true);
+   if (r != 0) {
+      if (!nvgpu_push_start(ctx, &push, 256))
+         goto out_clear;
+      /* sema path first (matches channel submit encoding); then full frame_setup */
+      if (nv_nvdec_session_emit_frame_sema(&push, &dec->session, bs_gpu,
+                                           bs_size,
+                                           dec->last_frame_sema_payload) == 0)
+         r = 0;
+      else if (nv_nvdec_session_emit_frame(&push, &dec->session, bs_gpu,
+                                           bs_size) == 0)
+         r = 0;
+      nvgpu_push_finish(ctx, &push, true);
+   }
 
    /* Wait for NVDEC sema on status BO, else channel GPFIFO idle as fallback */
    if (r == 0 && dec->status_map) {
@@ -708,8 +734,12 @@ nvgpu_create_video_codec(struct pipe_context *context,
 
    if (!context || !templ || !ctx)
       return NULL;
-   if (templ->entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
+   /* tick123: bitstream decode (NVDEC); encode entrypoint reserved for NVENC later */
+   if (templ->entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM &&
+       templ->entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
       return NULL;
+   if (templ->entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE)
+      return NULL; /* encoder path not yet wired to pipe_video_codec */
 
    app_id = nvgpu_profile_to_app_id(templ->profile);
    if (!app_id)
@@ -751,6 +781,9 @@ nvgpu_create_video_codec(struct pipe_context *context,
       NVGPU_VID_PIC_SETUP_BO_SIZE);
    nv_nvdec_session_set_status_bo(&dec->session,
       nv_rm_bo_gpu_offset(dec->status_bo));
+   if (dec->status_map)
+      nv_nvdec_session_set_status_cpu_map(
+         &dec->session, (volatile uint32_t *)dec->status_map);
 
    return &dec->base;
 }
@@ -771,15 +804,22 @@ nvgpu_screen_get_video_param(struct pipe_screen *pscreen,
    uint32_t app_id;
    (void)pscreen;
 
-   if (entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM)
+   if (entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM &&
+       entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
       return 0;
 
    app_id = nvgpu_profile_to_app_id(profile);
    if (!app_id)
       return 0;
+   /* tick123: advertise encode capability for H.264/HEVC; create returns NULL until wired */
+   if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE &&
+       app_id != NV_NVDEC_APP_ID_H264 && app_id != NV_NVDEC_APP_ID_HEVC)
+      return 0;
 
    switch (param) {
    case PIPE_VIDEO_CAP_SUPPORTED:
+      if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE)
+         return 0; /* capability probe only; implementation incomplete */
       return 1;
    case PIPE_VIDEO_CAP_MAX_WIDTH:
    case PIPE_VIDEO_CAP_MAX_HEIGHT:

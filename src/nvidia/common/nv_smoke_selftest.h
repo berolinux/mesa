@@ -1043,6 +1043,47 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -357;
    }
 
+   /* tick123: session_fill_pic_setup_methods + emit_frame_sema shape */
+   {
+      struct nv_nvdec_session sess;
+      struct nv_nvdec_pic_setup pic;
+      uint32_t buf_s[128];
+      uint32_t ns, is;
+      bool saw_app = false, saw_exec = false, saw_sema = false;
+
+      nv_nvdec_session_init(&sess, 0xc4b0u, NV_NVDEC_APP_ID_H264);
+      sess.pic_setup_gpu_addr = 0x710000ull;
+      sess.status_gpu_addr = 0x300000ull;
+      sess.next_picture_index = 3;
+      nv_nvdec_session_fill_pic_setup_methods(&sess, 0x720000ull, 256, &pic);
+      if (pic.app_id != NV_NVDEC_APP_ID_H264 || pic.picture_index != 3)
+         return -358;
+      if (pic.pic_setup_gpu != 0x710000ull || pic.bitstream_gpu != 0x720000ull)
+         return -359;
+
+      memset(buf_s, 0, sizeof(buf_s));
+      nv_push_init(&p, buf_s, (uint32_t)(sizeof(buf_s) / 4));
+      if (nv_nvdec_session_emit_frame_sema(&p, &sess, 0x720000ull, 256, 4) != 0)
+         return -360;
+      ns = nv_push_dw_count(&p);
+      if (ns < 6)
+         return -361;
+      for (is = 0; is + 1 < ns; is++) {
+         uint32_t hdr = buf_s[is];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVDEC_SET_APPLICATION_ID)
+            saw_app = true;
+         if (method == NV_NVDEC_EXECUTE)
+            saw_exec = true;
+         if (method == NV_NVDEC_SEMAPHORE_A)
+            saw_sema = true;
+      }
+      if (!saw_app || !saw_exec || !saw_sema)
+         return -362;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
