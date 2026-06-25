@@ -1492,6 +1492,149 @@ nv_nir_g2_store_imm_smoke_selftest(uint32_t imm_value, uint64_t store_gpu_addr,
    return 0;
 }
 
+/*
+ * tick163: per pass21/pass22 NIR depth kind via nv_sass smoke emitters + SPH.
+ * Not full NIR AST lower; matches hand nv_sph_build_compute_pass21_kind shapes
+ * so channel/G2 can trust compiler pipeline output for ladder bringup.
+ */
+bool
+nv_nir_compile_g2_pass22_kind_smoke(int pass21_kind, uint32_t imm_value,
+                                    uint64_t store_gpu_addr,
+                                    uint16_t min_registers,
+                                    struct nv_compiler_result *out)
+{
+   struct nv_compiler_options opts;
+   struct nv_sph_info info;
+   struct nv_sass_buf sass;
+   uint16_t regs;
+   uint8_t *code;
+   uint32_t total, sass_bytes;
+   uint32_t imm;
+   uint64_t store;
+   bool ok = false;
+   bool global_store = false;
+
+   if (!out)
+      return false;
+   memset(out, 0, sizeof(*out));
+   memset(&opts, 0, sizeof(opts));
+   opts.stage = NV_COMPILER_STAGE_COMPUTE;
+   opts.min_registers = min_registers ? min_registers : 16;
+   imm = imm_value ? imm_value : 0x57u;
+   store = store_gpu_addr ? store_gpu_addr : 0x300000ull;
+
+   nv_sass_buf_init(&sass);
+   switch (pass21_kind) {
+   case NV_PASS21_CS_EXIT_ONLY:
+      ok = nv_sass_emit_smoke_nop_exit(&sass);
+      global_store = false;
+      break;
+   case NV_PASS21_CS_STORE_IMM:
+      ok = nv_sass_emit_smoke_store_imm_at_gva(&sass, store, imm);
+      global_store = true;
+      break;
+   case NV_PASS21_CS_S2R_MULTI_SR:
+      ok = nv_sass_emit_smoke_s2r_pass16_multi_sr_exit(&sass, imm);
+      global_store = false;
+      break;
+   case NV_PASS21_CS_S2R_STORE_IMM:
+   case NV_PASS21_CS_S2R_STORE_IMM_BAR:
+      ok = nv_sass_emit_smoke_s2r_store_imm_at_gva(&sass, store, imm);
+      global_store = true;
+      break;
+   default:
+      snprintf(out->error, sizeof(out->error), "unknown pass21 kind %d",
+               pass21_kind);
+      nv_sass_buf_finish(&sass);
+      return false;
+   }
+   if (!ok) {
+      snprintf(out->error, sizeof(out->error), "SASS emit failed kind=%d",
+               pass21_kind);
+      nv_sass_buf_finish(&sass);
+      return false;
+   }
+
+   regs = opts.min_registers;
+   if (sass.max_reg > regs)
+      regs = sass.max_reg;
+   if (regs < 4)
+      regs = 4;
+   if (regs > 255)
+      regs = 255;
+
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs;
+   info.does_global_store = global_store;
+   info.barrier_count = (pass21_kind == NV_PASS21_CS_S2R_STORE_IMM_BAR) ? 2 : 1;
+   nv_sph_encode(&info, out->blob.sph);
+   fill_sph_blob_sass(&out->blob, &sass);
+
+   sass_bytes = sass.count * 4;
+   if (sass_bytes < out->blob.sass_dwords * 4)
+      sass_bytes = out->blob.sass_dwords * 4;
+   total = NV_SPH_BYTES + sass_bytes;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   out->blob.total_bytes = total;
+
+   code = calloc(1, total);
+   if (!code) {
+      snprintf(out->error, sizeof(out->error), "OOM");
+      nv_sass_buf_finish(&sass);
+      return false;
+   }
+   memcpy(code, out->blob.sph, NV_SPH_BYTES);
+   if (sass.dwords && sass.count)
+      memcpy(code + NV_SPH_BYTES, sass.dwords, sass.count * 4);
+   else
+      memcpy(code + NV_SPH_BYTES, out->blob.sass, out->blob.sass_dwords * 4);
+
+   out->code = code;
+   out->code_size = total;
+   out->register_count = regs;
+   out->local_mem_size = 0;
+   out->shared_mem_size = 0;
+   out->success = true;
+   nv_sass_buf_finish(&sass);
+   return true;
+}
+
+int
+nv_nir_g2_pass22_kind_ladder_selftest(uint16_t regs)
+{
+   static const int kinds[] = {
+      NV_PASS21_CS_EXIT_ONLY,
+      NV_PASS21_CS_STORE_IMM,
+      NV_PASS21_CS_S2R_MULTI_SR,
+      NV_PASS21_CS_S2R_STORE_IMM,
+      NV_PASS21_CS_S2R_STORE_IMM_BAR,
+   };
+   unsigned i;
+   uint16_t r = regs ? regs : 16;
+
+   for (i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+      struct nv_compiler_result res;
+      if (!nv_nir_compile_g2_pass22_kind_smoke(kinds[i], 0x63u + i, 0x300000ull,
+                                               r, &res) ||
+          !res.success) {
+         nv_compiler_result_finish(&res);
+         return -80 - (int)i;
+      }
+      if (res.code_size < NV_SPH_BYTES || !res.code) {
+         nv_compiler_result_finish(&res);
+         return -85 - (int)i;
+      }
+      if ((res.code[0] & 0xf) != NV_SPH_TYPE_COMPUTE) {
+         nv_compiler_result_finish(&res);
+         return -90 - (int)i;
+      }
+      nv_compiler_result_finish(&res);
+   }
+   return 0;
+}
+
 void
 nv_compiler_result_finish(struct nv_compiler_result *res)
 {

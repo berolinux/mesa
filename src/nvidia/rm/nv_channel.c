@@ -9,6 +9,7 @@
 #include "nv_device_info.h"
 #include "nv_push.h"
 #include "nv_qmd.h"
+#include "nv_sph.h" /* tick163: pass22 compute object / NIR depth launch */
 #include "nv_rm.h"
 #include "nv_video_methods.h"
 
@@ -4297,9 +4298,10 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
 
-      /* tick158 / pass21: program launch path (pass17 QMD + pass21 host sema
-       * tail via nv_compute_emit_g2_program_launch_pass21).  Uses program VA
-       * when provided; same qmd_gpu_addr for inline upload target. */
+      /* tick158 / pass21: program launch (pass17 QMD + pass21 host sema tail).
+       * tick163 / pass22: when pass22 explicit-emit policy is on, prefer
+       * nv_pass22_compute_object_emit_launch (default NIR depth kind); fall
+       * back to pass21 direct emit if pass22 build/launch fails. */
       if (program_gpu_addr && sema_gpu_addr) {
          uint32_t qmd_scratch[NV_QMD_DWORDS];
          enum nv_host_sema_mode hs_mode =
@@ -4307,6 +4309,7 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
                : NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+         int emit_ok = -1;
 
          if (sema_reset && sema_cpu)
             sema_cpu[0] = 0;
@@ -4314,11 +4317,31 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
          if (!map)
             return -ENOMEM;
          nv_push_init(&push, map, need);
-         if (nv_compute_emit_g2_program_launch_pass21(
-                &push, cc_try, qmd_scratch, program_gpu_addr, qmd_gpu_addr,
-                lmem_gpu_addr, sass_version, register_count, sema_gpu_addr,
-                sema_payload, grid_x, cta_x, true, sema_gpu_addr, sema_payload,
-                hs_mode) == 0) {
+         if (nv_pass22_explicit_emit_required()) {
+            struct nv_pass21_compute_object p22obj;
+            memset(&p22obj, 0, sizeof(p22obj));
+            p22obj.shader_kind = NV_PASS22_NIR_DEFAULT_KIND;
+            p22obj.program_gpu_addr = program_gpu_addr;
+            p22obj.qmd_gpu_addr = qmd_gpu_addr;
+            p22obj.qmd_sema_gpu = sema_gpu_addr;
+            p22obj.qmd_sema_payload = sema_payload;
+            p22obj.register_count = register_count;
+            p22obj.spa_version = sass_version;
+            p22obj.grid_x = grid_x;
+            p22obj.cta_x = cta_x;
+            if (nv_pass22_compute_object_build(&p22obj) == 0)
+               emit_ok = nv_pass22_compute_object_emit_launch(
+                  &push, cc_try, &p22obj, lmem_gpu_addr, true, sema_gpu_addr,
+                  sema_payload, hs_mode);
+         }
+         if (emit_ok != 0) {
+            emit_ok = nv_compute_emit_g2_program_launch_pass21(
+               &push, cc_try, qmd_scratch, program_gpu_addr, qmd_gpu_addr,
+               lmem_gpu_addr, sass_version, register_count, sema_gpu_addr,
+               sema_payload, grid_x, cta_x, true, sema_gpu_addr, sema_payload,
+               hs_mode);
+         }
+         if (emit_ok == 0) {
             nv_channel_push_advance(ch, nv_push_dw_count(&push));
             r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                             wait_timeout_ns, check_notifier);

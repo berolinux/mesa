@@ -74,6 +74,19 @@ int nv_nir_g2_store_imm_smoke_selftest(uint32_t imm_value, uint64_t store_gpu_ad
  */
 #define NV_PASS22_NIR_USES_HAND_SPH_LADDER  1
 
+/**
+ * tick163: compile one pass21/pass22 NIR depth kind through nv_sass smoke
+ * emitters + SPH encode (compiler pipeline, no full NIR AST yet).  kind uses
+ * nv_pass21_compute_shader_kind values from nv_sph.h.
+ */
+bool nv_nir_compile_g2_pass22_kind_smoke(int pass21_kind, uint32_t imm_value,
+                                         uint64_t store_gpu_addr,
+                                         uint16_t min_registers,
+                                         struct nv_compiler_result *out);
+
+/** tick163: host check — kind smoke builds valid compute SPH for all ladder kinds. */
+int nv_nir_g2_pass22_kind_ladder_selftest(uint16_t regs);
+
 void nv_compiler_result_finish(struct nv_compiler_result *res);
 
 /** Map nv_shader_kind / mesa stage to compiler stage. */

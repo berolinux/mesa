@@ -1256,6 +1256,8 @@ nv_pass21_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
 #define NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT  5u
 #define NV_PASS22_NIR_DEFAULT_KIND             NV_PASS21_CS_S2R_STORE_IMM
 #define NV_PASS22_NIR_MAX_KIND                 NV_PASS21_CS_S2R_STORE_IMM_BAR
+/* tick163: ladder uses hand SPH/SASS smoke until full nv_nir AST per kind */
+#define NV_PASS22_NIR_USES_HAND_SPH_LADDER     1
 
 /** tick162: pass21 kinds in silicon/NIR bringup order (includes BAR depth). */
 static inline unsigned

@@ -3927,6 +3927,50 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -790;
    }
 
+   /* tick163: pass22 channel policy + compiler kind ladder constants (no nv_nir.o) */
+   {
+      if (!NV_PASS22_NIR_USES_HAND_SPH_LADDER)
+         return -791;
+      if (NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
+         return -792;
+      /* channel G2 pass22 path: build+launch default kind must succeed host-side */
+      {
+         struct nv_pass21_compute_object chobj;
+         struct nv_push chp;
+         uint32_t chb[512];
+         memset(&chobj, 0, sizeof(chobj));
+         chobj.shader_kind = NV_PASS22_NIR_DEFAULT_KIND;
+         chobj.program_gpu_addr = 0x230000ull;
+         chobj.qmd_gpu_addr = 0x820000ull;
+         chobj.qmd_sema_gpu = 0x330000ull;
+         chobj.store_gpu_addr = 0x300000ull;
+         if (nv_pass22_compute_object_build(&chobj) != 0)
+            return -793;
+         memset(chb, 0, sizeof(chb));
+         nv_push_init(&chp, chb, (uint32_t)(sizeof(chb) / 4));
+         if (nv_pass22_compute_object_emit_launch(
+                &chp, 0xc5c0u, &chobj, 0, true, 0x330000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -794;
+         if (nv_push_dw_count(&chp) < nv_pass20_inline_qmd_launch_min_methods(true))
+            return -795;
+      }
+      /* pass22 fallback: pass21 launch still works without pass22 object */
+      {
+         struct nv_push p21;
+         uint32_t b21[512];
+         uint32_t q21[NV_QMD_DWORDS];
+         memset(q21, 0, sizeof(q21));
+         memset(b21, 0, sizeof(b21));
+         nv_push_init(&p21, b21, (uint32_t)(sizeof(b21) / 4));
+         if (nv_compute_emit_g2_program_launch_pass21(
+                &p21, 0xc5c0u, q21, 0x230000ull, 0x820000ull, 0, 0x53u, 16u,
+                0x330000ull, 1u, 1u, 1u, true, 0x330000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -796;
+      }
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
