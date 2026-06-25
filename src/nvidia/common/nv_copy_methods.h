@@ -729,6 +729,97 @@ nv_copy_push_image_2d(struct nv_push *p, uint32_t class_copy,
 }
 
 /**
+ * tick122: 2D pitch image copy with CE sema on final LAUNCH_DMA (G1 image path).
+ * sema_gpu_addr 0 falls back to sema-less image_2d + optional WFI by caller.
+ */
+static inline void
+nv_copy_emit_image_2d_with_sema(struct nv_push *p,
+                                uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                                uint32_t line_length, uint32_t pitch_in,
+                                uint32_t pitch_out, uint32_t line_count,
+                                uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   uint32_t launch;
+
+   if (!p || !line_length)
+      return;
+   if (!line_count)
+      line_count = 1;
+   if (!pitch_in)
+      pitch_in = line_length;
+   if (!pitch_out)
+      pitch_out = line_length;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, pitch_in);
+   nv_push_method(p, NVC6B5_PITCH_OUT, pitch_out);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, line_length);
+   nv_push_method(p, NVC6B5_LINE_COUNT, line_count);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_one_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/** SET_OBJECT + 2D pitch copy + CE sema (no host WFI). */
+static inline void
+nv_copy_push_image_2d_sema(struct nv_push *p, uint32_t class_copy,
+                           uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                           uint32_t line_length, uint32_t pitch_in,
+                           uint32_t pitch_out, uint32_t line_count,
+                           uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   nv_copy_emit_image_2d_with_sema(p, src_gpu_addr, dst_gpu_addr, line_length,
+                                   pitch_in, pitch_out, line_count,
+                                   sema_gpu_addr, sema_payload);
+}
+
+/**
+ * tick122: G1 combined slice — linear buffer copy sema then 2D pitch copy sema
+ * (second sema payload = sema_payload+1 if sema2 not set).
+ */
+static inline void
+nv_copy_emit_g1_buffer_then_image2d_sema(struct nv_push *p,
+                                         uint64_t buf_src, uint64_t buf_dst,
+                                         uint32_t buf_size,
+                                         uint64_t img_src, uint64_t img_dst,
+                                         uint32_t line_length, uint32_t pitch_in,
+                                         uint32_t pitch_out, uint32_t line_count,
+                                         uint64_t sema_gpu_addr,
+                                         uint32_t sema_payload)
+{
+   if (!p)
+      return;
+   if (buf_size && buf_src && buf_dst)
+      nv_copy_emit_buffer_copy_with_sema(p, buf_src, buf_dst, buf_size,
+                                         sema_gpu_addr, sema_payload);
+   if (line_length && img_src && img_dst)
+      nv_copy_emit_image_2d_with_sema(p, img_src, img_dst, line_length,
+                                      pitch_in, pitch_out, line_count,
+                                      sema_gpu_addr,
+                                      sema_payload ? sema_payload + 1u
+                                                   : 0x43u);
+}
+
+/**
  * Blocklinear <-> pitch or blocklinear <-> blocklinear 2D copy via NVC6B5.
  * When src_bl/dst_bl is false, that side uses pitch layout (PITCH_IN/OUT set).
  * width/height in elements (pixels); bpp used only for pitch line_length.

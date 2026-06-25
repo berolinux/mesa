@@ -382,8 +382,12 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       sc.vid_ps_cpu = nv_rm_bo_map(sc.vid_ps_bo);
       sc.vid_ps_gpu = nv_rm_bo_gpu_offset(sc.vid_ps_bo);
       if (sc.vid_ps_cpu)
-         nv_nvdec_pic_setup_fill_h264_intra_smoke((uint32_t *)sc.vid_ps_cpu,
-                                                  256, 4, 4, 0, 0);
+         /* tick122: H.264 intra pic_setup with output/bitstream offset fields */
+         nv_nvdec_pic_setup_fill_h264_intra_ex((uint32_t *)sc.vid_ps_cpu, 256,
+                                               4, 4, 0, 0,
+                                               sc.ct_gpu ? sc.ct_gpu
+                                                         : sc.vid_ps_gpu,
+                                               0, sc.vid_ps_gpu, 256, 0, 0);
    }
 
    *out = sc;
@@ -877,10 +881,8 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             /* tick115/116: optional NVDEC/NVENC sema smoke (non-fatal) */
             if (sc->vid_ps_gpu && sc->sema_gpu) {
                struct nv_nvdec_pic_setup vpic;
-               memset(&vpic, 0, sizeof(vpic));
-               vpic.app_id = NV_NVDEC_APP_ID_H264;
-               vpic.pic_setup_gpu = sc->vid_ps_gpu;
-               vpic.execute_flags = 1;
+               nv_nvdec_pic_setup_init_h264_smoke(&vpic, sc->vid_ps_gpu,
+                                                  sc->vid_ps_gpu, 0);
                if (sc->sema_cpu)
                   sc->sema_cpu[0] = 0;
                nv_channel_notifier_reset(ch);
@@ -890,11 +892,14 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
             }
             if (sc->sema_gpu) {
                struct nv_nvenc_frame_setup venc;
-               memset(&venc, 0, sizeof(venc));
-               venc.app_id = NV_NVENC_APP_ID_H264;
-               venc.execute_flags = 1;
-               if (sc->vid_ps_gpu)
-                  venc.pic_setup_gpu_addr = sc->vid_ps_gpu;
+               if (sc->vid_ps_cpu)
+                  nv_nvenc_pic_setup_fill_h264_smoke(
+                     (uint32_t *)sc->vid_ps_cpu, 256, 64, 64, 30, 1,
+                     sc->ct_gpu ? sc->ct_gpu : sc->vid_ps_gpu, sc->vid_ps_gpu);
+               nv_nvenc_frame_setup_init_h264_smoke(
+                  &venc, sc->vid_ps_gpu,
+                  sc->ct_gpu ? sc->ct_gpu : sc->vid_ps_gpu, sc->vid_ps_gpu, 64,
+                  64);
                if (sc->sema_cpu)
                   sc->sema_cpu[0] = 0;
                nv_channel_notifier_reset(ch);

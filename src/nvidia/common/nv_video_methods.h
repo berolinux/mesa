@@ -10,6 +10,12 @@
 #ifndef NV_VIDEO_METHODS_H
 #define NV_VIDEO_METHODS_H
 
+/* clock_gettime / CLOCK_MONOTONIC for sema wait helpers */
+#if !defined(_POSIX_C_SOURCE) || (_POSIX_C_SOURCE < 200809L)
+#undef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -3233,6 +3239,128 @@ nv_nvdec_pic_setup_fill_h264_intra_smoke(uint32_t *pic_dwords,
    pic_dwords[NV_H264_PS_NUM_REFL0] = 0;
    pic_dwords[NV_H264_PS_NUM_REFL1] = 0;
    pic_dwords[NV_H264_PS_CURR_PIC_IDX] = curr_pic_idx;
+}
+
+/**
+ * tick122: H.264 intra smoke with output/bitstream/coloc GPU offsets (>>8 units).
+ * pic_dwords_cap should be >= NV_NVDEC_H264_PIC_SETUP_DWORDS (64) when possible.
+ * output/bitstream/coloc/history addresses 0 = leave field zero.
+ */
+static inline void
+nv_nvdec_pic_setup_fill_h264_intra_ex(uint32_t *pic_dwords,
+                                      uint32_t pic_dwords_cap,
+                                      uint32_t mb_w, uint32_t mb_h,
+                                      uint32_t frame_num,
+                                      uint32_t curr_pic_idx,
+                                      uint64_t output_luma_gpu,
+                                      uint64_t output_chroma_gpu,
+                                      uint64_t bitstream_gpu,
+                                      uint32_t bitstream_len_bytes,
+                                      uint64_t coloc_gpu,
+                                      uint64_t history_gpu)
+{
+   nv_nvdec_pic_setup_fill_h264_intra_smoke(pic_dwords, pic_dwords_cap, mb_w,
+                                            mb_h, frame_num, curr_pic_idx);
+   if (!pic_dwords || pic_dwords_cap < 21)
+      return;
+   if (output_luma_gpu)
+      pic_dwords[NV_H264_PS_OUTPUT_LUMA_OFF] =
+         nv_video_gpu_addr_to_offset_units(output_luma_gpu, 8);
+   if (output_chroma_gpu)
+      pic_dwords[NV_H264_PS_OUTPUT_CHROMA_OFF] =
+         nv_video_gpu_addr_to_offset_units(output_chroma_gpu, 8);
+   if (history_gpu)
+      pic_dwords[NV_H264_PS_HISTOGRAM_OFF] =
+         nv_video_gpu_addr_to_offset_units(history_gpu, 8);
+   if (coloc_gpu)
+      pic_dwords[NV_H264_PS_COLOC_OFF] =
+         nv_video_gpu_addr_to_offset_units(coloc_gpu, 8);
+   if (bitstream_len_bytes)
+      pic_dwords[NV_H264_PS_BITSTREAM_LEN] = bitstream_len_bytes;
+   (void)bitstream_gpu; /* bitstream base is SET_IN_BUF_BASE_OFFSET in methods */
+}
+
+/**
+ * tick122: populate nv_nvdec_pic_setup method args from smoke buffers.
+ * pic_setup_gpu / bitstream_gpu are absolute GPU VAs; control_params 0 = default.
+ */
+static inline void
+nv_nvdec_pic_setup_init_h264_smoke(struct nv_nvdec_pic_setup *s,
+                                   uint64_t pic_setup_gpu,
+                                   uint64_t bitstream_gpu,
+                                   uint32_t picture_index)
+{
+   if (!s)
+      return;
+   memset(s, 0, sizeof(*s));
+   s->app_id = NV_NVDEC_APP_ID_H264;
+   s->picture_index = picture_index;
+   s->pic_setup_gpu = pic_setup_gpu;
+   s->bitstream_gpu = bitstream_gpu;
+   s->execute_flags = 1u;
+   s->control_params = 0;
+}
+
+/** tick122: minimal NVENC pic_setup BO for H.264 intra / low-res smoke. */
+static inline void
+nv_nvenc_pic_setup_fill_h264_smoke(uint32_t *pic_dwords,
+                                   uint32_t pic_dwords_cap,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t fps_num, uint32_t fps_den,
+                                   uint64_t input_luma_gpu,
+                                   uint64_t bitstream_out_gpu)
+{
+   if (!pic_dwords || pic_dwords_cap < 13)
+      return;
+   if (!width)
+      width = 64;
+   if (!height)
+      height = 64;
+   if (!fps_num)
+      fps_num = 30;
+   if (!fps_den)
+      fps_den = 1;
+   memset(pic_dwords, 0, (size_t)pic_dwords_cap * sizeof(uint32_t));
+   pic_dwords[NV_NVENC_PS_PIC_WH] = (height << 16) | (width & 0xffffu);
+   pic_dwords[NV_NVENC_PS_FRAME_RATE] = (fps_den << 16) | (fps_num & 0xffffu);
+   pic_dwords[NV_NVENC_PS_SPS_FLAGS] =
+      (100u) | (41u << 8) | (1u << 16); /* High / level 4.1 / 4:2:0 */
+   pic_dwords[NV_NVENC_PS_PPS_RC_FLAGS] = 1u; /* intra / default RC subset */
+   pic_dwords[NV_NVENC_PS_GOP_LENGTH] = 1u;   /* intra-only */
+   pic_dwords[NV_NVENC_PS_IDR_PERIOD] = 1u;
+   if (input_luma_gpu)
+      pic_dwords[NV_NVENC_PS_INPUT_LUMA_OFF] =
+         nv_video_gpu_addr_to_offset_units(input_luma_gpu, 8);
+   if (bitstream_out_gpu)
+      pic_dwords[NV_NVENC_PS_BITSTREAM_OUT_OFF] =
+         nv_video_gpu_addr_to_offset_units(bitstream_out_gpu, 8);
+}
+
+/** tick122: init nv_nvenc_frame_setup for smoke (optionally with pic_setup BO). */
+static inline void
+nv_nvenc_frame_setup_init_h264_smoke(struct nv_nvenc_frame_setup *fs,
+                                     uint64_t pic_setup_gpu,
+                                     uint64_t input_yuv_gpu,
+                                     uint64_t bitstream_out_gpu,
+                                     uint32_t width, uint32_t height)
+{
+   if (!fs)
+      return;
+   memset(fs, 0, sizeof(*fs));
+   fs->app_id = NV_NVENC_APP_ID_H264;
+   fs->execute_flags = 1u;
+   fs->pic_setup_gpu_addr = pic_setup_gpu;
+   fs->input_yuv_gpu_addr = input_yuv_gpu;
+   fs->bitstream_out_gpu_addr = bitstream_out_gpu;
+   fs->width = width ? width : 64;
+   fs->height = height ? height : 64;
+   fs->frame_rate_num = 30;
+   fs->frame_rate_den = 1;
+   fs->gop_length = 1;
+   fs->idr_period = 1;
+   fs->profile_idc = 100;
+   fs->level_idc = 41;
+   fs->chroma_format_idc = 1;
 }
 
 /** tick114: NVENC pic_setup-only methods (no sema; use existing frame_kick for full slice). */

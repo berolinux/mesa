@@ -20,6 +20,7 @@
 #include "nv_copy_methods.h"
 #include "nv_qmd.h"
 #include "nv_sph.h"
+#include "nv_video_methods.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -944,6 +945,102 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -345;
       if (nv_sph_type_from_shader_kind_idx(5) != NV_SPH_TYPE_COMPUTE)
          return -346;
+   }
+
+   /* tick122: H.264 pic_setup_ex + NVDEC/NVENC frame_kick encode shape */
+   {
+      uint32_t pic[64];
+      struct nv_nvdec_pic_setup vpic;
+      struct nv_nvenc_frame_setup venc;
+      uint32_t buf_v[160];
+      uint32_t nv, iv;
+      bool saw_app = false, saw_pic_off = false, saw_exec = false;
+      bool saw_sema = false;
+
+      nv_nvdec_pic_setup_fill_h264_intra_ex(pic, 64, 4, 4, 0, 0, 0x700000ull,
+                                            0x701000ull, 0x702000ull, 128,
+                                            0, 0);
+      if (pic[NV_H264_PS_MB_WH] != ((4u << 16) | 4u))
+         return -347;
+      if (pic[NV_H264_PS_OUTPUT_LUMA_OFF] !=
+          nv_video_gpu_addr_to_offset_units(0x700000ull, 8))
+         return -348;
+      if (pic[NV_H264_PS_BITSTREAM_LEN] != 128)
+         return -349;
+
+      nv_nvdec_pic_setup_init_h264_smoke(&vpic, 0x710000ull, 0x720000ull, 0);
+      memset(buf_v, 0, sizeof(buf_v));
+      nv_push_init(&p, buf_v, (uint32_t)(sizeof(buf_v) / 4));
+      nv_nvdec_emit_frame_kick(&p, 0xc4b0u /* placeholder class */, &vpic,
+                               0x300000ull, 0x42u, NULL);
+      nv = nv_push_dw_count(&p);
+      if (nv < 8)
+         return -350;
+      for (iv = 0; iv + 1 < nv; iv++) {
+         uint32_t hdr = buf_v[iv];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVDEC_SET_APPLICATION_ID)
+            saw_app = true;
+         if (method == NV_NVDEC_SET_DRV_PIC_SETUP_OFFSET)
+            saw_pic_off = true;
+         if (method == NV_NVDEC_EXECUTE)
+            saw_exec = true;
+         if (method == NV_NVDEC_SEMAPHORE_A)
+            saw_sema = true;
+      }
+      if (!saw_app || !saw_pic_off || !saw_exec || !saw_sema)
+         return -351;
+
+      nv_nvenc_pic_setup_fill_h264_smoke(pic, 64, 64, 64, 30, 1, 0x800000ull,
+                                         0x810000ull);
+      if (pic[NV_NVENC_PS_PIC_WH] != ((64u << 16) | 64u))
+         return -352;
+      if (pic[NV_NVENC_PS_GOP_LENGTH] != 1)
+         return -353;
+
+      nv_nvenc_frame_setup_init_h264_smoke(&venc, 0x710000ull, 0x800000ull,
+                                           0x810000ull, 64, 64);
+      if (venc.app_id != NV_NVENC_APP_ID_H264 || venc.width != 64)
+         return -354;
+   }
+
+   /* tick122: CE image_2d_with_sema encodes sema + multi-line LAUNCH_DMA */
+   {
+      uint32_t buf_ce[96];
+      uint32_t nce, ice;
+      bool saw_sema_a = false, saw_launch = false;
+      bool saw_line_cnt = false;
+      uint32_t line_cnt_val = 0;
+
+      memset(buf_ce, 0, sizeof(buf_ce));
+      nv_push_init(&p, buf_ce, (uint32_t)(sizeof(buf_ce) / 4));
+      nv_push_set_subch(&p, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_image_2d_with_sema(&p, 0x100000ull, 0x200000ull, 256, 256,
+                                      256, 16, 0x300000ull, 0x42u);
+      nce = nv_push_dw_count(&p);
+      if (nce < 10)
+         return -355;
+      for (ice = 0; ice + 1 < nce; ice++) {
+         uint32_t hdr = buf_ce[ice];
+         uint32_t data = buf_ce[ice + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_SET_SEMAPHORE_A)
+            saw_sema_a = true;
+         if (method == NVC6B5_LINE_COUNT) {
+            saw_line_cnt = true;
+            line_cnt_val = data;
+         }
+         if (method == NVC6B5_LAUNCH_DMA)
+            saw_launch = true;
+      }
+      if (!saw_sema_a || !saw_launch || !saw_line_cnt)
+         return -356;
+      if (line_cnt_val != 16)
+         return -357;
    }
 
    if (trace_push && trace_dwords) {
