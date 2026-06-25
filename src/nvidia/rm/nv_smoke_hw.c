@@ -225,6 +225,7 @@ nv_smoke_hw_log_result(const struct nv_smoke_hw_result *res, const char *prefix)
 
 /*
  * Alloc scratch BO: try VRAM (GPU sema/DMA often prefers FB) then sysmem.
+ * tick110: under VGX/GRID virt, flip first try to sysmem when prefer_vram set.
  * Requires CPU map + GPU VA for host verify / sema poll.
  */
 static struct nv_rm_bo *
@@ -234,6 +235,7 @@ smoke_alloc_mapped_bo(struct nv_rm_device *rm, uint64_t size, uint64_t align,
    struct nv_rm_bo_req req;
    struct nv_rm_bo *bo = NULL;
    int pass;
+   bool first_vram = prefer_vram;
 
    if (vram_out)
       *vram_out = false;
@@ -241,9 +243,11 @@ smoke_alloc_mapped_bo(struct nv_rm_device *rm, uint64_t size, uint64_t align,
       return NULL;
 
    (void)nv_rm_device_ensure_vaspace(rm);
+   if (prefer_vram && nv_device_info_prefer_sysmem_alloc(&rm->info))
+      first_vram = false;
 
    for (pass = 0; pass < 2; pass++) {
-      bool vram = (pass == 0) ? prefer_vram : !prefer_vram;
+      bool vram = (pass == 0) ? first_vram : !first_vram;
       memset(&req, 0, sizeof(req));
       req.size = size;
       req.alignment = align ? align : 256;

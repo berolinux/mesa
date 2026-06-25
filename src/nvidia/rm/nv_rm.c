@@ -1114,6 +1114,32 @@ nv_rm_bo_alloc_typed(struct nv_rm_device *dev, uint64_t size_bytes,
 }
 
 struct nv_rm_bo *
+nv_rm_bo_alloc_typed_auto(struct nv_rm_device *dev, uint64_t size_bytes,
+                          uint32_t rm_type, bool prefer_vram, bool map_gpu_va)
+{
+   struct nv_rm_bo *bo;
+   bool try_vram = prefer_vram;
+
+   if (!dev || !size_bytes)
+      return NULL;
+   /* Under guest/GRID virt, prefer sysmem for host-mappable work buffers first */
+   if (prefer_vram && nv_device_info_prefer_sysmem_alloc(&dev->info))
+      try_vram = false;
+
+   if (try_vram) {
+      bo = nv_rm_bo_alloc_typed(dev, size_bytes, rm_type, true, false, map_gpu_va);
+      if (!bo)
+         bo = nv_rm_bo_alloc_typed(dev, size_bytes, rm_type, false, true,
+                                   map_gpu_va);
+      return bo;
+   }
+   bo = nv_rm_bo_alloc_typed(dev, size_bytes, rm_type, false, true, map_gpu_va);
+   if (!bo && prefer_vram)
+      bo = nv_rm_bo_alloc_typed(dev, size_bytes, rm_type, true, false, map_gpu_va);
+   return bo;
+}
+
+struct nv_rm_bo *
 nv_rm_bo_alloc_notifier(struct nv_rm_device *dev, uint64_t size_bytes)
 {
    if (!size_bytes)

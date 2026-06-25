@@ -428,6 +428,8 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
  * G1 copy+sema with class alternates (bound/info/C7B5/C6B5/C5B5/...).
  * On success, *class_used_out (optional) receives the working class_copy.
  * pipelined=true uses PIPELINED LAUNCH_DMA (second pass if non-pipelined fails).
+ * tick110: each class/subch also tries combined sema, split sema-only follow-up,
+ * and pitch2d (height=1) emit modes before moving to the next class.
  */
 int
 nv_channel_g1_ce_copy_sema_submit_try_classes(struct nv_channel *ch,

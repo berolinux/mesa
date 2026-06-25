@@ -2298,9 +2298,17 @@ nv_channel_g1_ce_copy_sema_submit(struct nv_channel *ch,
                                       wait_timeout_ns, check_notifier);
 }
 
+/* tick110: CE emit strategy alternates (combined sema vs split vs pitch2d) */
+enum g1_ce_emit_mode {
+   G1_CE_EMIT_COMBINED = 0,  /* copy + sema on same LAUNCH_DMA */
+   G1_CE_EMIT_SPLIT = 1,     /* copy then sema-only LAUNCH_DMA */
+   G1_CE_EMIT_PITCH2D = 2,   /* 1-line pitch2d (height=1, width=size) + sema */
+   G1_CE_EMIT_COUNT = 3,
+};
+
 static int
 g1_copy_sema_one_subch(struct nv_channel *ch, uint32_t cc, uint32_t subch,
-                       bool pipelined,
+                       bool pipelined, enum g1_ce_emit_mode emit_mode,
                        uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
                        uint32_t size_bytes, uint64_t sema_gpu_addr,
                        volatile uint32_t *sema_cpu, uint32_t sema_payload,
@@ -2309,7 +2317,7 @@ g1_copy_sema_one_subch(struct nv_channel *ch, uint32_t cc, uint32_t subch,
 {
    struct nv_push push;
    uint32_t *map;
-   uint32_t need = 64;
+   uint32_t need = 96;
    int pre;
 
    pre = nv_channel_submit_preflight(ch, NULL);
@@ -2326,17 +2334,60 @@ g1_copy_sema_one_subch(struct nv_channel *ch, uint32_t cc, uint32_t subch,
    nv_push_init(&push, map, need);
    /* subch 4 = NV_PUSH_SUBCH_COPY (610 RE primary); subch 0 = fallback */
    nv_copy_set_object_subch(&push, subch, cc);
-   if (pipelined)
-      nv_copy_emit_buffer_copy_with_sema_pipelined(&push, src_gpu_addr,
-                                                   dst_gpu_addr, size_bytes,
-                                                   sema_gpu_addr, sema_payload);
-   else
-      nv_copy_emit_buffer_copy_with_sema(&push, src_gpu_addr, dst_gpu_addr,
-                                         size_bytes, sema_gpu_addr, sema_payload);
+   switch (emit_mode) {
+   case G1_CE_EMIT_SPLIT:
+      nv_copy_emit_buffer_copy_then_sema_release(&push, src_gpu_addr,
+                                                 dst_gpu_addr, size_bytes,
+                                                 sema_gpu_addr, sema_payload,
+                                                 pipelined);
+      break;
+   case G1_CE_EMIT_PITCH2D:
+      /* height=1 line of width=size_bytes — same bytes as 1D pitch, different
+       * method order/MULTI_LINE=0; exercises pitch2d path for G1 bring-up */
+      nv_copy_emit_pitch2d_copy_with_sema(&push, src_gpu_addr, dst_gpu_addr,
+                                          size_bytes, 1u, size_bytes, size_bytes,
+                                          sema_gpu_addr, sema_payload, pipelined);
+      break;
+   case G1_CE_EMIT_COMBINED:
+   default:
+      if (pipelined)
+         nv_copy_emit_buffer_copy_with_sema_pipelined(&push, src_gpu_addr,
+                                                      dst_gpu_addr, size_bytes,
+                                                      sema_gpu_addr, sema_payload);
+      else
+         nv_copy_emit_buffer_copy_with_sema(&push, src_gpu_addr, dst_gpu_addr,
+                                            size_bytes, sema_gpu_addr,
+                                            sema_payload);
+      break;
+   }
    nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
+}
+
+static int
+g1_copy_sema_one_emit(struct nv_channel *ch, uint32_t cc, bool pipelined,
+                      enum g1_ce_emit_mode emit_mode,
+                      uint64_t src_gpu_addr, uint64_t dst_gpu_addr,
+                      uint32_t size_bytes, uint64_t sema_gpu_addr,
+                      volatile uint32_t *sema_cpu, uint32_t sema_payload,
+                      bool sema_reset, uint64_t wait_timeout_ns,
+                      bool check_notifier)
+{
+   int r;
+
+   /* Prefer COPY subch 4 (binary RE); fall back to subch 0 if CE never completes */
+   r = g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_COPY, pipelined, emit_mode,
+                              src_gpu_addr, dst_gpu_addr, size_bytes,
+                              sema_gpu_addr, sema_cpu, sema_payload,
+                              sema_reset, wait_timeout_ns, check_notifier);
+   if (r == 0 || r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+      return r;
+   return g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_3D, pipelined, emit_mode,
+                                 src_gpu_addr, dst_gpu_addr, size_bytes,
+                                 sema_gpu_addr, sema_cpu, sema_payload,
+                                 sema_reset, wait_timeout_ns, check_notifier);
 }
 
 static int
@@ -2347,19 +2398,22 @@ g1_copy_sema_one(struct nv_channel *ch, uint32_t cc, bool pipelined,
                  bool sema_reset, uint64_t wait_timeout_ns,
                  bool check_notifier)
 {
-   int r;
+   /* tick110: try combined, then split sema, then pitch2d (same class/subch ladder) */
+   unsigned em;
+   int last = -EINVAL;
 
-   /* Prefer COPY subch 4 (binary RE); fall back to subch 0 if CE never completes */
-   r = g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_COPY, pipelined,
-                              src_gpu_addr, dst_gpu_addr, size_bytes,
-                              sema_gpu_addr, sema_cpu, sema_payload,
-                              sema_reset, wait_timeout_ns, check_notifier);
-   if (r == 0 || r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
-      return r;
-   return g1_copy_sema_one_subch(ch, cc, NV_PUSH_SUBCH_3D, pipelined,
-                                 src_gpu_addr, dst_gpu_addr, size_bytes,
-                                 sema_gpu_addr, sema_cpu, sema_payload,
-                                 sema_reset, wait_timeout_ns, check_notifier);
+   for (em = 0; em < (unsigned)G1_CE_EMIT_COUNT; em++) {
+      int r = g1_copy_sema_one_emit(ch, cc, pipelined, (enum g1_ce_emit_mode)em,
+                                    src_gpu_addr, dst_gpu_addr, size_bytes,
+                                    sema_gpu_addr, sema_cpu, sema_payload,
+                                    sema_reset, wait_timeout_ns, check_notifier);
+      if (r == 0)
+         return 0;
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
 }
 
 int

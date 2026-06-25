@@ -221,6 +221,14 @@ nv_rm_bo_alloc_typed(struct nv_rm_device *dev, uint64_t size_bytes,
                      uint32_t rm_type, bool vram, bool cpu_access,
                      bool map_gpu_va);
 
+/**
+ * tick110: typed alloc with virt-aware domain preference (VGX/GRID try sysmem first
+ * when prefer_vram would normally be true). Falls back to the other domain.
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_typed_auto(struct nv_rm_device *dev, uint64_t size_bytes,
+                          uint32_t rm_type, bool prefer_vram, bool map_gpu_va);
+
 /** Convenience: notifier / sema ring (NVOS32_TYPE_NOTIFIER, sysmem WC). */
 struct nv_rm_bo *
 nv_rm_bo_alloc_notifier(struct nv_rm_device *dev, uint64_t size_bytes);

@@ -205,6 +205,75 @@ nv_smoke_selftest_g1_ce_sema_push(const uint32_t *trace_push,
        !(launch_dw & NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH))
       return -109;
 
+   /* tick110: split sema path encodes sema + at least two LAUNCH_DMA */
+   {
+      uint32_t buf_s[128];
+      uint32_t ns, is, n_launch = 0;
+      bool s_a = false, s_b = false, s_pay = false;
+
+      memset(buf_s, 0, sizeof(buf_s));
+      nv_push_init(&p, buf_s, (uint32_t)(sizeof(buf_s) / 4));
+      nv_push_set_subch(&p, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_buffer_copy_then_sema_release(&p, src_gpu, dst_gpu,
+                                                 size_bytes, sema_gpu,
+                                                 sema_payload, false);
+      ns = nv_push_dw_count(&p);
+      if (ns < 14 || ns > (uint32_t)(sizeof(buf_s) / 4))
+         return -110;
+      for (is = 0; is + 1 < ns; is++) {
+         uint32_t hdr = buf_s[is];
+         uint32_t data = buf_s[is + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         uint32_t subch = (hdr >> 13) & 7;
+         if ((hdr >> 29) != 0 || subch != NV_PUSH_SUBCH_COPY)
+            continue;
+         if (method == NVC6B5_SET_SEMAPHORE_A)
+            s_a = true;
+         else if (method == NVC6B5_SET_SEMAPHORE_B)
+            s_b = true;
+         else if (method == NVC6B5_SET_SEMAPHORE_PAYLOAD && data == sema_payload)
+            s_pay = true;
+         else if (method == NVC6B5_LAUNCH_DMA)
+            n_launch++;
+      }
+      if (!s_a || !s_b || !s_pay || n_launch < 2)
+         return -111;
+   }
+
+   /* tick110: pitch2d height=1 has sema + pitch layout (encode sanity only) */
+   {
+      uint32_t buf_p2[128];
+      uint32_t np2, ip2, ld = 0;
+      bool saw_l = false;
+
+      memset(buf_p2, 0, sizeof(buf_p2));
+      nv_push_init(&p, buf_p2, (uint32_t)(sizeof(buf_p2) / 4));
+      nv_push_set_subch(&p, NV_PUSH_SUBCH_COPY);
+      nv_copy_emit_pitch2d_copy_with_sema(&p, src_gpu, dst_gpu, size_bytes, 1u,
+                                          size_bytes, size_bytes, sema_gpu,
+                                          sema_payload, false);
+      np2 = nv_push_dw_count(&p);
+      if (np2 < 10)
+         return -112;
+      for (ip2 = 0; ip2 + 1 < np2; ip2++) {
+         uint32_t hdr = buf_p2[ip2];
+         uint32_t data = buf_p2[ip2 + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_LAUNCH_DMA) {
+            ld = data;
+            saw_l = true;
+         }
+      }
+      if (!saw_l)
+         return -113;
+      if ((ld & (0x3u << 3)) != NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD)
+         return -114;
+      if (!(ld & NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH))
+         return -115;
+   }
+
    /* Determinism: second emit matches first */
    memset(buf_b, 0, sizeof(buf_b));
    nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));
