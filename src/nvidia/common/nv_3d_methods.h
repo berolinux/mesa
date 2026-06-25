@@ -1408,8 +1408,8 @@ nv_3d_try_draw_indirect_path_c(struct nv_push *p,
                             : NV_MME_MACRO_DRAW_INDIRECT;
    if (!mme_uploaded || !draw_count || !indirect_gpu_addr)
       return false;
-   /* pass20/tick152: refuse stub ISA even if caller claims uploaded */
-   if (!nv_mme_path_c_indirect_ready())
+   /* pass20/tick152 + tick166/pass22: refuse stub ISA / keep host A/B/C' */
+   if (nv_pass22_mme_must_use_host_path() || !nv_mme_path_c_indirect_ready())
       return false;
    if (indexed)
       return nv_3d_emit_draw_indexed_indirect_mme_kick(p, indirect_gpu_addr,
@@ -4341,6 +4341,53 @@ nv_3d_emit_g3_inv_report_host_pass21(struct nv_push *p,
    return nv_push_g0_g4_host_sema_tail_pass21(
       p, pre_wfi_before_host, host_sema_gpu_addr,
       host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/*
+ * tick166 / pass22: G3 draw/barrier policy — pass21 inv/WFI/host sema plus
+ * pass22 explicit-emit + MME path C gate (host indirect ladder when stubs).
+ */
+#define NV_PASS22_G3_BARRIER_USES_PASS21       1
+#define NV_PASS22_G3_INDIRECT_HOST_WHEN_STUB   1
+
+/** tick166: pass21 full barrier; optional pass22 host sema tail if VA set. */
+static inline int
+nv_3d_emit_g3_barrier_all_pass22(struct nv_push *p,
+                                 uint64_t host_sema_gpu,
+                                 uint32_t host_sema_payload,
+                                 enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p)
+      return -1;
+   nv_3d_emit_g3_barrier_all_pass21(p);
+   if (!host_sema_gpu || !nv_pass22_explicit_emit_required())
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass21(
+      p, false, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/**
+ * tick166: indirect draw ladder pass22 — same as pass20 but documents pass22
+ * MME gate; path C only when !nv_pass22_mme_must_use_host_path().
+ */
+static inline int
+nv_3d_emit_draw_indirect_ladder_pass22(struct nv_push *p,
+                                       uint64_t indirect_gpu_addr,
+                                       uint32_t topology_nv,
+                                       bool indexed,
+                                       const uint32_t *shadow_dwords,
+                                       uint32_t shadow_dword_count,
+                                       uint32_t draw_count,
+                                       uint32_t stride_bytes,
+                                       bool mme_uploaded,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload)
+{
+   return nv_3d_emit_draw_indirect_ladder_pass20(
+      p, indirect_gpu_addr, topology_nv, indexed, shadow_dwords,
+      shadow_dword_count, draw_count, stride_bytes, mme_uploaded,
+      sema_gpu_addr, sema_payload);
 }
 
 /**

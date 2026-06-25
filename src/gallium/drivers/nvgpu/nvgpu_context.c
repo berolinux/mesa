@@ -2121,9 +2121,15 @@ nvgpu_memory_barrier(struct pipe_context *pctx, unsigned flags)
    if (flags & PIPE_BARRIER_MAPPED_BUFFER)
       sh_d = true;
    /* tick158 / pass21: BARRIER_ALL → pass21 barrier (NVC597 inv ladder + WFI);
+    * tick166 / pass22: same barrier; host sema tail only if ctx provides sema VA
+    * (not wired here — pass22 helper without sema == pass21 barrier only).
     * selective flags use pass21 partial ladder or legacy memory_barrier helper */
    if (flags & PIPE_BARRIER_ALL) {
-      nv_3d_emit_g3_barrier_all_pass21(&push);
+      if (NV_PASS22_G3_BARRIER_USES_PASS21)
+         nv_3d_emit_g3_barrier_all_pass22(&push, 0, 0,
+                                          NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+      else
+         nv_3d_emit_g3_barrier_all_pass21(&push);
    } else if (sh_d || sh_c || tx_s || tx_h || tx_d) {
       sh_i = sh_d || sh_c;
       nv_3d_emit_g3_barrier_pass21(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d,

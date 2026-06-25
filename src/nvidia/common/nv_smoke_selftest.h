@@ -4036,6 +4036,38 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* tick166: G3 pass22 barrier + indirect ladder policy */
+   {
+      struct nv_push p166;
+      uint32_t b166[256];
+      uint32_t n0;
+
+      if (!NV_PASS22_G3_BARRIER_USES_PASS21 || !NV_PASS22_G3_INDIRECT_HOST_WHEN_STUB)
+         return -810;
+      if (!nv_pass22_mme_must_use_host_path())
+         return -811;
+      memset(b166, 0, sizeof(b166));
+      nv_push_init(&p166, b166, (uint32_t)(sizeof(b166) / 4));
+      n0 = nv_push_dw_count(&p166);
+      if (nv_3d_emit_g3_barrier_all_pass22(&p166, 0, 0,
+                                           NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -812;
+      if (nv_push_dw_count(&p166) <= n0)
+         return -813; /* barrier must emit methods */
+      n0 = nv_push_dw_count(&p166);
+      if (nv_3d_emit_g3_barrier_all_pass22(&p166, 0x550000ull, 1u,
+                                           NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -814;
+      if (nv_push_dw_count(&p166) <= n0)
+         return -815; /* with sema VA + policy, extra host sema */
+      /* path C try must fail while stubs (pass22 host mandatory) */
+      if (nv_3d_try_draw_indirect_path_c(&p166, 0x1000ull, 1u, 16u, false, true))
+         return -816;
+      if (nv_3d_emit_draw_indirect_ladder_pass22(
+             &p166, 0x1000ull, 4u, false, NULL, 0, 1u, 16u, true, 0, 0) != 0)
+         return -817; /* no shadow => 0; with mme stub still 0 from path C fail */
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
