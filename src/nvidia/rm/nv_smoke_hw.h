@@ -204,8 +204,10 @@ struct nv_smoke_hw_scratch {
    uint64_t vid_ps_gpu;       /* tick115: pic_setup GPU VA */
    uint32_t sema_payload;
    uint32_t g2_store_imm;   /* value written by G2 store-imm smoke (default 0xdeadbeef) */
+   uint32_t zt_block_size;  /* tick117: SET_ZT_BLOCK_SIZE dword (0 = pitch/default) */
    bool sema_vram;
    bool bufs_vram;          /* last successful src/dst placement (sysmem preferred) */
+   bool zt_block_linear;    /* tick117: ZT allocated via depth_2d_ex(blocklinear) */
    bool owned; /* scratch alloc'd by create; destroy frees */
 };
 

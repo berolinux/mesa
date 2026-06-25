@@ -253,6 +253,15 @@ nv_rm_bo_alloc_depth_2d(struct nv_rm_device *dev, uint32_t width,
                         uint32_t height, int32_t *pitch_inout, bool vram,
                         bool map_gpu_va);
 
+/**
+ * tick117: depth/stencil ZETA with optional block-linear NVOS32 ATTR.
+ * blocklinear prefers vidmem; falls back to pitch depth_2d on failure.
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_depth_2d_ex(struct nv_rm_device *dev, uint32_t width,
+                           uint32_t height, int32_t *pitch_inout, bool vram,
+                           bool map_gpu_va, bool blocklinear);
+
 void
 nv_rm_bo_free(struct nv_rm_bo *bo);
 

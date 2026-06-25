@@ -543,9 +543,14 @@ nv_3d_set_color_target(struct nv_push *p, unsigned j,
       nv_push_method(p, NVC597_SET_COLOR_TARGET_THIRD_DIMENSION(j), s->array_pitch);
 }
 
-/** Emit ZETA (depth/stencil) target setup. */
+/**
+ * Emit ZETA (depth/stencil) target setup.
+ * block_size: SET_ZT_BLOCK_SIZE dword (0 = one gob / pitch default; non-zero for BL).
+ * Common BL value uses log2 gobs in each dimension packed in low bits (refine on HW).
+ */
 static inline void
-nv_3d_set_zeta_target(struct nv_push *p, const struct nv_3d_surface *s)
+nv_3d_set_zeta_target_ex(struct nv_push *p, const struct nv_3d_surface *s,
+                         uint32_t block_size)
 {
    if (!s || !s->enabled) {
       /* Disable by writing invalid/zero format is not standard; leave unset.
@@ -558,9 +563,18 @@ nv_3d_set_zeta_target(struct nv_push *p, const struct nv_3d_surface *s)
    nv_push_method(p, NVC597_SET_ZT_A, (uint32_t)(s->gpu_addr >> 32) & 0xff);
    nv_push_method(p, NVC597_SET_ZT_B, (uint32_t)(s->gpu_addr & 0xffffffffu));
    nv_push_method(p, NVC597_SET_ZT_FORMAT, s->format);
-   nv_push_method(p, NVC597_SET_ZT_BLOCK_SIZE, 0); /* one gob each dim for pitch/linear */
+   if (s->block_linear && !block_size)
+      block_size = 0x00000000u; /* one gob each dim; HW may refine via array_pitch */
+   nv_push_method(p, NVC597_SET_ZT_BLOCK_SIZE, block_size);
    if (s->array_pitch)
       nv_push_method(p, NVC597_SET_ZT_ARRAY_PITCH, s->array_pitch);
+}
+
+/** Emit ZETA target setup (pitch/linear default block_size 0). */
+static inline void
+nv_3d_set_zeta_target(struct nv_push *p, const struct nv_3d_surface *s)
+{
+   nv_3d_set_zeta_target_ex(p, s, 0);
 }
 
 /** Surface clip (render area) in pixels. */
@@ -3060,14 +3074,17 @@ nv_3d_emit_g3_sema_only(struct nv_push *p, uint32_t class_3d,
 }
 
 /**
- * tick113: bind pitch ZETA (depth/stencil) target for G3 smoke/clear paths.
+ * tick113/117: bind ZETA (depth/stencil) for G3 smoke/clear paths.
  * zt_format: NVC597_SET_ZT_FORMAT_V_*; 0 => Z24S8.
- * pitch_bytes 0 => width * bpp (4 for Z24S8/ZF32, 2 for Z16).
+ * pitch_bytes 0 => width * bpp (4 for Z24S8/ZF32, 2 for Z16); ignored for BL
+ * when array_pitch is RM-internal (pass gob height in pitch_bytes as array_pitch).
+ * block_linear: request SET_ZT_BLOCK_SIZE non-trivial layout.
  */
 static inline void
-nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
-                               uint32_t zt_w, uint32_t zt_h,
-                               uint32_t zt_format, uint32_t pitch_bytes)
+nv_3d_emit_g3_bind_zeta_target_ex(struct nv_push *p, uint64_t zt_gpu_addr,
+                                  uint32_t zt_w, uint32_t zt_h,
+                                  uint32_t zt_format, uint32_t pitch_bytes,
+                                  bool block_linear, uint32_t zt_block_size)
 {
    struct nv_3d_surface s;
    uint32_t w, h, bpp;
@@ -3086,7 +3103,7 @@ nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
       bpp = 8;
    else
       bpp = 4;
-   if (!pitch_bytes)
+   if (!pitch_bytes && !block_linear)
       pitch_bytes = w * bpp;
 
    memset(&s, 0, sizeof(s));
@@ -3096,8 +3113,8 @@ nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
    s.height = h;
    s.format = zt_format;
    s.array_pitch = pitch_bytes;
-   s.block_linear = false;
-   nv_3d_set_zeta_target(p, &s);
+   s.block_linear = block_linear;
+   nv_3d_set_zeta_target_ex(p, &s, zt_block_size);
    nv_3d_set_surface_clip(p, 0, 0, w, h);
    /* Enable depth test always-pass so clears/draws see ZT as active */
    nv_push_method(p, NVC597_SET_DEPTH_TEST, 1);
@@ -3107,6 +3124,15 @@ nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
        zt_format == NVC597_SET_ZT_FORMAT_V_S8 ||
        zt_format == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
       nv_push_method(p, NVC597_SET_STENCIL_TEST, 1);
+}
+
+static inline void
+nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
+                               uint32_t zt_w, uint32_t zt_h,
+                               uint32_t zt_format, uint32_t pitch_bytes)
+{
+   nv_3d_emit_g3_bind_zeta_target_ex(p, zt_gpu_addr, zt_w, zt_h, zt_format,
+                                     pitch_bytes, false, 0);
 }
 
 /**

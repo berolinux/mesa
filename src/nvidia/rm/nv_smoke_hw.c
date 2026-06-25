@@ -342,12 +342,26 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       /* CT optional; G3 clear sema works without mapped CT for encode path */
    }
 
-   /* tick113/114: G3 ZETA via NVOS32_TYPE_DEPTH (Z24S8 pitch, 64x64) */
+   /* tick113/117: G3 ZETA — try block-linear DEPTH first, then pitch sysmem/vidmem */
    {
       int32_t zt_pitch = 64 * 4;
-      sc.zt_bo = nv_rm_bo_alloc_depth_2d(rm, 64, 64, &zt_pitch, false, true);
-      if (!sc.zt_bo)
-         sc.zt_bo = nv_rm_bo_alloc_depth_2d(rm, 64, 64, &zt_pitch, true, true);
+      sc.zt_bo = nv_rm_bo_alloc_depth_2d_ex(rm, 64, 64, &zt_pitch, true, true,
+                                            true);
+      if (sc.zt_bo) {
+         sc.zt_block_linear = true;
+         /* one-gob-each-dim default; non-zero refine on silicon traces */
+         sc.zt_block_size = 0;
+      }
+      if (!sc.zt_bo) {
+         zt_pitch = 64 * 4;
+         sc.zt_bo = nv_rm_bo_alloc_depth_2d_ex(rm, 64, 64, &zt_pitch, false,
+                                               true, false);
+      }
+      if (!sc.zt_bo) {
+         zt_pitch = 64 * 4;
+         sc.zt_bo = nv_rm_bo_alloc_depth_2d_ex(rm, 64, 64, &zt_pitch, true,
+                                               true, false);
+      }
       if (sc.zt_bo)
          sc.zt_gpu = nv_rm_bo_gpu_offset(sc.zt_bo);
    }

@@ -1221,25 +1221,65 @@ nv_rm_bo_alloc_depth_2d(struct nv_rm_device *dev, uint32_t width,
                         uint32_t height, int32_t *pitch_inout, bool vram,
                         bool map_gpu_va)
 {
-   struct nv_rm_bo *bo;
+   return nv_rm_bo_alloc_depth_2d_ex(dev, width, height, pitch_inout, vram,
+                                     map_gpu_va, false);
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_depth_2d_ex(struct nv_rm_device *dev, uint32_t width,
+                           uint32_t height, int32_t *pitch_inout, bool vram,
+                           bool map_gpu_va, bool blocklinear)
+{
+   struct nv_rm_bo *bo = NULL;
+   struct nv_rm_bo_req req;
    int32_t pitch = pitch_inout && *pitch_inout > 0 ? *pitch_inout
                                                    : (int32_t)(width * 4u);
    bool cpu = !vram;
+   bool try_vram = vram;
 
    if (!dev || !width || !height)
       return NULL;
 
+   if (blocklinear) {
+      /* BL depth prefers vidmem; try DEPTH then IMAGE with blocklinear flag */
+      memset(&req, 0, sizeof(req));
+      req.width = width;
+      req.height = height;
+      req.pitch = 0; /* BL: RM/gob internal */
+      req.size = (uint64_t)width * (uint64_t)height * 4u;
+      req.alignment = 512;
+      req.vram = true;
+      req.cpu_access = false;
+      req.no_scanout = true;
+      req.map_gpu_va = map_gpu_va;
+      req.rm_type = NVOS32_TYPE_DEPTH;
+      req.blocklinear = true;
+      req.gobs_height = 4; /* 16 gobs height default (tick103 convention) */
+      bo = nv_rm_bo_alloc(dev, &req);
+      if (!bo) {
+         req.rm_type = NVOS32_TYPE_IMAGE;
+         bo = nv_rm_bo_alloc(dev, &req);
+      }
+      if (!bo && !vram) {
+         /* guest may only have sysmem — fall through to pitch */
+         blocklinear = false;
+      } else if (bo) {
+         if (pitch_inout)
+            *pitch_inout = nv_rm_bo_pitch(bo);
+         return bo;
+      }
+   }
+
    /* Prefer DEPTH type; STENCIL for S8-only paths; IMAGE as last resort */
-   bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
+   bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, try_vram, cpu, map_gpu_va,
                           NVOS32_TYPE_DEPTH, 0);
    if (!bo)
-      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
-                             NVOS32_TYPE_STENCIL, 0);
+      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, try_vram, cpu,
+                             map_gpu_va, NVOS32_TYPE_STENCIL, 0);
    if (!bo)
-      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
-                             NVOS32_TYPE_IMAGE, 0);
-   if (!bo && vram) {
-      /* virt/sysmem fallback when vidmem DEPTH rejected */
+      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, try_vram, cpu,
+                             map_gpu_va, NVOS32_TYPE_IMAGE, 0);
+   if (!bo && try_vram) {
       pitch = pitch_inout && *pitch_inout > 0 ? *pitch_inout
                                               : (int32_t)(width * 4u);
       bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, false, true,

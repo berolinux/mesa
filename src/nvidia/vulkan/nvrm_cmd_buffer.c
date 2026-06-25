@@ -1509,6 +1509,8 @@ nvrm_CmdClearAttachments(VkCommandBuffer commandBuffer,
                                   att->clearValue.depthStencil.stencil);
       }
    }
+   /* tick117: WFI before sema so 3D clear drains before host/queue poll */
+   nv_push_wfi(&cmd->push);
    /* Queue submit_fence sema after clears (3D report) for vertical-slice wait */
    if (cmd->device && cmd->device->queue && cmd->device->queue->submit_fence &&
        cmd->device->queue->submit_fence->sema_gpu_addr) {

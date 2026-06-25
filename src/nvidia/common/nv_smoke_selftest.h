@@ -735,6 +735,42 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -322;
    }
 
+   /* tick117: block-linear ZT bind emits SET_ZT_BLOCK_SIZE + depth methods */
+   {
+      uint64_t zt_gpu = 0x530000ull;
+      uint32_t buf_bl[96];
+      uint32_t nbl, ibl;
+      bool saw_zt_a = false, saw_zt_fmt = false, saw_zt_bs = false;
+      uint32_t zt_bs_val = 0xffffffffu;
+
+      memset(buf_bl, 0, sizeof(buf_bl));
+      nv_push_init(&p, buf_bl, (uint32_t)(sizeof(buf_bl) / 4));
+      nv_3d_emit_g3_bind_zeta_target_ex(&p, zt_gpu, 64, 64,
+                                        NVC597_SET_ZT_FORMAT_V_Z24S8, 0, true,
+                                        0x00001111u);
+      nbl = nv_push_dw_count(&p);
+      if (nbl < 8)
+         return -323;
+      for (ibl = 0; ibl + 1 < nbl; ibl++) {
+         uint32_t hdr = buf_bl[ibl];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_ZT_A)
+            saw_zt_a = true;
+         if (method == NVC597_SET_ZT_FORMAT)
+            saw_zt_fmt = true;
+         if (method == NVC597_SET_ZT_BLOCK_SIZE) {
+            saw_zt_bs = true;
+            zt_bs_val = buf_bl[ibl + 1];
+         }
+      }
+      if (!saw_zt_a || !saw_zt_fmt || !saw_zt_bs)
+         return -324;
+      if (zt_bs_val != 0x00001111u)
+         return -325;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
