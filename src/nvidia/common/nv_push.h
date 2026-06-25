@@ -65,6 +65,11 @@ extern "C" {
  *
  * Blob (610.43.02 glcore @ b6c952) hardcodes SEMAPHORED = 0x1001 after inc4
  * sema block 0x20040004. Pass8 vdpau @ 28c9a uses execute = 0x00000002.
+ *
+ * pass11 RE: 0x1001 appears as imm32 in glcore executable/rodata (sample offs
+ * 0xa43b38, 0xf27b34, 0x113d87c — often near 0x400x400x method/config tables).
+ * eglcore still has literal 0x20040004 inc4 sema header (constructed in code,
+ * not pure rodata on glcore). vdpau 0x2 remains a valid alternate execute.
  */
 #define NVC36F_SEMAPHORED_RELEASE_OPEN_HDRS      \
    (NVC36F_SEMAPHORED_OPERATION_RELEASE |        \
@@ -72,6 +77,9 @@ extern "C" {
     NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE)
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_610       0x00001001u
 #define NVC36F_SEMAPHORED_RELEASE_VDPAU_610      0x00000002u
+/* pass11: additional sema execute / acquire modes observed as imm (rare) */
+#define NVC36F_SEMAPHORED_RELEASE_BLOB_1000      0x00001000u
+#define NVC36F_SEMAPHORED_RELEASE_BLOB_1002      0x00001002u
 
 /* Host sema emit modes for silicon A/B (nv_channel_gpfifo_host_sema_submit). */
 enum nv_host_sema_mode {

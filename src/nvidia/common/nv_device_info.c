@@ -9,9 +9,17 @@
 #include <stdio.h>
 
 /* Channel / engine class IDs from open-gpu-kernel-modules class headers.
- * 610.43.02 glcore/cuda also embed C8xx / C86F ladders (binary RE; see
- * mesa/src/nvidia/traces/HW_MODEL_FROM_BINARIES_610.43.02.md) — try newest first
- * via refine_class_from_list / channel engine alts.
+ * 610.43.02 glcore/cuda embed descending rodata ladders (pass11 RE @ glcore
+ * 0x11bb600 / 0x1238b70).  Try newest first via refine_class_from_list /
+ * nv_device_info_fill_class_ladder / channel engine alts.
+ *
+ * pass11 glcore primary ladders (newest→oldest, contiguous rodata arrays):
+ *   DMA:    CAB5 C9B5 C8B5 C7B5 C6B5 C5B5 C3B5 C1B5 C0B5 B0B5
+ *   COMP:   CEC0 CDC0 CBC0 C9C0 C7C0 C6C0 C5C0 C3C0 C1C0 C0C0 B1C0 B0C0
+ *   3D:     CE97 CD97 CB97 C997 C797 C697 C597 C397 C197 C097 B197 B097
+ *   GPFIFO: CA6F C96F C56F C46F C36F C06F B06F A06F A26F 906F 506F
+ *   NVENC:  D1B7 CFB7 CEB7 C9B7 C8B7 C7B7 (B6B7 B4B7 C5B7 C4B7 side table)
+ *   NVDEC:  C9B0..C4B0 (+ B8B0 in NVENC side table; CBB0/CAB0 in global hit map)
  */
 #define KEPLER_A_COMPUTE_A          0x0000a0c0
 #define MAXWELL_COMPUTE_A           0x0000b0c0
@@ -24,8 +32,9 @@
 #define AMPERE_COMPUTE_B            0x0000c7c0
 #define ADA_COMPUTE_A               0x0000c9c0
 #define HOPPER_COMPUTE_A            0x0000cbc0
-/* 610 blob ladders (u16 frequency in libcuda/glcore; may refine from RM classlist) */
-#define BLACKWELL_COMPUTE_A         0x0000cdc0  /* tentative; refine prefers highest in band */
+/* pass11 glcore rodata: CEC0/CDC0 head of compute ladder (post-Blackwell stubs) */
+#define BLACKWELL_COMPUTE_A         0x0000cdc0
+#define POST_BLACKWELL_COMPUTE_A    0x0000cec0
 
 #define KEPLER_A_3D_A               0x0000a097
 #define MAXWELL_A_3D_A              0x0000b097
@@ -38,7 +47,8 @@
 #define AMPERE_B_3D_B               0x0000c797
 #define ADA_A_3D_A                  0x0000c997
 #define HOPPER_A_3D_A               0x0000cb97
-#define BLACKWELL_3D_A              0x0000cd97  /* tentative; refine prefers highest in band */
+#define BLACKWELL_3D_A              0x0000cd97
+#define POST_BLACKWELL_3D_A         0x0000ce97
 
 #define KEPLER_CHANNEL_GPFIFO_A     0x0000a06f
 #define MAXWELL_CHANNEL_GPFIFO_A    0x0000b06f
@@ -47,8 +57,10 @@
 #define TURING_CHANNEL_GPFIFO_A     0x0000c46f
 #define AMPERE_CHANNEL_GPFIFO_A     0x0000c56f
 #define HOPPER_CHANNEL_GPFIFO_A     0x0000c76f
-/* 610 binaries also carry 0xC86F (Blackwell-era GPFIFO); refine picks highest 0x*6f */
+/* pass11 glcore GPFIFO ladder head: CA6F C96F (cuda also has C86F in alt table) */
 #define BLACKWELL_CHANNEL_GPFIFO_A  0x0000c86f
+#define POST_BLACKWELL_CHANNEL_GPFIFO_A 0x0000c96f
+#define POST_BLACKWELL_CHANNEL_GPFIFO_B 0x0000ca6f
 
 #define FERMI_TWOD_A                0x0000902d
 #define KEPLER_INLINE_TO_MEMORY_A   0x0000a040
@@ -61,8 +73,9 @@
 #define AMPERE_DMA_COPY_A           0x0000c6b5
 #define AMPERE_DMA_COPY_B           0x0000c7b5
 #define HOPPER_DMA_COPY_A           0x0000c8b5
-/* 610 RE: C8B5 very common; may also see higher *B5 via classlist refine */
-#define BLACKWELL_DMA_COPY_A        0x0000c9b5  /* tentative upper; refine band allows up to 0xCFB5 */
+/* pass11 glcore DMA ladder head: CAB5 C9B5 C8B5 … (contiguous @ 0x11bb600) */
+#define BLACKWELL_DMA_COPY_A        0x0000c9b5
+#define POST_BLACKWELL_DMA_COPY_A   0x0000cab5
 
 enum nv_gpu_family
 nv_device_info_family_from_arch(uint32_t architecture)
@@ -345,39 +358,50 @@ void
 nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
                                  uint32_t *out, unsigned *inout_n)
 {
-   /* Newest-first ladders (pass9 rodata counts + pass5–8 glcore/cuda/egl imm). */
+   /*
+    * Newest-first ladders.  pass11 (610.43.02 glcore rodata @ 0x11bb600 /
+    * 0x1238b70) is authoritative for contiguous engine arrays; pass9 counts
+    * and pass5–8 imm scans remain as secondary sources for intermediate IDs
+    * not present in the primary glcore arrays (e.g. C4B5, C8C0, C66F).
+    */
+   /* pass11 glcore @ 0x11bb600: CAB5..B0B5 (no C4B5 in primary; keep as alt) */
    static const uint32_t ladder_copy[] = {
-      0x0000c9b5u, 0x0000c8b5u, 0x0000c7b5u, 0x0000c6b5u, 0x0000c5b5u,
-      0x0000c4b5u, 0x0000c3b5u, 0x0000c1b5u, 0x0000c0b5u, 0x0000b0b5u,
+      0x0000cab5u, 0x0000c9b5u, 0x0000c8b5u, 0x0000c7b5u, 0x0000c6b5u,
+      0x0000c5b5u, 0x0000c4b5u, 0x0000c3b5u, 0x0000c1b5u, 0x0000c0b5u,
+      0x0000b0b5u, 0x0000a0b5u,
    };
-   /* pass9 cuda: CCC0×22 CBC0×36 CAC0×20 C9C0 C8C0×45 … C3C0; tick85 G2 uses CCC0..C3C0 */
+   /* pass11 glcore @ 0x11bb640: CEC0..B0C0; pass9 cuda intermediates C8C0/CAC0 */
    static const uint32_t ladder_compute[] = {
-      0x0000cdc0u, 0x0000ccc0u, 0x0000cbc0u, 0x0000cac0u, 0x0000c9c0u,
-      0x0000c8c0u, 0x0000c7c0u, 0x0000c6c0u, 0x0000c5c0u, 0x0000c4c0u,
-      0x0000c3c0u, 0x0000b1c0u,
+      0x0000cec0u, 0x0000cdc0u, 0x0000ccc0u, 0x0000cbc0u, 0x0000cac0u,
+      0x0000c9c0u, 0x0000c8c0u, 0x0000c7c0u, 0x0000c6c0u, 0x0000c5c0u,
+      0x0000c4c0u, 0x0000c3c0u, 0x0000c1c0u, 0x0000c0c0u, 0x0000b1c0u,
+      0x0000b0c0u,
    };
-   /* pass9 egl/vksc/gl: CC97 CB97 CA97 C997 C897 C797 … C397; C597 dominant imm */
+   /* pass11 glcore @ 0x11bb680: CE97..B097; pass9 also CC97/CA97/C897/C497 */
    static const uint32_t ladder_3d[] = {
-      0x0000cd97u, 0x0000cc97u, 0x0000cb97u, 0x0000ca97u, 0x0000c997u,
-      0x0000c897u, 0x0000c797u, 0x0000c697u, 0x0000c597u, 0x0000c497u,
-      0x0000c397u, 0x0000b197u, 0x0000b097u,
+      0x0000ce97u, 0x0000cd97u, 0x0000cc97u, 0x0000cb97u, 0x0000ca97u,
+      0x0000c997u, 0x0000c897u, 0x0000c797u, 0x0000c697u, 0x0000c597u,
+      0x0000c497u, 0x0000c397u, 0x0000c197u, 0x0000c097u, 0x0000b197u,
+      0x0000b097u,
    };
-   /* pass9: eglcore has C66F+C36E; cuda/nvcuvid have C86F; try C36E before C06F */
+   /* pass11 glcore @ 0x1238b70: CA6F C96F C56F..506F; cuda alt C86F; pass9 C66F/C36E */
    static const uint32_t ladder_gpfifo[] = {
-      0x0000c86fu, 0x0000c76fu, 0x0000c66fu, 0x0000c56fu, 0x0000c46fu,
-      0x0000c36fu, 0x0000c36eu, 0x0000c06fu, 0x0000b06fu, 0x0000a26fu,
-      0x0000a16fu, 0x0000a06fu,
+      0x0000ca6fu, 0x0000c96fu, 0x0000c86fu, 0x0000c76fu, 0x0000c66fu,
+      0x0000c56fu, 0x0000c46fu, 0x0000c36fu, 0x0000c36eu, 0x0000c06fu,
+      0x0000b06fu, 0x0000a26fu, 0x0000a16fu, 0x0000a06fu, 0x0000906fu,
    };
-   /* pass9 vdpau/nvcuvid/cuda: C9B0..C3B0 (NVDEC); also B8B0/B6B0/B0B0 headers */
+   /* pass11 global hits + NVENC side table @ 0x1238bb4: C9B0.. + B8B0/CBB0/CAB0 */
    static const uint32_t ladder_nvdec[] = {
-      0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u, 0x0000c6b0u, 0x0000c5b0u,
-      0x0000c4b0u, 0x0000c3b0u, 0x0000c1b0u, 0x0000b8b0u, 0x0000b6b0u,
-      0x0000b0b0u,
+      0x0000cbb0u, 0x0000cab0u, 0x0000c9b0u, 0x0000c8b0u, 0x0000c7b0u,
+      0x0000c6b0u, 0x0000c5b0u, 0x0000c4b0u, 0x0000c3b0u, 0x0000c2b0u,
+      0x0000c1b0u, 0x0000c0b0u, 0x0000b8b0u, 0x0000b6b0u, 0x0000b0b0u,
+      0x0000a0b0u,
    };
-   /* pass9 glcore/egl/vksc: C8B7 heavy (18–29×); C9B7/C7B7 present; encode lib thin */
+   /* pass11 glcore @ 0x1238bb4: D1B7 CFB7 CEB7 C9B7 C8B7 C7B7 + C5B7 C4B7 B6B7 B4B7 */
    static const uint32_t ladder_nvenc[] = {
-      0x0000c9b7u, 0x0000c8b7u, 0x0000c7b7u, 0x0000c1b7u, 0x0000c0b7u,
-      0x0000b4b7u,
+      0x0000d1b7u, 0x0000cfb7u, 0x0000ceb7u, 0x0000c9b7u, 0x0000c8b7u,
+      0x0000c7b7u, 0x0000c6b7u, 0x0000c5b7u, 0x0000c4b7u, 0x0000c1b7u,
+      0x0000c0b7u, 0x0000b6b7u, 0x0000b4b7u,
    };
    const uint32_t *lad = NULL;
    unsigned lad_n = 0, max_n, i, n = 0;

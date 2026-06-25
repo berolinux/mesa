@@ -1479,6 +1479,75 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* pass11 RE: class ladders include glcore rodata heads (CA6F/CAB5/CE97/CEC0/D1B7) */
+   {
+      uint32_t cl[24];
+      unsigned ncl, i, has_ca6f = 0, has_cab5 = 0, has_ce97 = 0, has_cec0 = 0;
+      unsigned has_d1b7 = 0, has_cbb0 = 0, has_c597 = 0, has_c8b7 = 0;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(5, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000ca6fu)
+            has_ca6f = 1;
+      }
+      if (!has_ca6f || ncl < 8)
+         return -425;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(2, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000cab5u)
+            has_cab5 = 1;
+      }
+      if (!has_cab5)
+         return -426;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(0, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000ce97u)
+            has_ce97 = 1;
+         if (cl[i] == 0x0000c597u)
+            has_c597 = 1;
+      }
+      if (!has_ce97 || !has_c597)
+         return -427;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(1, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000cec0u)
+            has_cec0 = 1;
+      }
+      if (!has_cec0)
+         return -428;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(4, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000d1b7u)
+            has_d1b7 = 1;
+         if (cl[i] == 0x0000c8b7u)
+            has_c8b7 = 1;
+      }
+      if (!has_d1b7 || !has_c8b7)
+         return -429;
+
+      ncl = 24;
+      nv_device_info_fill_class_ladder(3, 0, cl, &ncl);
+      for (i = 0; i < ncl; i++) {
+         if (cl[i] == 0x0000cbb0u)
+            has_cbb0 = 1;
+      }
+      if (!has_cbb0)
+         return -430;
+
+      if (NVC36F_SEMAPHORED_RELEASE_BLOB_610 != 0x1001u ||
+          NVC36F_SEMAPHORED_RELEASE_VDPAU_610 != 0x2u)
+         return -431;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
