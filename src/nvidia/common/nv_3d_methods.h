@@ -4101,9 +4101,8 @@ nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
                   ((uint32_t)maj << 8) | (uint32_t)min);
 
    if (upload_mme) {
-      /* tick140: MME shadow scratch init (incl. pass14 0x34a8 / scratch 42) */
-      nv_mme_emit_shadow_scratch_init_range(p, 8);
-      (void)nv_mme_emit_upload_indirect_stubs_only(p);
+      /* tick140/148: pass17 MME prime (scratch incl. 0x34a8, RAM, 0x39e0 probe) */
+      (void)nv_mme_emit_channel_prime_upload_pass17(p);
       /* tick139: path C CALL only when real MME exists (no-op while stubs) */
       (void)nv_mme_emit_path_c_calls_if_ready(p);
    }
@@ -4120,6 +4119,76 @@ nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
       nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
       nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
    }
+}
+
+/**
+ * tick148 / pass17: G3 channel_prep + optional host sema via pass17 formal policy.
+ * Does not draw/clear; use before bringup slice or as sema-only probe tail.
+ */
+static inline void
+nv_3d_emit_g3_channel_prep_pass17(struct nv_push *p, uint32_t class_3d,
+                                  uint8_t spa_maj, uint8_t spa_min,
+                                  bool upload_mme, uint64_t sema_gpu_addr,
+                                  uint32_t sema_payload,
+                                  enum nv_host_sema_mode sema_mode,
+                                  int sema_emit)
+{
+   if (!p)
+      return;
+   nv_3d_emit_g3_channel_prep(p, class_3d, spa_maj, spa_min, upload_mme);
+   if (sema_gpu_addr) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         p, sema_gpu_addr, sema_payload ? sema_payload : 1u, true, sema_mode,
+         nv_host_sema_emit_pref_normalize(sema_emit));
+   }
+}
+
+/**
+ * tick148 / pass18: G3 invalidate shader+tex caches, WFI, then host sema pass17.
+ * Pipeline signature G3_clear_then_host from pass18 RE (imm co-presence).
+ */
+static inline void
+nv_3d_emit_g3_inv_wfi_host_sema_pass17(struct nv_push *p,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       enum nv_host_sema_mode sema_mode,
+                                       int sema_emit)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   {
+      uint32_t inv = NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+   }
+   nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+   if (sema_gpu_addr) {
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         p, sema_gpu_addr, sema_payload ? sema_payload : 1u, false, sema_mode,
+         nv_host_sema_emit_pref_normalize(sema_emit));
+   }
+}
+
+/**
+ * tick148 / pass18: CB selector bind (size + 64-bit GPU VA) then optional inv.
+ * Uses class methods 0x2380/0x2384/0x2388 (NVC597_SET_CONSTANT_BUFFER_SELECTOR_*).
+ */
+static inline void
+nv_3d_emit_g3_cb_selector_bind(struct nv_push *p, uint32_t size_bytes,
+                               uint64_t cb_gpu_addr, bool inv_const_cache)
+{
+   if (!p || !cb_gpu_addr)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_3d_set_constant_buffer_selector(p, size_bytes, cb_gpu_addr);
+   if (inv_const_cache)
+      nv_3d_invalidate_shader_caches(p, false, false, true);
 }
 
 /**

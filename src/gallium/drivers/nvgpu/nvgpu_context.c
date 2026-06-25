@@ -832,13 +832,13 @@ nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
       nv_tex_invalidate_caches(push);
 }
 
-/* tick142 / pass14/15: host sema on GPFIFO subch using channel emit_pref (slot/classic/auto). */
+/* tick142/148: host sema on GPFIFO subch; pass17 formal emit (channel sticky prefs). */
 static void
 nvgpu_emit_host_sema_release(struct nvgpu_context *ctx, struct nv_push *push,
                              uint64_t sema_gpu, uint32_t payload, bool wfi_after)
 {
    enum nv_host_sema_mode mode = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
-   int emit_pref = 0;
+   int emit_pref = NV_HOST_SEMA_EMIT_PASS17;
 
    if (!push || !sema_gpu)
       return;
@@ -846,9 +846,7 @@ nvgpu_emit_host_sema_release(struct nvgpu_context *ctx, struct nv_push *push,
       if (ctx->channel->host_sema_mode_pref >= 0 &&
           ctx->channel->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
          mode = (enum nv_host_sema_mode)ctx->channel->host_sema_mode_pref;
-      if (ctx->channel->host_sema_emit_pref >= 0 &&
-          ctx->channel->host_sema_emit_pref <= 2)
-         emit_pref = ctx->channel->host_sema_emit_pref;
+      emit_pref = nv_host_sema_emit_pref_normalize(ctx->channel->host_sema_emit_pref);
    }
    nv_push_host_semaphore_release_wfi_mode_ex(push, sema_gpu, payload, wfi_after,
                                               mode, emit_pref);
@@ -1732,7 +1730,23 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       ctx->fence = nv_fence_create(ctx->screen->rm);
    if (ctx->fence && ctx->fence->sema_gpu_addr) {
       uint32_t payload = nv_fence_alloc_seq(ctx->fence);
-      nv_qmd_desc_set_sema_release0(&desc, ctx->fence->sema_gpu_addr, payload);
+      /* tick148: pass17 QMD defaults + sema_release0 (invalidate + PCAS-friendly) */
+      {
+         struct nv_qmd_desc p17d;
+         nv_qmd_desc_init_pass17_defaults(&p17d, prog, 0, regs,
+                                          ctx->fence->sema_gpu_addr, payload);
+         p17d.grid_x = gx;
+         p17d.grid_y = gy;
+         p17d.grid_z = gz;
+         p17d.cta_x = cta_x;
+         p17d.cta_y = cta_y;
+         p17d.cta_z = cta_z;
+         p17d.shared_mem_size = desc.shared_mem_size;
+         p17d.barrier_count = desc.barrier_count;
+         p17d.sass_version = sass_ver;
+         p17d.local_mem_low = desc.local_mem_low;
+         desc = p17d;
+      }
       ctx->last_fence_seq = payload;
    }
 

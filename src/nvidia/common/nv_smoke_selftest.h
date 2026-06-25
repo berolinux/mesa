@@ -1363,7 +1363,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
 
    /* tick128: G3 viewport/scissor/clip + shader_draw_sema method shape */
    {
-      uint32_t buf_g3[256];
+      uint32_t buf_g3[2048];
       uint32_t ng3, ig3;
       bool saw_vp_clip_h = false, saw_surf_clip = false, saw_pipe_vs = false;
       bool saw_draw = false, saw_scissor = false;
@@ -1609,7 +1609,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
 
    /* tick133: G2/G3 bringup slices + video status poll + NVENC smoke slice */
    {
-      uint32_t g2buf[200], g3buf[200], vbuf[180];
+      uint32_t g2buf[2048], g3buf[2048], vbuf[256];
       uint32_t n2, n3, nv, i;
       bool saw_inv = false, saw_pcas = false, saw_clear = false;
       bool saw_enc_app = false, saw_enc_exec = false;
@@ -1704,7 +1704,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    {
       enum nv_host_sema_mode ladder[NV_HOST_SEMA_MODE_COUNT];
       unsigned nl, i, has_1000 = 0, has_1002 = 0, has_1001 = 0;
-      uint32_t g2p[64], g3p[160];
+      uint32_t g2p[128], g3p[2048];
       uint32_t n2p, n3p, ii;
       bool saw_wfi = false, saw_inv2 = false, saw_spa = false, saw_mme = false;
 
@@ -1783,7 +1783,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    {
       struct nv_sass_buf sb;
       struct nv_mme_program mme_clr;
-      uint32_t g2buf[220], g3buf[220];
+      uint32_t g2buf[2048], g3buf[2048];
       uint32_t n2, n3, ii;
       bool saw_prep_wfi = false, saw_prep_spa = false;
 
@@ -1961,7 +1961,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       struct nv_sph_blob s2r_sph;
       struct nv_sass_buf sb;
       struct nv_push p2;
-      uint32_t g2buf[256], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       bool saw_wfi = false, saw_inv = false;
       uint8_t maj = 0, min = 0;
 
@@ -2112,7 +2112,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    /* tick140: pass14 MME 0x34a8=scratch(42); sema slot methods; CB select+bind */
    {
       struct nv_push p2;
-      uint32_t g2buf[128], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       bool saw_scratch0 = false, saw_scratch42 = false;
       bool saw_sel_a = false, saw_bind = false;
       uint32_t consts[4] = { 1, 2, 3, 4 };
@@ -2216,7 +2216,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    /* tick141: host sema auto/slot/classic policy; sema emit wfi_ex */
    {
       struct nv_push p2;
-      uint32_t g2buf[64], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       bool saw_exec_c = false, saw_exec_d = false;
       enum nv_host_sema_mode m1004 = NV_HOST_SEMA_MODE_BLOB1004_ALIGN4;
       enum nv_host_sema_mode m1001 = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
@@ -2292,7 +2292,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       bool saw_d1b7 = false, saw_cfb7 = false;
       bool saw_exec_a = false;
       struct nv_push p2;
-      uint32_t g2buf[64], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       enum nv_host_sema_mode m0802 = NV_HOST_SEMA_MODE_BLOB0802_ALIGN4;
 
       nv_device_info_fill_class_ladder(5 /* gpfifo */, 0, gpf_lad, &gpf_n);
@@ -2368,7 +2368,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       bool saw_d1fa = false, saw_c6fa = false;
       bool saw_sc42 = false, saw_sc_hi = false;
       struct nv_push p2;
-      uint32_t g2buf[256], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       uint32_t idx_3998 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(0x3998u);
       uint32_t idx_39e0 = NV_MME_PASS15_SCRATCH_IDX_FROM_OFF(0x39e0u);
 
@@ -2456,7 +2456,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    /* tick145 / pass16: MME 0x39e0 post-config; pass16 multi-SR SPH; QMD+sema */
    {
       struct nv_push p2;
-      uint32_t g2buf[320], n2, ii;
+      uint32_t g2buf[2048], n2, ii;
       bool saw_39e0 = false, saw_sc42 = false;
       struct nv_sph_blob p16_sph;
       struct nv_qmd_desc qd16;
@@ -2707,6 +2707,75 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
       if (!saw_c)
          return -607;
+   }
+
+   /* tick148: G3 pass17 channel_prep (MME 0x39e0 + pass17 sema tail) */
+   {
+      struct nv_push g3p;
+      uint32_t g3b[4096], gn, gi;
+      bool saw_39e0 = false, saw_sc42 = false, saw_exec_c = false;
+
+      memset(g3b, 0, sizeof(g3b));
+      nv_push_init(&g3p, g3b, (uint32_t)(sizeof(g3b) / 4));
+      nv_3d_emit_g3_channel_prep_pass17(&g3p, 0xc597u, 5, 3, true,
+                                        0x900000ull, 0x77u,
+                                        NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+                                        NV_HOST_SEMA_EMIT_PASS17);
+      gn = nv_push_dw_count(&g3p);
+      if (gn < 30)
+         return -608;
+      for (gi = 0; gi + 1 < gn; gi++) {
+         uint32_t hdr = g3b[gi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS16_POST_CONFIG_METHOD_OFF)
+            saw_39e0 = true;
+         if (method == NV_MME_PASS14_LIT_METHOD_OFF)
+            saw_sc42 = true;
+         if (method == NVC36F_SEMAPHOREC && g3b[gi + 1] == 0x1004u)
+            saw_exec_c = true;
+      }
+      if (!saw_sc42)
+         return -609;
+      if (!saw_39e0)
+         return -610;
+      if (!saw_exec_c)
+         return -611;
+   }
+
+   /* tick148 / pass18: G3 inv+WFI+host sema pass17 (clear_then_host pipeline) */
+   {
+      struct nv_push ip;
+      uint32_t ib[512], in, ii;
+      bool saw_inv = false, saw_wfi = false, saw_exec = false;
+
+      memset(ib, 0, sizeof(ib));
+      nv_push_init(&ip, ib, (uint32_t)(sizeof(ib) / 4));
+      nv_3d_emit_g3_inv_wfi_host_sema_pass17(
+         &ip, 0x910000ull, 0x88u, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+         NV_HOST_SEMA_EMIT_PASS17);
+      in = nv_push_dw_count(&ip);
+      if (in < 8)
+         return -612;
+      for (ii = 0; ii + 1 < in; ii++) {
+         uint32_t hdr = ib[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_INVALIDATE_SHADER_CACHES)
+            saw_inv = true;
+         if (method == NVC597_WAIT_FOR_IDLE)
+            saw_wfi = true;
+         if (method == NVC36F_SEMAPHOREC && ib[ii + 1] == 0x1004u)
+            saw_exec = true;
+      }
+      if (!saw_inv)
+         return -613;
+      if (!saw_wfi)
+         return -614;
+      if (!saw_exec)
+         return -615;
    }
 
    if (trace_push && trace_dwords) {
