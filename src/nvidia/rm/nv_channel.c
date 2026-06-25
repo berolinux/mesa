@@ -3723,7 +3723,7 @@ nv_channel_g3_draw_rt_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      for (pass = 0; pass < 3; pass++) {
+      for (pass = 0; pass < 4; pass++) {
          if (sema_reset && sema_cpu)
             sema_cpu[0] = 0;
 
@@ -3733,11 +3733,17 @@ nv_channel_g3_draw_rt_sema_submit(struct nv_channel *ch,
 
          nv_push_init(&push, map, need);
          if (pass == 0)
+            /* tick116: fixed-func first (no SASS) — best HW chance without shaders */
+            nv_3d_emit_g3_clear_draw_fixed_sema(
+               &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c, zt_gpu_addr,
+               zt_format, vb_gpu_addr, vb_size_bytes, sema_gpu_addr,
+               sema_payload, true);
+         else if (pass == 1)
             nv_3d_emit_g3_clear_draw_full_sema(
                &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c, zt_gpu_addr,
                zt_format, vb_gpu_addr, vb_size_bytes, 0, 0, 0, sema_gpu_addr,
                sema_payload, true);
-         else if (pass == 1)
+         else if (pass == 2)
             nv_3d_emit_g3_clear_draw_sema_zt(
                &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c, zt_gpu_addr,
                ct_w, ct_h, zt_format, 0, false, sema_gpu_addr, sema_payload,
@@ -3836,6 +3842,82 @@ nv_channel_nvdec_frame_sema_submit(struct nv_channel *ch,
                                       wait_timeout_ns, check_notifier);
       if (r == 0) {
          ch->class_nvdec_bound = cl;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+int
+nv_channel_nvenc_frame_sema_submit(struct nv_channel *ch,
+                                   uint32_t class_nvenc,
+                                   const struct nv_nvenc_frame_setup *fs,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 96;
+   uint32_t classes[8];
+   unsigned n = 0, i;
+   int pre, last = -EINVAL;
+   uint32_t cenc;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   cenc = class_nvenc ? class_nvenc : nv_channel_resolve_class_nvenc(ch, 0);
+   if (!cenc)
+      cenc = NV_CH_FALLBACK_NVENC;
+
+   classes[n++] = cenc;
+   if (ch->class_nvenc_bound && ch->class_nvenc_bound != cenc)
+      classes[n++] = ch->class_nvenc_bound;
+   if (cenc != NV_VIDEO_CLASS_NVENC_C8B7)
+      classes[n++] = NV_VIDEO_CLASS_NVENC_C8B7;
+   if (cenc != NV_VIDEO_CLASS_NVENC_C9B7)
+      classes[n++] = NV_VIDEO_CLASS_NVENC_C9B7;
+   if (cenc != NV_VIDEO_CLASS_NVENC_C7B7)
+      classes[n++] = NV_VIDEO_CLASS_NVENC_C7B7;
+   if (cenc != NV_VIDEO_CLASS_NVENC_TURING_C0B7)
+      classes[n++] = NV_VIDEO_CLASS_NVENC_TURING_C0B7;
+   if (n > 8)
+      n = 8;
+
+   for (i = 0; i < n; i++) {
+      int r;
+      uint32_t cl = classes[i];
+      if (!cl)
+         continue;
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+
+      nv_push_init(&push, map, need);
+      nv_nvenc_emit_frame_kick(&push, cl, fs, sema_gpu_addr, sema_payload,
+                               sema_cpu);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         ch->class_nvenc_bound = cl;
          return 0;
       }
       last = r;

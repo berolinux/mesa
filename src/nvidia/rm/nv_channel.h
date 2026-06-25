@@ -736,6 +736,25 @@ nv_channel_nvdec_frame_sema_submit(struct nv_channel *ch,
                                    uint64_t wait_timeout_ns,
                                    bool check_notifier);
 
+/** tick116: see nv_video_methods.h nv_nvenc_frame_setup (opaque in header). */
+struct nv_nvenc_frame_setup;
+
+/**
+ * tick116: NVENC frame_setup + sema + EXECUTE submit/wait (encode vertical slice).
+ * class_nvenc 0 uses channel class_nvenc_bound / resolve ladder.
+ * fs may be NULL (EXECUTE-only smoke with default flags).
+ */
+int
+nv_channel_nvenc_frame_sema_submit(struct nv_channel *ch,
+                                   uint32_t class_nvenc,
+                                   const struct nv_nvenc_frame_setup *fs,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

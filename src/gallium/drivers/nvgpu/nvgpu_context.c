@@ -989,6 +989,8 @@ nvgpu_emit_clear_methods(struct nvgpu_context *ctx, unsigned buffers,
       nv_3d_emit_clear_surface(&push, buffers, color_ui, (float)depth, stencil);
    }
    (void)sc_enable;
+   /* tick116: WFI before sema helps virt/host where clear races sema poll */
+   nv_push_wfi(&push);
    /* 3D sema after clear for vertical-slice wait (not only GPGet) */
    if (ctx->fence && ctx->fence->sema_gpu_addr) {
       uint32_t payload = nv_fence_alloc_seq(ctx->fence);

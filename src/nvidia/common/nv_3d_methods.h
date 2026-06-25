@@ -3512,6 +3512,102 @@ nv_3d_g3_smoke_triangle_verts_f32(float out_verts9[9])
    out_verts9[6] =  0.75f; out_verts9[7] = -0.75f; out_verts9[8] = 0.0f;
 }
 
+/**
+ * tick116: fixed-function smoke state for G3 draw without real shaders.
+ * Sets viewport 0 to cover w×h, scissor 0 enabled full RT, depth test always,
+ * depth write enable, optional colour write all channels CT0.
+ * Call after CT/ZT bind, before clear/draw.
+ */
+static inline void
+nv_3d_emit_g3_fixed_func_smoke(struct nv_push *p, uint32_t rt_w, uint32_t rt_h,
+                               bool depth_write)
+{
+   float hw, hh;
+   if (!p)
+      return;
+   if (!rt_w)
+      rt_w = 1;
+   if (!rt_h)
+      rt_h = 1;
+   hw = (float)rt_w * 0.5f;
+   hh = (float)rt_h * 0.5f;
+
+   nv_3d_set_surface_clip(p, 0, 0, rt_w, rt_h);
+   nv_3d_set_scissor_n(p, 0, 0, 0, rt_w, rt_h);
+   /* viewport: scale = half extent, offset = center (common GL-style mapping) */
+   nv_3d_set_viewport0(p, hw, hh, 0.5f, hw, hh, 0.5f);
+   nv_3d_emit_viewport_z_clip_range(p, true /* zero_to_one */);
+
+   nv_push_method(p, NVC597_SET_DEPTH_TEST, 1);
+   nv_push_method(p, NVC597_SET_DEPTH_FUNC, NVC597_SET_DEPTH_FUNC_V_OGL_ALWAYS);
+   if (depth_write)
+      nv_push_method(p, NVC597_SET_DEPTH_WRITE, 1);
+   nv_3d_emit_color_write_mask(p, 0, 0xf);
+}
+
+/**
+ * tick116: G3 clear/draw/sema with fixed-func setup + optional VB (no SASS).
+ * Prefer this over clear_draw_full_sema when shaders are unavailable.
+ */
+static inline void
+nv_3d_emit_g3_clear_draw_fixed_sema(struct nv_push *p, uint32_t class_3d,
+                                    uint64_t ct_gpu_addr, uint32_t ct_w,
+                                    uint32_t ct_h, uint32_t ct_format,
+                                    const uint32_t color_ui[4],
+                                    uint64_t zt_gpu_addr, uint32_t zt_format,
+                                    uint64_t vb_gpu_addr, uint32_t vb_size,
+                                    uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                    bool wfi_before_draw)
+{
+   uint32_t c[4];
+   uint32_t w = ct_w ? ct_w : 1;
+   uint32_t h = ct_h ? ct_h : 1;
+   uint32_t zs = 0x100u;
+   uint32_t ztf = zt_format ? zt_format : NVC597_SET_ZT_FORMAT_V_Z24S8;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format, false, 0);
+   if (zt_gpu_addr) {
+      nv_3d_emit_g3_bind_zeta_target(p, zt_gpu_addr, w, h, ztf, 0);
+      if (ztf == NVC597_SET_ZT_FORMAT_V_Z24S8 ||
+          ztf == NVC597_SET_ZT_FORMAT_V_S8Z24 ||
+          ztf == NVC597_SET_ZT_FORMAT_V_S8 ||
+          ztf == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
+         zs = 0x300u;
+   }
+
+   nv_3d_emit_g3_fixed_func_smoke(p, w, h, zt_gpu_addr != 0);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
+   if (zt_gpu_addr)
+      nv_3d_emit_clear_surface(p, zs, NULL, 1.0f, 0);
+
+   if (vb_gpu_addr)
+      nv_3d_emit_g3_smoke_vertex_setup(p, vb_gpu_addr, vb_size);
+
+   if (wfi_before_draw)
+      nv_push_wfi(p);
+
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                             sema_payload);
+   else
+      nv_3d_emit_draw_vertex_array(p, 0, 3);
+}
+
 #ifdef __cplusplus
 }
 #endif

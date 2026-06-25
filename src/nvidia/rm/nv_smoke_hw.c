@@ -860,7 +860,7 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (res.g3_submit_rc == 0) {
             res.slices_ok |= NV_SMOKE_HW_G3;
          } else if (res.g3_submit_rc != 0 && res.g3_submit_rc != -EAGAIN) {
-            /* tick115: optional NVDEC sema smoke (non-fatal; does not set G3 ok) */
+            /* tick115/116: optional NVDEC/NVENC sema smoke (non-fatal) */
             if (sc->vid_ps_gpu && sc->sema_gpu) {
                struct nv_nvdec_pic_setup vpic;
                memset(&vpic, 0, sizeof(vpic));
@@ -872,6 +872,20 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                nv_channel_notifier_reset(ch);
                (void)nv_channel_nvdec_frame_sema_submit(
                   ch, 0, &vpic, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+                  true, to, check_notifier);
+            }
+            if (sc->sema_gpu) {
+               struct nv_nvenc_frame_setup venc;
+               memset(&venc, 0, sizeof(venc));
+               venc.app_id = NV_NVENC_APP_ID_H264;
+               venc.execute_flags = 1;
+               if (sc->vid_ps_gpu)
+                  venc.pic_setup_gpu_addr = sc->vid_ps_gpu;
+               if (sc->sema_cpu)
+                  sc->sema_cpu[0] = 0;
+               nv_channel_notifier_reset(ch);
+               (void)nv_channel_nvenc_frame_sema_submit(
+                  ch, 0, &venc, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
                   true, to, check_notifier);
             }
             /* Secondary: 3D sema-only (isolates clear methods vs sema/class) */
