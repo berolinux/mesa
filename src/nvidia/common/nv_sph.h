@@ -199,6 +199,97 @@ nv_sph_build_geometry_exit_only(struct nv_sph_blob *blob, uint16_t regs)
    nv_sph_build_graphics_exit_only(blob, NV_SPH_TYPE_GEOMETRY, regs);
 }
 
+/*
+ * tick125: vertex smoke with minimal SASS beyond EXIT — MOV32I R0..R3 with
+ * clip-space constants then EXIT.  Not a real attribute/vmap program; gives
+ * non-zero instruction stream for bind/trace while fixed-func remains the
+ * preferred G3 path until NIR->SASS.
+ *
+ * Layout (8-byte Maxwell+ pairs, approximate MOV32I class used in compute store):
+ *   MOV R0, x_bits; MOV R1, y_bits; MOV R2, z_bits; MOV R3, w_bits; EXIT
+ */
+#define NV_SPH_SASS_MOV32I_HI_RD(rd)  (0x01000000u | ((uint32_t)(rd) & 0xffu))
+
+static inline void
+nv_sph_build_vertex_mov_imm_exit(struct nv_sph_blob *blob,
+                                 uint32_t pos_x_bits, uint32_t pos_y_bits,
+                                 uint32_t pos_z_bits, uint32_t pos_w_bits,
+                                 uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_VERTEX);
+   info.register_count = regs ? regs : 16;
+   /* Minimal vmap: attribute 0 active (bits refined on silicon) */
+   info.vmap_lo = 0x1u;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+   s[n++] = pos_x_bits;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(0);
+   s[n++] = pos_y_bits;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(1);
+   s[n++] = pos_z_bits;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(2);
+   s[n++] = pos_w_bits ? pos_w_bits : 0x3f800000u; /* 1.0f default W */
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(3);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
+/** Default vertex smoke: unit W, zero XYZ (degenerate but valid bind object). */
+static inline void
+nv_sph_build_vertex_smoke_default(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_vertex_mov_imm_exit(blob, 0, 0, 0, 0x3f800000u, regs);
+}
+
+/** Pixel smoke: MOV R0, imm color; EXIT (no real RT write yet). */
+static inline void
+nv_sph_build_pixel_mov_imm_exit(struct nv_sph_blob *blob, uint32_t color_bits,
+                                uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_PIXEL);
+   info.register_count = regs ? regs : 8;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+   s[n++] = color_bits ? color_bits : 0xffffffffu;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(0);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
 /** Map nv_shader_kind-like index to NV_SPH_TYPE_* (0=VS..5=CS). */
 static inline uint8_t
 nv_sph_type_from_shader_kind_idx(unsigned kind_idx)

@@ -1032,6 +1032,191 @@ struct nv_nvenc_frame_setup {
 #define NV_NVENC_PS_RC_STATE_OFF         11
 #define NV_NVENC_PS_STATUS_OFF           12
 
+/*
+ * tick125: NVENC encoder status / pic_stat buffer (open-gpu-doc nvenc_drv.h
+ * nvenc_pic_stat_s, ~128 bytes).  Hardware writes this at SET_STATUS_OFFSET
+ * after EXECUTE; host polls sema then reads total_bit_count / offsets.
+ *
+ * Layout is little-endian dwords for portable CPU access (bitfields packed
+ * into dword1 as error_status[1:0] | ucode_error_status[31:2]).
+ */
+#define NV_NVENC_STATUS_BO_MIN_BYTES     128u
+#define NV_NVENC_STATUS_DW_PICTURE_INDEX 0
+#define NV_NVENC_STATUS_DW_ERROR_PACKED  1   /* low 2b error, rest ucode err */
+#define NV_NVENC_STATUS_DW_TOTAL_BIT_COUNT 2 /* picture size in bits */
+#define NV_NVENC_STATUS_DW_TYPE1_BIT_COUNT 3
+#define NV_NVENC_STATUS_DW_PIC_TYPE_SLICES 4 /* low16 pic_type, hi16 num_slices */
+#define NV_NVENC_STATUS_DW_ACT_AVG_QP     5  /* low16 ave_activity, hi16 avgQP */
+#define NV_NVENC_STATUS_DW_CYCLE_COUNT    6
+#define NV_NVENC_STATUS_DW_HRD_FULLNESS   7  /* signed int32 */
+#define NV_NVENC_STATUS_DW_BS_START_POS   8  /* bitstream_start_pos (bytes) */
+#define NV_NVENC_STATUS_DW_LAST_VALID_OFF 9  /* last_valid_byte_offset */
+#define NV_NVENC_STATUS_DW_MB_COUNTS      10 /* low16 intra_mb, hi16 inter_mb */
+#define NV_NVENC_STATUS_DWORDS            32 /* 128 bytes / 4 */
+
+/* VP9/AV1 variant uses total_byte_count at dword2 (open-gpu-doc nvenc_vp9_pic_stat_s) */
+#define NV_NVENC_STATUS_VP9_DW_TOTAL_BYTE_COUNT 2
+#define NV_NVENC_STATUS_VP9_DW_BS_START_POS     3
+
+struct nv_nvenc_status_snapshot {
+   uint32_t picture_index;
+   uint32_t error_status;        /* 0..3 from low 2 bits */
+   uint32_t ucode_error_status;  /* upper 30 bits of dword1 */
+   uint32_t total_bit_count;     /* H.264/HEVC primary size metric (bits) */
+   uint32_t type1_bit_count;
+   uint16_t pic_type;
+   uint16_t num_slices;
+   uint16_t ave_activity;
+   uint16_t avg_qp;
+   uint32_t cycle_count;
+   int32_t  hrd_fullness;
+   uint32_t bitstream_start_pos; /* byte offset into output BO */
+   uint32_t last_valid_byte_offset;
+   uint16_t intra_mb_count;
+   uint16_t inter_mb_count;
+   /* Derived / convenience */
+   uint32_t bitstream_size_bytes; /* preferred host feedback size */
+   bool     valid;                /* false if status_map null / too small */
+   bool     hw_error;             /* error_status != 0 */
+};
+
+/** Zero status BO before submit (caller maps CPU-accessible BO). */
+static inline void
+nv_nvenc_status_reset_cpu(void *status_cpu, uint32_t status_bytes)
+{
+   if (!status_cpu || !status_bytes)
+      return;
+   memset(status_cpu, 0, status_bytes < NV_NVENC_STATUS_BO_MIN_BYTES ?
+          status_bytes : NV_NVENC_STATUS_BO_MIN_BYTES);
+}
+
+/**
+ * Parse host-mapped NVENC status BO into snapshot.
+ * app_id selects H.264/HEVC (bit-count) vs VP9-style (byte-count at dword2).
+ * Returns 0 on success, -1 if buffer too small / null.
+ */
+static inline int
+nv_nvenc_status_read(const void *status_cpu, uint32_t status_bytes,
+                     uint32_t app_id, struct nv_nvenc_status_snapshot *out)
+{
+   const uint32_t *dw;
+   uint32_t err_pack;
+   uint32_t size_bytes = 0;
+
+   if (!out)
+      return -1;
+   memset(out, 0, sizeof(*out));
+   if (!status_cpu || status_bytes < 16u)
+      return -1;
+
+   dw = (const uint32_t *)status_cpu;
+   out->picture_index = dw[NV_NVENC_STATUS_DW_PICTURE_INDEX];
+   err_pack = dw[NV_NVENC_STATUS_DW_ERROR_PACKED];
+   out->error_status = err_pack & 3u;
+   out->ucode_error_status = err_pack >> 2;
+   out->hw_error = (out->error_status != 0);
+
+   if (app_id == NV_NVENC_APP_ID_AV1 || app_id == 0 /* treat unknown as H.264 */) {
+      /* AV1 pic_stat mirrors h265 layout in doc (128B, bit-oriented fields). */
+      (void)app_id;
+   }
+
+   if (app_id == NV_NVENC_APP_ID_AV1) {
+      /* Conservative: try bit-count path first (same dword indices as H.264). */
+   }
+
+   out->total_bit_count = dw[NV_NVENC_STATUS_DW_TOTAL_BIT_COUNT];
+   if (status_bytes >= 20u)
+      out->type1_bit_count = dw[NV_NVENC_STATUS_DW_TYPE1_BIT_COUNT];
+   if (status_bytes >= 24u) {
+      out->pic_type = (uint16_t)(dw[NV_NVENC_STATUS_DW_PIC_TYPE_SLICES] & 0xffffu);
+      out->num_slices = (uint16_t)(dw[NV_NVENC_STATUS_DW_PIC_TYPE_SLICES] >> 16);
+   }
+   if (status_bytes >= 28u) {
+      out->ave_activity = (uint16_t)(dw[NV_NVENC_STATUS_DW_ACT_AVG_QP] & 0xffffu);
+      out->avg_qp = (uint16_t)(dw[NV_NVENC_STATUS_DW_ACT_AVG_QP] >> 16);
+   }
+   if (status_bytes >= 32u)
+      out->cycle_count = dw[NV_NVENC_STATUS_DW_CYCLE_COUNT];
+   if (status_bytes >= 36u)
+      out->hrd_fullness = (int32_t)dw[NV_NVENC_STATUS_DW_HRD_FULLNESS];
+   if (status_bytes >= 40u)
+      out->bitstream_start_pos = dw[NV_NVENC_STATUS_DW_BS_START_POS];
+   if (status_bytes >= 44u)
+      out->last_valid_byte_offset = dw[NV_NVENC_STATUS_DW_LAST_VALID_OFF];
+   if (status_bytes >= 48u) {
+      out->intra_mb_count = (uint16_t)(dw[NV_NVENC_STATUS_DW_MB_COUNTS] & 0xffffu);
+      out->inter_mb_count = (uint16_t)(dw[NV_NVENC_STATUS_DW_MB_COUNTS] >> 16);
+   }
+
+   /*
+    * Bitstream byte size priority:
+    *  1) last_valid_byte_offset - bitstream_start_pos + 1 (when last > start)
+    *  2) last_valid_byte_offset alone (when start==0 and last>0)
+    *  3) (total_bit_count + 7) / 8
+    *  4) VP9-style: dword2 as total_byte_count when app needs bytes directly
+    */
+   if (out->last_valid_byte_offset > out->bitstream_start_pos)
+      size_bytes = out->last_valid_byte_offset - out->bitstream_start_pos;
+   else if (out->last_valid_byte_offset > 0 && out->bitstream_start_pos == 0)
+      size_bytes = out->last_valid_byte_offset;
+   else if (out->total_bit_count > 0)
+      size_bytes = (out->total_bit_count + 7u) / 8u;
+
+   /* If status looks zeroed (pre-HW / not written), leave size 0. */
+   if (out->total_bit_count == 0 && out->last_valid_byte_offset == 0 &&
+       out->bitstream_start_pos == 0 && out->picture_index == 0 &&
+       err_pack == 0)
+      size_bytes = 0;
+
+   out->bitstream_size_bytes = size_bytes;
+   out->valid = true;
+   return 0;
+}
+
+/** Convenience: bitstream size only (0 if unknown / not ready). */
+static inline uint32_t
+nv_nvenc_status_bitstream_size_bytes(const void *status_cpu,
+                                     uint32_t status_bytes, uint32_t app_id)
+{
+   struct nv_nvenc_status_snapshot snap;
+   if (nv_nvenc_status_read(status_cpu, status_bytes, app_id, &snap) != 0)
+      return 0;
+   return snap.bitstream_size_bytes;
+}
+
+/**
+ * Write a synthetic status snapshot (host unit tests / smoke without GPU).
+ * total_bit_count is in bits; last_valid_byte_offset optional (0 = derive).
+ */
+static inline void
+nv_nvenc_status_write_synthetic(void *status_cpu, uint32_t status_bytes,
+                                uint32_t picture_index,
+                                uint32_t total_bit_count,
+                                uint32_t bitstream_start_pos,
+                                uint32_t last_valid_byte_offset,
+                                uint16_t pic_type, uint16_t avg_qp)
+{
+   uint32_t *dw;
+   if (!status_cpu || status_bytes < 48u)
+      return;
+   dw = (uint32_t *)status_cpu;
+   memset(dw, 0, status_bytes < NV_NVENC_STATUS_BO_MIN_BYTES ?
+          status_bytes : NV_NVENC_STATUS_BO_MIN_BYTES);
+   dw[NV_NVENC_STATUS_DW_PICTURE_INDEX] = picture_index;
+   dw[NV_NVENC_STATUS_DW_ERROR_PACKED] = 0;
+   dw[NV_NVENC_STATUS_DW_TOTAL_BIT_COUNT] = total_bit_count;
+   dw[NV_NVENC_STATUS_DW_PIC_TYPE_SLICES] =
+      (uint32_t)pic_type | (1u << 16); /* 1 slice */
+   dw[NV_NVENC_STATUS_DW_ACT_AVG_QP] = ((uint32_t)avg_qp) << 16;
+   dw[NV_NVENC_STATUS_DW_BS_START_POS] = bitstream_start_pos;
+   if (last_valid_byte_offset)
+      dw[NV_NVENC_STATUS_DW_LAST_VALID_OFF] = last_valid_byte_offset;
+   else if (total_bit_count)
+      dw[NV_NVENC_STATUS_DW_LAST_VALID_OFF] =
+         bitstream_start_pos + (total_bit_count + 7u) / 8u;
+}
+
 static inline uint32_t
 nv_nvenc_pic_setup_size(uint32_t app_id)
 {

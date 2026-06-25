@@ -991,12 +991,39 @@ nvgpu_enc_get_feedback(struct pipe_video_codec *codec,
                        struct pipe_enc_feedback_metadata *metadata)
 {
    struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   struct nv_nvenc_status_snapshot snap;
+   uint32_t bs_sz = 0;
+
    (void)feedback;
-   (void)enc;
-   if (size)
-      *size = 0; /* unknown until status/bitstream size ring is reverse-engineered */
    if (metadata)
       memset(metadata, 0, sizeof(*metadata));
+
+   if (!enc) {
+      if (size)
+         *size = 0;
+      return;
+   }
+
+   /* tick125: read NVENC status BO (nvenc_pic_stat_s layout) after sema wait */
+   if (enc->status_map) {
+      if (nv_nvenc_status_read(enc->status_map, NVGPU_VID_STATUS_BO_SIZE,
+                               enc->app_id, &snap) == 0 && snap.valid) {
+         bs_sz = snap.bitstream_size_bytes;
+         if (metadata) {
+            /* pipe_enc_feedback_metadata fields vary by Mesa version; zeroed above.
+             * Populate only when we have a clear error signal from HW status. */
+            if (snap.hw_error)
+               metadata->encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+         }
+      }
+   }
+
+   /* Clamp to allocated bitstream BO */
+   if (bs_sz > enc->bitstream_out_size)
+      bs_sz = enc->bitstream_out_size;
+
+   if (size)
+      *size = (unsigned)bs_sz;
 }
 
 static struct pipe_video_codec *

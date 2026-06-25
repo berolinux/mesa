@@ -1120,6 +1120,69 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -366;
    }
 
+   /* tick125: NVENC status BO parse / bitstream size derivation */
+   {
+      uint8_t stbuf[NV_NVENC_STATUS_BO_MIN_BYTES];
+      struct nv_nvenc_status_snapshot snap;
+      uint32_t sz;
+
+      memset(stbuf, 0, sizeof(stbuf));
+      nv_nvenc_status_reset_cpu(stbuf, sizeof(stbuf));
+      if (nv_nvenc_status_read(stbuf, sizeof(stbuf), NV_NVENC_APP_ID_H264,
+                               &snap) != 0 || !snap.valid)
+         return -367;
+      if (snap.bitstream_size_bytes != 0)
+         return -368; /* zeroed BO must report size 0 */
+
+      /* 256 bits => 32 bytes via total_bit_count path */
+      nv_nvenc_status_write_synthetic(stbuf, sizeof(stbuf), 7u, 256u, 0, 0,
+                                      0 /* I/P */, 28);
+      if (nv_nvenc_status_read(stbuf, sizeof(stbuf), NV_NVENC_APP_ID_H264,
+                               &snap) != 0)
+         return -369;
+      if (snap.picture_index != 7u || snap.total_bit_count != 256u)
+         return -370;
+      if (snap.bitstream_size_bytes != 32u)
+         return -371;
+      if (snap.avg_qp != 28)
+         return -372;
+
+      /* Prefer last_valid_byte_offset - start when set larger than bit-count path */
+      nv_nvenc_status_write_synthetic(stbuf, sizeof(stbuf), 1u, 64u /* 8 bytes */,
+                                      16u, 48u, 0, 20);
+      if (nv_nvenc_status_read(stbuf, sizeof(stbuf), NV_NVENC_APP_ID_HEVC,
+                               &snap) != 0)
+         return -373;
+      if (snap.bitstream_start_pos != 16u || snap.last_valid_byte_offset != 48u)
+         return -374;
+      if (snap.bitstream_size_bytes != 32u) /* 48 - 16 */
+         return -375;
+
+      sz = nv_nvenc_status_bitstream_size_bytes(stbuf, sizeof(stbuf),
+                                                NV_NVENC_APP_ID_H264);
+      if (sz != 32u)
+         return -376;
+      if (nv_nvenc_status_read(NULL, 0, NV_NVENC_APP_ID_H264, &snap) == 0)
+         return -377; /* must fail on null buffer */
+   }
+
+   /* tick125: vertex/pixel SPH+MOV imm+EXIT smoke builders */
+   {
+      struct nv_sph_blob vsb, psb;
+      nv_sph_build_vertex_smoke_default(&vsb, 16);
+      if (nv_sph_smoke_validate_blob(&vsb, NV_SPH_TYPE_VERTEX) != 0)
+         return -378;
+      if (vsb.sass_dwords < 10)
+         return -379; /* 4x MOV32I + EXIT = 10 dwords */
+      if ((vsb.sph[0] & 0xf) != NV_SPH_TYPE_VERTEX)
+         return -380;
+      nv_sph_build_pixel_mov_imm_exit(&psb, 0xff00ff00u, 8);
+      if (nv_sph_smoke_validate_blob(&psb, NV_SPH_TYPE_PIXEL) != 0)
+         return -381;
+      if (psb.sass_dwords < 4)
+         return -382;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
