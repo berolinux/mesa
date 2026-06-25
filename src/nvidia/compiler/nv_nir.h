@@ -87,6 +87,18 @@ bool nv_nir_compile_g2_pass22_kind_smoke(int pass21_kind, uint32_t imm_value,
 /** tick163: host check — kind smoke builds valid compute SPH for all ladder kinds. */
 int nv_nir_g2_pass22_kind_ladder_selftest(uint16_t regs);
 
+/**
+ * tick165: compute compile without full NIR AST — pass22 default depth kind
+ * (S2R+store) via compiler SASS/SPH pipeline.  Used when nv_nir_compile has no
+ * NIR or isel is incomplete; matches pass22 channel/Gallium policy.
+ */
+bool nv_nir_compile_compute_pass22_default(uint32_t imm_value,
+                                           uint64_t store_gpu_addr,
+                                           uint16_t min_registers,
+                                           struct nv_compiler_result *out);
+
+#define NV_PASS22_NIR_COMPUTE_DEFAULT_KIND  3 /* NV_PASS21_CS_S2R_STORE_IMM */
+
 void nv_compiler_result_finish(struct nv_compiler_result *res);
 
 /** Map nv_shader_kind / mesa stage to compiler stage. */

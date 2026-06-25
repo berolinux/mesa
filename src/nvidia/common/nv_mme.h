@@ -1029,6 +1029,23 @@ nv_mme_path_c_indirect_ready(void)
    return !nv_mme_programs_are_stubs(progs);
 }
 
+/*
+ * tick165 / pass22: path C remains gated (pass22 RE: no static MME ISA unlock).
+ * Silicon ladder order for future non-stub programs — do not CALL until
+ * nv_mme_path_c_indirect_ready() is true.  pass22 explicit-emit policy applies
+ * to host paths only; MME indirect is still stub_end_only.
+ */
+#define NV_PASS22_MME_PATH_C_STILL_GATED        1
+#define NV_PASS22_MME_SILICON_PROBE_HOST_FIRST  1
+
+/** tick165: true if mesa must keep host A/B/C' for indirect/clear (path C off). */
+static inline bool
+nv_pass22_mme_must_use_host_path(void)
+{
+   return NV_PASS22_MME_PATH_C_STILL_GATED != 0 &&
+          !nv_mme_path_c_indirect_ready();
+}
+
 /**
  * tick152: path C indirect try — CALL indirect slot only if non-stub.
  * data0 = draw_count | (stride << 16) (same as pass5 / mme_kick convention).

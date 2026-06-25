@@ -328,11 +328,25 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
          return 0;
       /* Compile failed: still upload trivial shader so bind/draw does not fault */
    }
-   /* Compute without NIR: prefer SPH+EXIT smoke object over vertex-type trivial */
-   if (sh->kind == NV_SHADER_KIND_COMPUTE)
-      return nv_shader_upload_compute_smoke(sh, 0, 0, 0,
-                                            sh->register_count ? sh->register_count
-                                                               : 8);
+   /* tick165: compute without NIR — pass22 default depth (s2r+store smoke) via
+    * nv_nir compiler pipeline when available; else hand SPH compute smoke. */
+   if (sh->kind == NV_SHADER_KIND_COMPUTE) {
+      struct nv_compiler_result cres;
+      uint32_t regs = sh->register_count ? sh->register_count : 16;
+      if (nv_nir_compile_compute_pass22_default(0x57u, 0x300000ull,
+                                                (uint16_t)regs, &cres) &&
+          cres.success && cres.code && cres.code_size) {
+         int ur = nv_shader_upload_code(sh, cres.code, cres.code_size);
+         nv_compiler_result_finish(&cres);
+         if (ur == 0) {
+            sh->register_count = regs;
+            return 0;
+         }
+      } else {
+         nv_compiler_result_finish(&cres);
+      }
+      return nv_shader_upload_compute_smoke(sh, 0, 0, 0, regs);
+   }
    /* tick121: graphics stages get typed SPH+EXIT (not empty/null code BO) */
    return nv_shader_upload_graphics_smoke(
       sh, sh->register_count ? sh->register_count : 8);

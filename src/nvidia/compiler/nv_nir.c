@@ -1601,6 +1601,18 @@ nv_nir_compile_g2_pass22_kind_smoke(int pass21_kind, uint32_t imm_value,
    return true;
 }
 
+bool
+nv_nir_compile_compute_pass22_default(uint32_t imm_value,
+                                      uint64_t store_gpu_addr,
+                                      uint16_t min_registers,
+                                      struct nv_compiler_result *out)
+{
+   /* tick165: default NIR depth = pass22 S2R+store (kind 3) */
+   return nv_nir_compile_g2_pass22_kind_smoke(3 /* NV_PASS21_CS_S2R_STORE_IMM */,
+                                              imm_value, store_gpu_addr,
+                                              min_registers, out);
+}
+
 int
 nv_nir_g2_pass22_kind_ladder_selftest(uint16_t regs)
 {

@@ -4008,6 +4008,34 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* tick165: pass22 MME path C gate + NIR compute default policy (header) */
+   {
+      if (!NV_PASS22_MME_PATH_C_STILL_GATED || !NV_PASS22_MME_SILICON_PROBE_HOST_FIRST)
+         return -803;
+      if (!nv_pass22_mme_must_use_host_path())
+         return -804; /* stubs must keep path C off */
+      if (nv_mme_path_c_indirect_ready())
+         return -805; /* unexpected non-stub programs in tree */
+      if (!NV_PASS22_NIR_USES_HAND_SPH_LADDER)
+         return -806;
+      if (NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
+         return -807;
+      /* pass22 compute object still builds for default kind (shader fallback shape) */
+      {
+         struct nv_pass21_compute_object o165;
+         memset(&o165, 0, sizeof(o165));
+         o165.shader_kind = NV_PASS22_NIR_DEFAULT_KIND;
+         o165.program_gpu_addr = 0x240000ull;
+         o165.qmd_gpu_addr = 0x830000ull;
+         o165.qmd_sema_gpu = 0x340000ull;
+         o165.store_gpu_addr = 0x300000ull;
+         if (nv_pass22_compute_object_build(&o165) != 0)
+            return -808;
+         if (!o165.ser_bytes)
+            return -809;
+      }
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
