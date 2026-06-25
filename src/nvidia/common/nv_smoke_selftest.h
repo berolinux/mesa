@@ -925,6 +925,27 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -341; /* until real ISA, stubs must remain true */
    }
 
+   /* tick121: graphics SPH+EXIT smoke has correct type + EXIT tail (encode only) */
+   {
+      struct nv_sph_blob vsb, fsb;
+      int vr;
+
+      nv_sph_build_vertex_exit_only(&vsb, 8);
+      vr = nv_sph_smoke_validate_blob(&vsb, NV_SPH_TYPE_VERTEX);
+      if (vr != 0)
+         return -342;
+      if (vsb.total_bytes < 32)
+         return -343;
+      nv_sph_build_pixel_exit_only(&fsb, 8);
+      vr = nv_sph_smoke_validate_blob(&fsb, NV_SPH_TYPE_PIXEL);
+      if (vr != 0)
+         return -344;
+      if (nv_sph_type_from_shader_kind_idx(1) != NV_SPH_TYPE_PIXEL)
+         return -345;
+      if (nv_sph_type_from_shader_kind_idx(5) != NV_SPH_TYPE_COMPUTE)
+         return -346;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

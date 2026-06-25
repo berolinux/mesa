@@ -270,7 +270,7 @@ nvgpu_ensure_shader_uploaded(struct nvgpu_context *ctx,
    if (!scso || !scso->nvsh || scso->nvsh->uploaded)
       return;
 
-   /* NIR->SPH+SASS via nvidia compiler; compute without NIR uses smoke SPH+EXIT */
+   /* NIR->SPH+SASS via nvidia compiler; no-NIR uses typed SPH+EXIT smoke (tick121) */
    if (scso->nvsh->nir) {
       if (nv_shader_compile_nir(scso->nvsh, scso->nvsh->nir) != 0 &&
           scso->nvsh->kind == NV_SHADER_KIND_COMPUTE)
@@ -280,7 +280,8 @@ nvgpu_ensure_shader_uploaded(struct nvgpu_context *ctx,
    } else if (scso->nvsh->kind == NV_SHADER_KIND_COMPUTE) {
       (void)nv_shader_upload_compute_smoke(scso->nvsh, 0, 0, 0, 16);
    } else {
-      nv_shader_compile_nir_stub(scso->nvsh);
+      if (nv_shader_upload_graphics_smoke(scso->nvsh, 8) != 0)
+         nv_shader_compile_nir_stub(scso->nvsh);
    }
    if (scso->nvsh->uploaded && !ctx->program_region_base && scso->nvsh->code_gpu_addr)
       ctx->program_region_base = scso->nvsh->code_gpu_addr;

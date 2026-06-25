@@ -119,6 +119,22 @@ nv_shader_upload_compute_exit_smoke(struct nv_shader *sh, uint32_t regs)
    return nv_shader_upload_compute_smoke(sh, 0, 0, 0, regs);
 }
 
+/**
+ * tick121: upload SPH+EXIT smoke for graphics stages (VS/FS/GS/tess).
+ * Prefer over upload_code(NULL) so program objects have correct SPH type.
+ * Returns 0 on success; -1 on failure.  No-op success if already uploaded.
+ */
+int
+nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count);
+
+/** Convenience: graphics smoke using shader's existing register_count. */
+static inline int
+nv_shader_upload_graphics_exit_smoke(struct nv_shader *sh)
+{
+   return nv_shader_upload_graphics_smoke(
+      sh, sh && sh->register_count ? sh->register_count : 8);
+}
+
 #ifdef __cplusplus
 }
 #endif

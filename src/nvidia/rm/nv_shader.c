@@ -333,8 +333,9 @@ nv_shader_compile_nir_stub(struct nv_shader *sh)
       return nv_shader_upload_compute_smoke(sh, 0, 0, 0,
                                             sh->register_count ? sh->register_count
                                                                : 8);
-   return nv_shader_upload_code(sh, NULL, 0,
-                                sh->register_count ? sh->register_count : 8);
+   /* tick121: graphics stages get typed SPH+EXIT (not empty/null code BO) */
+   return nv_shader_upload_graphics_smoke(
+      sh, sh->register_count ? sh->register_count : 8);
 }
 
 int
@@ -359,6 +360,61 @@ nv_shader_upload_compute_smoke(struct nv_shader *sh, int mode,
       nv_sph_build_compute_exit_only(&blob, (uint16_t)regs);
 
    vr = nv_sph_smoke_validate_blob(&blob, NV_SPH_TYPE_COMPUTE);
+   if (vr != 0)
+      return vr;
+
+   if (blob.total_bytes > sizeof(sph_buf))
+      return -1;
+   nv_sph_serialise(&blob, sph_buf, sizeof(sph_buf));
+
+   sh->uploaded = false;
+   return nv_shader_upload_code(sh, sph_buf, blob.total_bytes, regs);
+}
+
+int
+nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count)
+{
+   struct nv_sph_blob blob;
+   uint8_t sph_buf[512];
+   uint32_t regs = register_count ? register_count : 8;
+   uint8_t sph_type;
+   int vr;
+
+   if (!sh || !sh->rm)
+      return -1;
+   if (sh->uploaded)
+      return 0;
+   if (sh->kind == NV_SHADER_KIND_COMPUTE)
+      return nv_shader_upload_compute_smoke(sh, 0, 0, 0, regs);
+
+   nv_shader_fill_stage_defaults(sh);
+
+   switch (sh->kind) {
+   case NV_SHADER_KIND_FRAGMENT:
+      sph_type = NV_SPH_TYPE_PIXEL;
+      nv_sph_build_pixel_exit_only(&blob, (uint16_t)regs);
+      break;
+   case NV_SHADER_KIND_GEOMETRY:
+      sph_type = NV_SPH_TYPE_GEOMETRY;
+      nv_sph_build_geometry_exit_only(&blob, (uint16_t)regs);
+      break;
+   case NV_SHADER_KIND_TESS_CTRL:
+      sph_type = NV_SPH_TYPE_TESS_INIT;
+      nv_sph_build_graphics_exit_only(&blob, sph_type, (uint16_t)regs);
+      break;
+   case NV_SHADER_KIND_TESS_EVAL:
+      sph_type = NV_SPH_TYPE_TESS;
+      nv_sph_build_graphics_exit_only(&blob, sph_type, (uint16_t)regs);
+      break;
+   case NV_SHADER_KIND_VERTEX:
+   default:
+      sph_type = NV_SPH_TYPE_VERTEX;
+      sh->kind = NV_SHADER_KIND_VERTEX;
+      nv_sph_build_vertex_exit_only(&blob, (uint16_t)regs);
+      break;
+   }
+
+   vr = nv_sph_smoke_validate_blob(&blob, sph_type);
    if (vr != 0)
       return vr;
 

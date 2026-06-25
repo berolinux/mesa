@@ -163,6 +163,57 @@ nv_sph_build_compute_exit_only(struct nv_sph_blob *blob, uint16_t regs)
    nv_sph_build_trivial(blob, NV_SPH_TYPE_COMPUTE, regs ? regs : 8);
 }
 
+/**
+ * tick121: minimal graphics stage smoke — correct SPH type + EXIT only.
+ * Used when NIR/SASS is unavailable so bind/draw still has a valid program
+ * object (HW may still fault on shader I/O; fixed-func path remains preferred
+ * until real SASS).  type: NV_SPH_TYPE_VERTEX / PIXEL / GEOMETRY / etc.
+ */
+static inline void
+nv_sph_build_graphics_exit_only(struct nv_sph_blob *blob, uint8_t sph_type,
+                                uint16_t regs)
+{
+   if (!sph_type || sph_type == NV_SPH_TYPE_COMPUTE)
+      sph_type = NV_SPH_TYPE_VERTEX;
+   nv_sph_build_trivial(blob, sph_type, regs ? regs : 8);
+}
+
+/** Vertex stage SPH+EXIT smoke. */
+static inline void
+nv_sph_build_vertex_exit_only(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_exit_only(blob, NV_SPH_TYPE_VERTEX, regs);
+}
+
+/** Pixel/fragment stage SPH+EXIT smoke. */
+static inline void
+nv_sph_build_pixel_exit_only(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_exit_only(blob, NV_SPH_TYPE_PIXEL, regs);
+}
+
+/** Geometry stage SPH+EXIT smoke. */
+static inline void
+nv_sph_build_geometry_exit_only(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_exit_only(blob, NV_SPH_TYPE_GEOMETRY, regs);
+}
+
+/** Map nv_shader_kind-like index to NV_SPH_TYPE_* (0=VS..5=CS). */
+static inline uint8_t
+nv_sph_type_from_shader_kind_idx(unsigned kind_idx)
+{
+   switch (kind_idx) {
+   case 0: return NV_SPH_TYPE_VERTEX;
+   case 1: return NV_SPH_TYPE_PIXEL;
+   case 2: return NV_SPH_TYPE_GEOMETRY;
+   case 3: return NV_SPH_TYPE_TESS_INIT;
+   case 4: return NV_SPH_TYPE_TESS;
+   case 5: return NV_SPH_TYPE_COMPUTE;
+   default: return NV_SPH_TYPE_VERTEX;
+   }
+}
+
 #define NV_SPH_SASS_STG_HI      0xeed80000u
 #define NV_SPH_SASS_MOV_HI_REG  0x5c980780u
 #define NV_SPH_SASS_S2R_HI_CS   0x86400000u
