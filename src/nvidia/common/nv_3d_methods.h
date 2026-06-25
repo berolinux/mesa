@@ -484,6 +484,44 @@ nv_3d_surface_block_size(const struct nv_3d_surface *s, uint32_t explicit_bs)
    return nv_3d_block_size_default_2d_bl();
 }
 
+/* SET_COLOR_TARGET_MEMORY(j): block W/H/D in [11:0], LAYOUT at bit 12 (clc597). */
+#define NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_SHIFT  12
+#define NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_BLOCKLINEAR_VAL  0u
+#define NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_PITCH_VAL        1u
+
+/**
+ * tick119: build SET_COLOR_TARGET_MEMORY dword — pitch uses LAYOUT=1 + zero gobs;
+ * block-linear uses LAYOUT=0 + gobs (same field layout as SET_ZT_BLOCK_SIZE low 12b).
+ */
+static inline uint32_t
+nv_3d_ct_memory_dword(bool block_linear, uint8_t gobs_w, uint8_t gobs_h,
+                      uint8_t gobs_d)
+{
+   uint32_t v;
+
+   if (!block_linear) {
+      return (NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_PITCH_VAL
+              << NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_SHIFT);
+   }
+   v = nv_3d_block_size_from_gobs(gobs_w, gobs_h, gobs_d);
+   /* LAYOUT_BLOCKLINEAR = 0 at bit 12 — leave clear */
+   (void)NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_BLOCKLINEAR_VAL;
+   return v;
+}
+
+static inline uint32_t
+nv_3d_ct_memory_dword_from_surface(const struct nv_3d_surface *s)
+{
+   uint8_t gw, gh, gd;
+
+   if (!s || !s->block_linear)
+      return nv_3d_ct_memory_dword(false, 0, 0, 0);
+   gw = s->gobs_width;
+   gh = s->gobs_height ? s->gobs_height : 4;
+   gd = s->gobs_depth;
+   return nv_3d_ct_memory_dword(true, gw, gh, gd);
+}
+
 static inline uint32_t
 nv_3d_topology_from_pipe_prim(unsigned pipe_prim)
 {
@@ -574,8 +612,8 @@ nv_3d_set_color_target(struct nv_push *p, unsigned j,
       return;
    }
 
-   mem_info = s->block_linear ? NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_BLOCKLINEAR
-                              : NVC597_SET_COLOR_TARGET_MEMORY_LAYOUT_PITCH;
+   /* tick119: MEMORY carries layout bit12 + block W/H/D in low 12b (not layout-only) */
+   mem_info = nv_3d_ct_memory_dword_from_surface(s);
 
    /* Burst: SET_COLOR_TARGET_A..MEMORY (6 dwords after header, matching nvidia-3d) */
    nv_push_method(p, NVC597_SET_COLOR_TARGET_A(j),
@@ -1274,6 +1312,21 @@ nv_3d_mme_indirect_is_stub(void)
    struct nv_mme_program progs[NV_MME_SLOT_COUNT];
    nv_mme_build_indirect_draw_programs(progs);
    return nv_mme_programs_are_stubs(progs);
+}
+
+/**
+ * tick119: upload full extended MME table (RAM only, no CALL) during channel init.
+ * Safer than prime_full_table_stubs which CALLs tentative method-emit scaffolds.
+ */
+static inline bool
+nv_3d_mme_upload_extended_table_only(struct nv_push *p)
+{
+   if (!p)
+      return false;
+   nv_3d_mme_set_shadow_ram_control(p,
+      NVC597_SET_MME_SHADOW_RAM_CONTROL_MODE_METHOD_TRACK);
+   nv_mme_emit_upload_full_table_only(p);
+   return true;
 }
 
 /**

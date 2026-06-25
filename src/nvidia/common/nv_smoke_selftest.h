@@ -806,6 +806,87 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -328;
    }
 
+   /* tick119: CT MEMORY pitch layout at bit12; BL 1x16x1 gobs in low 12b */
+   {
+      struct nv_3d_surface sct;
+      uint32_t buf_ct[64];
+      uint32_t nct, ict;
+      uint32_t mem_val = 0xffffffffu;
+      bool saw_mem = false;
+      uint32_t pitch_mem = nv_3d_ct_memory_dword(false, 0, 0, 0);
+      uint32_t bl_mem = nv_3d_ct_memory_dword(true, 0, 4, 0);
+
+      if (pitch_mem != (1u << 12))
+         return -329;
+      if (bl_mem != nv_3d_block_size_default_2d_bl())
+         return -330;
+      if (bl_mem & (1u << 12))
+         return -331;
+
+      memset(&sct, 0, sizeof(sct));
+      sct.enabled = true;
+      sct.gpu_addr = 0x600000ull;
+      sct.width = 64;
+      sct.height = 64;
+      sct.format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+      sct.block_linear = true;
+      sct.gobs_height = 4;
+      memset(buf_ct, 0, sizeof(buf_ct));
+      nv_push_init(&p, buf_ct, (uint32_t)(sizeof(buf_ct) / 4));
+      nv_3d_set_color_target(&p, 0, &sct);
+      nct = nv_push_dw_count(&p);
+      for (ict = 0; ict + 1 < nct; ict++) {
+         uint32_t hdr = buf_ct[ict];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_COLOR_TARGET_MEMORY(0)) {
+            saw_mem = true;
+            mem_val = buf_ct[ict + 1];
+         }
+      }
+      if (!saw_mem || mem_val != bl_mem)
+         return -332;
+   }
+
+   /* tick119: MME upload_only emits LOAD_MME_* without CALL_MME_MACRO */
+   {
+      struct nv_mme_program prog;
+      uint32_t buf_m[128];
+      uint32_t nm, im;
+      bool saw_ptr = false, saw_ram = false, saw_start = false, saw_call = false;
+
+      nv_mme_build_draw_indirect_loop_scaffold(&prog, NV_MME_SLOT_DRAW_INDIRECT,
+                                               0, false);
+      if (!prog.is_stub_end_only || prog.insn_count < 2)
+         return -333;
+      memset(buf_m, 0, sizeof(buf_m));
+      nv_push_init(&p, buf_m, (uint32_t)(sizeof(buf_m) / 4));
+      nv_mme_emit_upload_only(&p, &prog);
+      nm = nv_push_dw_count(&p);
+      if (nm < 6)
+         return -334;
+      for (im = 0; im + 1 < nm; im++) {
+         uint32_t hdr = buf_m[im];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_LOAD_MME_INSTRUCTION_RAM_POINTER)
+            saw_ptr = true;
+         if (method == NVC597_LOAD_MME_INSTRUCTION_RAM)
+            saw_ram = true;
+         if (method == NVC597_LOAD_MME_START_ADDRESS_RAM_POINTER)
+            saw_start = true;
+         if (method == NVC597_CALL_MME_MACRO(0) ||
+             method == NVC597_CALL_MME_MACRO(NV_MME_SLOT_DRAW_INDIRECT))
+            saw_call = true;
+      }
+      if (!saw_ptr || !saw_ram || !saw_start)
+         return -335;
+      if (saw_call)
+         return -336;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

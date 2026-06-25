@@ -575,6 +575,68 @@ nv_mme_emit_prime_clear_helper_only(struct nv_push *p, uint32_t ram_offset)
 }
 
 /**
+ * tick119: upload program to instruction RAM + bind start address, no CALL.
+ * Lets channel-init stage macros without executing stub bodies (avoids tentative
+ * method-emit opcodes until ISA is silicon-validated).
+ */
+static inline void
+nv_mme_emit_upload_only(struct nv_push *p, const struct nv_mme_program *prog)
+{
+   uint32_t i;
+   uint32_t ram_ptr;
+
+   if (!p || !prog || prog->insn_count == 0)
+      return;
+
+   ram_ptr = prog->ram_offset;
+#ifdef NVC597_LOAD_MME_INSTRUCTION_RAM_POINTER
+   nv_push_method(p, NVC597_LOAD_MME_INSTRUCTION_RAM_POINTER, ram_ptr);
+   for (i = 0; i < prog->insn_count && i < NV_MME_MAX_INSNS_PER_MACRO; i++)
+      nv_push_method(p, NVC597_LOAD_MME_INSTRUCTION_RAM, prog->insns[i]);
+   nv_push_method(p, NVC597_LOAD_MME_START_ADDRESS_RAM_POINTER, prog->slot);
+   nv_push_method(p, NVC597_LOAD_MME_START_ADDRESS_RAM, ram_ptr);
+#else
+   nv_push_method(p, 0x0114u, ram_ptr);
+   for (i = 0; i < prog->insn_count && i < NV_MME_MAX_INSNS_PER_MACRO; i++)
+      nv_push_method(p, NV_MME_METHOD_LOAD_INSN_RAM, prog->insns[i]);
+   nv_push_method(p, 0x011cu, prog->slot);
+   nv_push_method(p, 0x0120u, ram_ptr);
+#endif
+}
+
+/** tick119: upload indirect + extended slots without CALL (prime RAM only). */
+static inline void
+nv_mme_emit_upload_full_table_only(struct nv_push *p)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_EXTENDED_COUNT];
+   struct nv_mme_program pass5;
+   unsigned i, n;
+
+   if (!p)
+      return;
+   n = nv_mme_build_extended_program_table(progs, &pass5);
+   for (i = 0; i < n && i < NV_MME_SLOT_EXTENDED_COUNT; i++)
+      nv_mme_emit_upload_only(p, &progs[i]);
+   nv_mme_emit_upload_only(p, &pass5);
+}
+
+/**
+ * tick119: CALL_MME_MACRO(slot) with optional data0 — use only after upload_only
+ * or when program is END-only (safe no-op).  Still not production indirect.
+ */
+static inline void
+nv_mme_emit_call_macro_only(struct nv_push *p, uint32_t slot, uint32_t data0)
+{
+   if (!p)
+      return;
+#ifdef NVC597_CALL_MME_MACRO
+   nv_push_method(p, NVC597_CALL_MME_MACRO(slot), data0);
+#else
+   nv_push_method(p, NV_MME_METHOD_CALL_MACRO_BASE + (slot & 0x7fu) * 8u, data0);
+#endif
+}
+
+/**
  * tick113: pseudo-instruction for method emit targeting CLEAR_SURFACE (0x19d0) +
  * report sema band — documents intended clear macro body once ISA is proven.
  */
