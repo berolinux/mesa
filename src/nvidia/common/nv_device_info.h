@@ -58,6 +58,8 @@ struct nv_device_info {
    uint32_t gpc_count;
    uint32_t tpc_count;
    uint32_t max_warps_per_sm;
+   /* tick102: NV2080 THREAD_STACK_SCALING_FACTOR (QMD stack / shmem policy) */
+   uint32_t thread_stack_scaling;
 
    uint64_t vram_size_bytes;
    uint64_t vram_usable_bytes;

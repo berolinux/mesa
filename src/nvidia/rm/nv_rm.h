@@ -68,6 +68,20 @@ nv_rm_device_ensure_usermode(struct nv_rm_device *dev);
 int
 nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo);
 
+/**
+ * tick102: NVOS46 map with explicit flags (or 0 = use auto page-size ladder
+ * from device max_page_size).  Unmaps prior VA mapping if present.
+ */
+int
+nv_rm_bo_map_gpu_va_flags(struct nv_rm_bo *bo, uint32_t os46_flags);
+
+/**
+ * tick102: preferred unshifted NVOS46 PAGE_SIZE selector for a mapping of
+ * @map_length using device probe max_page_size (via libdrm helper when built).
+ */
+uint32_t
+nv_rm_device_os46_page_size_sel(struct nv_rm_device *dev, uint64_t map_length);
+
 int
 nv_rm_device_fd_ctl(struct nv_rm_device *dev);
 

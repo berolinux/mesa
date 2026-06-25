@@ -141,25 +141,59 @@ nvgpu_resource_create(struct pipe_screen *pscreen,
    size = resource_size_bytes(templ, res->blocklinear, &res->row_pitch,
                               &res->level0_size, &res->bpp);
 
-   memset(&req, 0, sizeof(req));
-   req.size = size;
-   req.alignment = res->blocklinear ? 512 : 4096;
-   if (req.alignment < 4096)
-      req.alignment = 4096;
-   req.vram = resource_use_vram(templ);
-   req.cpu_access = (templ->usage == PIPE_USAGE_STAGING) ||
-                    (templ->usage == PIPE_USAGE_STREAM) ||
-                    (templ->bind & PIPE_BIND_LINEAR) ||
-                    templ->target == PIPE_BUFFER;
-   req.no_scanout = !(templ->bind & (PIPE_BIND_SCANOUT | PIPE_BIND_DISPLAY_TARGET));
+   {
+      bool vram = resource_use_vram(templ);
+      bool cpu_access = (templ->usage == PIPE_USAGE_STAGING) ||
+                        (templ->usage == PIPE_USAGE_STREAM) ||
+                        (templ->bind & PIPE_BIND_LINEAR) ||
+                        templ->target == PIPE_BUFFER;
+      bool is_2d_pitch = !res->blocklinear && templ->target != PIPE_BUFFER &&
+                         templ->height0 > 1 &&
+                         (templ->target == PIPE_TEXTURE_2D ||
+                          templ->target == PIPE_TEXTURE_2D_ARRAY ||
+                          templ->target == PIPE_TEXTURE_RECT ||
+                          templ->target == PIPE_TEXTURE_CUBE ||
+                          (templ->bind & (PIPE_BIND_RENDER_TARGET |
+                                          PIPE_BIND_DEPTH_STENCIL |
+                                          PIPE_BIND_DISPLAY_TARGET)));
 
-   res->bo = nv_rm_bo_alloc(screen->rm, &req);
-   if (!res->bo) {
-      /* Retry in GART if VRAM alloc failed */
-      if (req.vram) {
-         req.vram = false;
-         req.cpu_access = true;
+      /*
+       * tick102: linear 2D render/display surfaces via memory_alloc_ex path
+       * (nv_rm_bo_alloc_2d) so RM gets correct pitch/ATTR; blocklinear and
+       * buffers keep the generic size-based alloc.
+       */
+      if (is_2d_pitch && screen->rm) {
+         int32_t pitch = (int32_t)res->row_pitch;
+         res->bo = nv_rm_bo_alloc_2d(screen->rm, templ->width0, templ->height0,
+                                     &pitch, vram, cpu_access, true,
+                                     0 /* rm_type default */, 0 /* format */);
+         if (!res->bo && vram) {
+            res->bo = nv_rm_bo_alloc_2d(screen->rm, templ->width0,
+                                        templ->height0, &pitch, false, true,
+                                        true, 0, 0);
+         }
+         if (res->bo && pitch > 0)
+            res->row_pitch = (uint32_t)pitch;
+      }
+
+      if (!res->bo) {
+         memset(&req, 0, sizeof(req));
+         req.size = size;
+         req.alignment = res->blocklinear ? 512 : 4096;
+         if (req.alignment < 4096)
+            req.alignment = 4096;
+         req.vram = vram;
+         req.cpu_access = cpu_access;
+         req.no_scanout = !(templ->bind & (PIPE_BIND_SCANOUT |
+                                           PIPE_BIND_DISPLAY_TARGET));
+         req.map_gpu_va = true;
+
          res->bo = nv_rm_bo_alloc(screen->rm, &req);
+         if (!res->bo && req.vram) {
+            req.vram = false;
+            req.cpu_access = true;
+            res->bo = nv_rm_bo_alloc(screen->rm, &req);
+         }
       }
    }
    if (!res->bo) {

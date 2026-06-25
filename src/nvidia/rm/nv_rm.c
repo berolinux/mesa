@@ -148,6 +148,9 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.sm_version = gi.sm_version;
       dev->info.gpc_count = gi.gpc_count;
       dev->info.tpc_count = gi.tpc_count;
+      /* tick102: GR warps / thread-stack scale for compute QMD limits */
+      dev->info.max_warps_per_sm = gi.max_warps_per_sm;
+      dev->info.thread_stack_scaling = gi.thread_stack_scaling;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
       /* tick101: BAR1/heap/ECC for mapping policy */
@@ -392,12 +395,14 @@ nv_rm_device_ensure_usermode(struct nv_rm_device *dev)
 }
 
 int
-nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo)
+nv_rm_bo_map_gpu_va_flags(struct nv_rm_bo *bo, uint32_t os46_flags)
 {
 #if defined(HAVE_LIBDRM_NVIDIA)
    struct nv_rm_device *dev;
    uint64_t dma_off = 0;
+   uint32_t h_dev;
    int ret;
+   uint32_t flags_used = 0;
 
    if (!bo || !bo->dev || !bo->rm_handle)
       return -EINVAL;
@@ -410,24 +415,58 @@ nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo)
       if (ret != 0)
          return ret;
    }
+   if (!dev->h_vaspace)
+      return -ENODEV;
 
-   ret = nvidia_rm_map_memory_dma(dev->nvdev,
-                                  nvidia_device_get_device_handle(dev->nvdev),
-                                  dev->h_vaspace,
-                                  bo->rm_handle,
-                                  0, bo->size,
-                                  NVOS46_FLAGS_ACCESS_READ_WRITE,
-                                  &dma_off);
+   h_dev = nvidia_device_get_device_handle(dev->nvdev);
+   if (!h_dev)
+      return -ENODEV;
+
+   if (os46_flags != 0) {
+      ret = nvidia_rm_map_memory_dma(dev->nvdev, h_dev, dev->h_vaspace,
+                                     bo->rm_handle, 0, bo->size,
+                                     os46_flags, &dma_off);
+      flags_used = os46_flags;
+   } else {
+      /* tick102: auto page-size ladder from probe max_page_size */
+      ret = nvidia_rm_map_memory_dma_auto(dev->nvdev, h_dev, dev->h_vaspace,
+                                          bo->rm_handle, 0, bo->size,
+                                          dev->info.max_page_size,
+                                          &dma_off, &flags_used);
+   }
    if (ret != 0)
       return ret;
 
+   (void)flags_used;
    bo->dma_offset = dma_off;
    bo->gpu_offset = dma_off;
    bo->gpu_va_mapped = true;
    return 0;
 #else
    (void)bo;
+   (void)os46_flags;
    return -ENOSYS;
+#endif
+}
+
+int
+nv_rm_bo_map_gpu_va(struct nv_rm_bo *bo)
+{
+   return nv_rm_bo_map_gpu_va_flags(bo, 0); /* 0 => auto ladder */
+}
+
+uint32_t
+nv_rm_device_os46_page_size_sel(struct nv_rm_device *dev, uint64_t map_length)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   uint64_t max_ps = 0;
+   if (dev)
+      max_ps = dev->info.max_page_size;
+   return nvidia_rm_os46_pick_page_size(max_ps, map_length);
+#else
+   (void)dev;
+   (void)map_length;
+   return 0; /* NVOS46_FLAGS_PAGE_SIZE_DEFAULT */
 #endif
 }
 

@@ -169,6 +169,31 @@ nv_mme_build_draw_indirect_program(struct nv_mme_program *prog, uint32_t slot,
 }
 
 /**
+ * tick102: program scaffold for pass5 hottest observed macro index (slot 28 /
+ * method 0x39e0).  Still END-terminated stub — documents RAM region layout for
+ * future RE of proprietary channel-init macros, not production indirect path.
+ */
+static inline void
+nv_mme_build_pass5_hot_program_stub(struct nv_mme_program *prog,
+                                    uint32_t ram_offset)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = NV_MME_PASS5_HOT_MACRO_INDEX;
+   prog->ram_offset = ram_offset;
+   /* Method-merge toward hottest CALL_MME_MACRO offset, then END */
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(NV_MME_PASS5_HOT_METHOD_OFF) |
+                    NV_MME_INSN_MERGE_CLASS;
+   prog->insns[1] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 3;
+   prog->is_stub_end_only = true;
+}
+
+/**
  * Build both indirect macros into caller-provided array (size >= SLOT_COUNT).
  * Returns number of programs filled (2).
  */

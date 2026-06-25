@@ -829,6 +829,54 @@ nv_qmd_desc_set_sema_release0(struct nv_qmd_desc *d,
 }
 
 /**
+ * tick102: clamp CTA dimensions / local mem using GR probe (max_warps_per_sm,
+ * thread_stack_scaling).  Safe no-op when probe fields are zero.
+ *
+ * warps_needed ≈ ceil(cta_x*cta_y*cta_z / 32); must not exceed max_warps_per_sm
+ * when that is known.  thread_stack_scaling (when non-zero) is an RM-reported
+ * multiplier for per-thread stack/local reservation — applied as a minimum
+ * local_mem_low floor of 16*scale bytes (aligned).
+ */
+static inline void
+nv_qmd_desc_apply_gr_limits(struct nv_qmd_desc *d, uint32_t max_warps_per_sm,
+                            uint32_t thread_stack_scaling)
+{
+   uint32_t threads, warps_need, max_threads;
+
+   if (!d)
+      return;
+
+   threads = d->cta_x * d->cta_y * d->cta_z;
+   if (!threads)
+      threads = 1;
+
+   if (max_warps_per_sm) {
+      max_threads = max_warps_per_sm * 32u;
+      if (threads > max_threads) {
+         /* Prefer shrinking X then Y/Z; keep at least 1×1×1 */
+         d->cta_x = max_threads >= 32 ? 32 : (max_threads ? max_threads : 1);
+         d->cta_y = 1;
+         d->cta_z = 1;
+         threads = d->cta_x;
+      }
+      warps_need = (threads + 31u) / 32u;
+      if (warps_need > max_warps_per_sm && d->cta_x > 1) {
+         d->cta_x = max_warps_per_sm * 32u;
+         if (!d->cta_x)
+            d->cta_x = 1;
+      }
+   }
+
+   if (thread_stack_scaling) {
+      uint32_t floor_lmem = thread_stack_scaling * 16u;
+      if (floor_lmem < 16u)
+         floor_lmem = 16u;
+      if (d->local_mem_low < floor_lmem)
+         d->local_mem_low = floor_lmem;
+   }
+}
+
+/**
  * Build a minimal compute QMD desc for vertical-slice / smoke testing:
  * 1x1x1 grid, 1x1x1 CTA, given shader GPU VA, sema on completion.
  * program_addr may be 0 for encode-only tests (hardware will fault if launched).
@@ -858,6 +906,19 @@ nv_qmd_desc_init_smoke(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
    d->invalidate_caches = true;
    if (sema_gpu_addr && sema_payload)
       nv_qmd_desc_set_sema_release0(d, sema_gpu_addr, sema_payload);
+}
+
+/** tick102: smoke QMD + apply GR limits from nv_device_info probe fields */
+static inline void
+nv_qmd_desc_init_smoke_gr(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
+                          uint32_t register_count, uint8_t sass_version,
+                          uint64_t sema_gpu_addr, uint32_t sema_payload,
+                          uint32_t max_warps_per_sm,
+                          uint32_t thread_stack_scaling)
+{
+   nv_qmd_desc_init_smoke(d, program_gpu_addr, register_count, sass_version,
+                          sema_gpu_addr, sema_payload);
+   nv_qmd_desc_apply_gr_limits(d, max_warps_per_sm, thread_stack_scaling);
 }
 
 /**
