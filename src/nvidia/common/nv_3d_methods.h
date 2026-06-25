@@ -4192,6 +4192,73 @@ nv_3d_emit_g3_cb_selector_bind(struct nv_push *p, uint32_t size_bytes,
 }
 
 /**
+ * tick149 / pass18: CB selector + bind_group slot + optional const-cache inv.
+ * Covers pass18 G3_inv_cb / CB bind family at the class-correct NVC597 offsets.
+ */
+static inline void
+nv_3d_emit_g3_cb_bind_group_pass18(struct nv_push *p, uint32_t size_bytes,
+                                   uint64_t cb_gpu_addr, unsigned bind_group,
+                                   unsigned shader_slot, bool inv_const_cache)
+{
+   if (!p || !cb_gpu_addr)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_3d_set_constant_buffer_selector(p, size_bytes, cb_gpu_addr);
+   nv_3d_bind_group_constant_buffer(p, bind_group, shader_slot, true);
+   if (inv_const_cache)
+      nv_3d_invalidate_shader_caches(p, false, false, true);
+}
+
+/**
+ * tick149 / pass18: 3D report sema A–D ladder (distinct from host sema 0x200).
+ * pass18 RE: imm present for 0x0d00.. family; NVC597 uses 0x1b00..0x1b0c.
+ */
+static inline void
+nv_3d_emit_g3_report_sema_pass18(struct nv_push *p, uint64_t sema_gpu_addr,
+                                 uint32_t sema_payload, bool one_word,
+                                 bool do_wfi_before)
+{
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (do_wfi_before)
+      nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+   nv_3d_report_semaphore_release(p, sema_gpu_addr,
+                                  sema_payload ? sema_payload : 1u, one_word);
+}
+
+/**
+ * tick149 / pass18: inv caches + optional CB bind + report sema (G3_inv_cb + report).
+ * Does not emit host sema; use nv_3d_emit_g3_inv_wfi_host_sema_pass17 for host path.
+ */
+static inline void
+nv_3d_emit_g3_inv_cb_report_pass18(struct nv_push *p, uint32_t cb_size_bytes,
+                                   uint64_t cb_gpu_addr, unsigned bind_group,
+                                   unsigned shader_slot,
+                                   uint64_t report_sema_gpu_addr,
+                                   uint32_t report_sema_payload)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   {
+      uint32_t inv = NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+   }
+   if (cb_gpu_addr)
+      nv_3d_emit_g3_cb_bind_group_pass18(p, cb_size_bytes, cb_gpu_addr,
+                                         bind_group, shader_slot, false);
+   if (report_sema_gpu_addr)
+      nv_3d_emit_g3_report_sema_pass18(p, report_sema_gpu_addr,
+                                       report_sema_payload, true, true);
+}
+
+/**
  * tick139: G3 channel_prep using SPA byte (e.g. nv_device_info_spa_version_u8).
  * spa_u8 0x53 → maj=5 min=3; high nibble = major, low = minor.
  */
@@ -4260,6 +4327,47 @@ nv_3d_emit_g3_bringup_slice(struct nv_push *p, uint32_t class_3d,
                                              sema_payload);
    else
       nv_3d_emit_draw_vertex_array(p, 0, 3);
+}
+
+/**
+ * tick149 / pass18: G3 bringup with optional CB bind + report sema tail.
+ * report_sema is 3D SET_REPORT_SEMAPHORE (not host sema); pass17 host sema
+ * remains available via sema_gpu_addr on draw path (report sema on draw helper).
+ * When report_sema_gpu_addr set, emits post-draw report release (WFI first).
+ */
+static inline void
+nv_3d_emit_g3_bringup_slice_pass18(struct nv_push *p, uint32_t class_3d,
+                                   uint64_t ct_gpu_addr, uint32_t ct_w,
+                                   uint32_t ct_h, uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t program_region_gpu,
+                                   uint64_t vs_gpu, uint32_t vs_regs,
+                                   uint64_t ps_gpu, uint32_t ps_regs,
+                                   uint64_t sema_gpu_addr,
+                                   uint32_t sema_payload,
+                                   uint64_t cb_gpu_addr, uint32_t cb_size_bytes,
+                                   unsigned cb_bind_group,
+                                   unsigned cb_shader_slot,
+                                   uint64_t report_sema_gpu_addr,
+                                   uint32_t report_sema_payload)
+{
+   if (!p)
+      return;
+
+   nv_3d_emit_g3_bringup_slice(p, class_3d, ct_gpu_addr, ct_w, ct_h, ct_format,
+                               color_ui, program_region_gpu, vs_gpu, vs_regs,
+                               ps_gpu, ps_regs, sema_gpu_addr, sema_payload);
+
+   if (cb_gpu_addr)
+      nv_3d_emit_g3_cb_bind_group_pass18(p, cb_size_bytes ? cb_size_bytes : 256u,
+                                         cb_gpu_addr, cb_bind_group,
+                                         cb_shader_slot, true);
+
+   if (report_sema_gpu_addr)
+      nv_3d_emit_g3_report_sema_pass18(p, report_sema_gpu_addr,
+                                       report_sema_payload ? report_sema_payload
+                                                           : sema_payload,
+                                       true, true);
 }
 
 #ifdef __cplusplus

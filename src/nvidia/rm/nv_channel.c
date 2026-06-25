@@ -4242,7 +4242,8 @@ nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
 {
    struct nv_push push;
    uint32_t *map;
-   uint32_t need = 256;
+   /* tick149: pass17 MME prime + pass18 report sema tail needs room */
+   uint32_t need = 512;
    uint32_t classes[12];
    unsigned n = 12, i, nt = 0;
    uint32_t tried[12];
@@ -4287,10 +4288,11 @@ nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
       if (!map)
          return -ENOMEM;
       nv_push_init(&push, map, need);
-      nv_3d_emit_g3_bringup_slice(&push, c3, ct_gpu_addr, ct_w, ct_h,
-                                  ct_format, color_ui, program_region_gpu,
-                                  vs_gpu, vs_regs, ps_gpu, ps_regs,
-                                  sema_gpu_addr, sema_payload);
+      /* tick149 / pass18: bringup + post-draw 3D report sema (same payload) */
+      nv_3d_emit_g3_bringup_slice_pass18(
+         &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, color_ui,
+         program_region_gpu, vs_gpu, vs_regs, ps_gpu, ps_regs, sema_gpu_addr,
+         sema_payload, 0, 0, 0, 0, sema_gpu_addr, sema_payload);
       nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
       if (sema_gpu_addr && sema_cpu) {

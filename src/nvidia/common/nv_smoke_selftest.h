@@ -2778,6 +2778,97 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -615;
    }
 
+   /* tick149 / pass18: CB bind_group + report sema A–D ladder */
+   {
+      struct nv_push cp;
+      uint32_t cb[256], cn, ci;
+      bool saw_cba = false, saw_bind = false, saw_ra = false, saw_rd = false;
+
+      memset(cb, 0, sizeof(cb));
+      nv_push_init(&cp, cb, (uint32_t)(sizeof(cb) / 4));
+      nv_3d_emit_g3_cb_bind_group_pass18(&cp, 256u, 0xa00000ull, 0, 3, true);
+      nv_3d_emit_g3_report_sema_pass18(&cp, 0xb00000ull, 0x55u, true, true);
+      cn = nv_push_dw_count(&cp);
+      if (cn < 10)
+         return -616;
+      for (ci = 0; ci + 1 < cn; ci++) {
+         uint32_t hdr = cb[ci];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_CONSTANT_BUFFER_SELECTOR_A)
+            saw_cba = true;
+         if (method == NVC597_BIND_GROUP_CONSTANT_BUFFER(0))
+            saw_bind = true;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_A)
+            saw_ra = true;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_D)
+            saw_rd = true;
+      }
+      if (!saw_cba)
+         return -617;
+      if (!saw_bind)
+         return -618;
+      if (!saw_ra || !saw_rd)
+         return -619;
+   }
+
+   /* tick149 / pass18: inv_cb_report composite pipeline */
+   {
+      struct nv_push rp;
+      uint32_t rb[256], rn, ri;
+      bool saw_inv = false, saw_cba = false, saw_rep = false;
+
+      memset(rb, 0, sizeof(rb));
+      nv_push_init(&rp, rb, (uint32_t)(sizeof(rb) / 4));
+      nv_3d_emit_g3_inv_cb_report_pass18(&rp, 128u, 0xc00000ull, 0, 0,
+                                         0xd00000ull, 0x66u);
+      rn = nv_push_dw_count(&rp);
+      if (rn < 12)
+         return -620;
+      for (ri = 0; ri + 1 < rn; ri++) {
+         uint32_t hdr = rb[ri];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_INVALIDATE_SHADER_CACHES)
+            saw_inv = true;
+         if (method == NVC597_SET_CONSTANT_BUFFER_SELECTOR_A)
+            saw_cba = true;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_C && rb[ri + 1] == 0x66u)
+            saw_rep = true;
+      }
+      if (!saw_inv || !saw_cba || !saw_rep)
+         return -621;
+   }
+
+   /* tick149: bringup_slice_pass18 shape (report sema tail present) */
+   {
+      struct nv_push bp;
+      uint32_t bb[2048], bn, bi;
+      bool saw_rep_d = false;
+
+      memset(bb, 0, sizeof(bb));
+      nv_push_init(&bp, bb, (uint32_t)(sizeof(bb) / 4));
+      nv_3d_emit_g3_bringup_slice_pass18(
+         &bp, 0xc597u, 0x800000ull, 32, 32,
+         NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8, NULL, 0, 0, 0, 0, 0,
+         0x900000ull, 9u, 0, 0, 0, 0, 0x900000ull, 9u);
+      bn = nv_push_dw_count(&bp);
+      if (bn < 40)
+         return -622;
+      for (bi = 0; bi + 1 < bn; bi++) {
+         uint32_t hdr = bb[bi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_REPORT_SEMAPHORE_D)
+            saw_rep_d = true;
+      }
+      if (!saw_rep_d)
+         return -623;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
