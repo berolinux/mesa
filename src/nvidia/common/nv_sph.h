@@ -290,6 +290,77 @@ nv_sph_build_pixel_mov_imm_exit(struct nv_sph_blob *blob, uint32_t color_bits,
    blob->total_bytes = total;
 }
 
+/**
+ * tick132: generic graphics-stage MOV imm R0..R3 + EXIT (GS/TCS/TES smoke).
+ * Same approximate MOV32I class as vertex/pixel; not real stage I/O.  Gives
+ * non-trivial SASS for bind/trace on all graphics stages until NIR->SASS.
+ */
+static inline void
+nv_sph_build_graphics_mov_imm_exit(struct nv_sph_blob *blob, uint8_t sph_type,
+                                   uint32_t r0, uint32_t r1, uint32_t r2,
+                                   uint32_t r3, uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+
+   if (!blob)
+      return;
+   if (sph_type < NV_SPH_TYPE_VERTEX || sph_type > NV_SPH_TYPE_PIXEL)
+      sph_type = NV_SPH_TYPE_VERTEX;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, sph_type);
+   info.register_count = regs ? regs : 8;
+   if (sph_type == NV_SPH_TYPE_VERTEX)
+      info.vmap_lo = 0x1u;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+   s[n++] = r0;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(0);
+   s[n++] = r1;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(1);
+   s[n++] = r2;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(2);
+   s[n++] = r3 ? r3 : 0x3f800000u;
+   s[n++] = NV_SPH_SASS_MOV32I_HI_RD(3);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
+/** Geometry smoke: four imm regs + EXIT (no emit/restart yet). */
+static inline void
+nv_sph_build_geometry_mov_imm_exit(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_mov_imm_exit(blob, NV_SPH_TYPE_GEOMETRY,
+                                      0, 0, 0, 0x3f800000u, regs);
+}
+
+/** Tess init (TCS) smoke. */
+static inline void
+nv_sph_build_tess_init_mov_imm_exit(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_mov_imm_exit(blob, NV_SPH_TYPE_TESS_INIT,
+                                      0, 0, 0, 0x3f800000u, regs);
+}
+
+/** Tess eval (TES) smoke. */
+static inline void
+nv_sph_build_tess_mov_imm_exit(struct nv_sph_blob *blob, uint16_t regs)
+{
+   nv_sph_build_graphics_mov_imm_exit(blob, NV_SPH_TYPE_TESS,
+                                      0, 0, 0, 0x3f800000u, regs);
+}
+
 /** Map nv_shader_kind-like index to NV_SPH_TYPE_* (0=VS..5=CS). */
 static inline uint8_t
 nv_sph_type_from_shader_kind_idx(unsigned kind_idx)

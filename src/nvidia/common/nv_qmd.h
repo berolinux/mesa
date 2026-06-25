@@ -1070,6 +1070,45 @@ nv_qmd_desc_init_smoke(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
 }
 
 /**
+ * tick132: apply conservative per-thread local-mem defaults when unset.
+ * low/high/crs partitions are generation-dependent; 0 keeps encoder zeros
+ * which works for trivial EXIT/store smoke but fails larger NIR kernels.
+ */
+static inline void
+nv_qmd_desc_apply_local_mem_defaults(struct nv_qmd_desc *d,
+                                     uint32_t low_bytes, uint32_t high_bytes,
+                                     uint32_t crs_bytes)
+{
+   if (!d)
+      return;
+   if (!d->local_mem_low && low_bytes)
+      d->local_mem_low = low_bytes;
+   if (!d->local_mem_high && high_bytes)
+      d->local_mem_high = high_bytes;
+   if (!d->local_mem_crs && crs_bytes)
+      d->local_mem_crs = crs_bytes;
+}
+
+/** tick132: enable sema release0 + invalidate caches for G2 bring-up QMD. */
+static inline void
+nv_qmd_desc_apply_g2_bringup_defaults(struct nv_qmd_desc *d,
+                                      uint64_t sema_gpu_addr,
+                                      uint32_t sema_payload)
+{
+   if (!d)
+      return;
+   d->sm_global_caching = true;
+   d->invalidate_caches = true;
+   if (!d->barrier_count)
+      d->barrier_count = nv_qmd_default_barrier_count(d->cta_x, d->cta_y,
+                                                       d->cta_z);
+   if (sema_gpu_addr)
+      nv_qmd_desc_set_sema_release0(d, sema_gpu_addr, sema_payload);
+   /* Trivial smoke: 256 B low local is enough for EXIT/store; refine on HW */
+   nv_qmd_desc_apply_local_mem_defaults(d, 256u, 0u, 0u);
+}
+
+/**
  * tick127: multi-CTA smoke QMD (grid/cta non-1) for G2 ladder stress.
  * sema_payload 0 skips sema release0 (caller may add later).
  */

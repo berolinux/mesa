@@ -1548,6 +1548,61 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -431;
    }
 
+   /* tick132: GS/TCS/TES MOV-imm SPH builders + MME clear/init stubs + pipeline bind */
+   {
+      struct nv_sph_blob gsb, tcsb, tesb;
+      struct nv_mme_program mme_clr, mme_init;
+      uint32_t pbuf[96];
+      uint32_t np, ii;
+      bool saw_spa = false, saw_vs_en = false, saw_gs_dis = false;
+
+      nv_sph_build_geometry_mov_imm_exit(&gsb, 8);
+      if (nv_sph_smoke_validate_blob(&gsb, NV_SPH_TYPE_GEOMETRY) != 0)
+         return -432;
+      if (gsb.sass_dwords < 8)
+         return -433;
+
+      nv_sph_build_tess_init_mov_imm_exit(&tcsb, 8);
+      if (nv_sph_smoke_validate_blob(&tcsb, NV_SPH_TYPE_TESS_INIT) != 0)
+         return -434;
+
+      nv_sph_build_tess_mov_imm_exit(&tesb, 8);
+      if (nv_sph_smoke_validate_blob(&tesb, NV_SPH_TYPE_TESS) != 0)
+         return -435;
+
+      nv_mme_build_clear_helper_program_stub(&mme_clr, 48);
+      if (!mme_clr.is_stub_end_only || mme_clr.insn_count < 3 ||
+          mme_clr.slot != NV_MME_SLOT_CLEAR_HELPER)
+         return -436;
+
+      nv_mme_build_channel_init_program_stub(&mme_init, 64);
+      if (!mme_init.is_stub_end_only ||
+          mme_init.slot != NV_MME_SLOT_CHANNEL_INIT_SCRATCH)
+         return -437;
+
+      memset(pbuf, 0, sizeof(pbuf));
+      nv_push_init(&p, pbuf, (uint32_t)(sizeof(pbuf) / 4));
+      nv_3d_emit_g3_pipeline_bind_smoke(&p, 5, 3, 0x100000ull,
+                                        0x200000ull, 16,
+                                        0x300000ull, 8);
+      np = nv_push_dw_count(&p);
+      for (ii = 0; ii + 1 < np; ii++) {
+         uint32_t hdr = pbuf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_SPA_VERSION)
+            saw_spa = true;
+         if (method == NVC597_SET_PIPELINE_SHADER(NV_3D_PIPE_STAGE_VERTEX))
+            saw_vs_en = true;
+         if (method == NVC597_SET_PIPELINE_SHADER(NV_3D_PIPE_STAGE_GEOMETRY) &&
+             pbuf[ii + 1] == NVC597_SET_PIPELINE_SHADER_ENABLE_FALSE)
+            saw_gs_dis = true;
+      }
+      if (!saw_spa || !saw_vs_en || !saw_gs_dis)
+         return -438;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

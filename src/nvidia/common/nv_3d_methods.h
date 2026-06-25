@@ -1498,6 +1498,51 @@ nv_3d_disable_pipeline_shader(struct nv_push *p, unsigned stage)
                   NVC597_SET_PIPELINE_SHADER_ENABLE_FALSE);
 }
 
+/**
+ * tick132: G3 smoke pipeline bind — SPA version + optional program region +
+ * VS/FS shader stages + disable unused GS/TCS/TES.  Mirrors nvidia-3d
+ * channel-init subset without requiring full NIR->SASS.
+ *
+ * spa_major/spa_minor: 0,0 uses conservative Ampere-era defaults (5,3).
+ * program_region_base: 0 skips SET_PROGRAM_REGION (absolute program addrs OK).
+ * vs_addr/fs_addr: absolute GPU VAs of SPH+code; 0 skips that stage enable.
+ */
+static inline void
+nv_3d_emit_g3_pipeline_bind_smoke(struct nv_push *p,
+                                  uint32_t spa_major, uint32_t spa_minor,
+                                  uint64_t program_region_base,
+                                  uint64_t vs_addr, uint32_t vs_regs,
+                                  uint64_t fs_addr, uint32_t fs_regs)
+{
+   if (!p)
+      return;
+   if (!spa_major && !spa_minor) {
+      spa_major = 5;
+      spa_minor = 3;
+   }
+   nv_3d_set_spa_version(p, spa_major, spa_minor);
+   if (program_region_base)
+      nv_3d_set_program_region(p, program_region_base);
+
+   if (vs_addr)
+      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX,
+                                 NVC597_SET_PIPELINE_SHADER_TYPE_VERTEX,
+                                 vs_addr, vs_regs ? vs_regs : 8, 0);
+   else
+      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX);
+
+   if (fs_addr)
+      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL,
+                                 NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL,
+                                 fs_addr, fs_regs ? fs_regs : 8, 0);
+   else
+      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL);
+
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_GEOMETRY);
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS_INIT);
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS);
+}
+
 /** Select constant buffer for subsequent BIND_GROUP_CONSTANT_BUFFER. */
 static inline void
 nv_3d_set_constant_buffer_selector(struct nv_push *p, uint32_t size_bytes,
@@ -3616,29 +3661,10 @@ nv_3d_emit_g3_smoke_shader_setup(struct nv_push *p,
 {
    if (!p)
       return;
-   if (program_region_gpu) {
-      nv_push_method(p, NVC597_SET_PROGRAM_REGION_A,
-                     (uint32_t)(program_region_gpu >> 32) & 0xff);
-      nv_push_method(p, NVC597_SET_PROGRAM_REGION_B,
-                     (uint32_t)(program_region_gpu & 0xffffffffu));
-   }
-   if (vs_gpu) {
-      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX,
-                                 NVC597_SET_PIPELINE_SHADER_TYPE_VERTEX,
-                                 vs_gpu, vs_regs ? vs_regs : 16, 0);
-   } else {
-      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX);
-   }
-   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS_INIT);
-   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS);
-   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_GEOMETRY);
-   if (ps_gpu) {
-      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL,
-                                 NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL,
-                                 ps_gpu, ps_regs ? ps_regs : 8, 0);
-   } else {
-      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL);
-   }
+   /* tick132: SPA + program region + VS/FS; disable unused GS/TCS/TES */
+   nv_3d_emit_g3_pipeline_bind_smoke(p, 0, 0, program_region_gpu,
+                                     vs_gpu, vs_regs ? vs_regs : 16,
+                                     ps_gpu, ps_regs ? ps_regs : 8);
 }
 
 /**

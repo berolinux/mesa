@@ -394,6 +394,11 @@ nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count)
     * EXIT-only so bind/trace has a non-trivial SASS stream.  Still not real
     * attribute/RT I/O; fixed-func remains the preferred G3 bring-up path.
     */
+   /*
+    * tick132: all graphics stages use MOV-imm+EXIT smoke (not EXIT-only) so
+    * GS/TCS/TES binds also carry a non-trivial SASS stream.  Still not real
+    * stage I/O; fixed-func remains preferred for G3 bring-up.
+    */
    switch (sh->kind) {
    case NV_SHADER_KIND_FRAGMENT:
       sph_type = NV_SPH_TYPE_PIXEL;
@@ -401,15 +406,15 @@ nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count)
       break;
    case NV_SHADER_KIND_GEOMETRY:
       sph_type = NV_SPH_TYPE_GEOMETRY;
-      nv_sph_build_geometry_exit_only(&blob, (uint16_t)regs);
+      nv_sph_build_geometry_mov_imm_exit(&blob, (uint16_t)regs);
       break;
    case NV_SHADER_KIND_TESS_CTRL:
       sph_type = NV_SPH_TYPE_TESS_INIT;
-      nv_sph_build_graphics_exit_only(&blob, sph_type, (uint16_t)regs);
+      nv_sph_build_tess_init_mov_imm_exit(&blob, (uint16_t)regs);
       break;
    case NV_SHADER_KIND_TESS_EVAL:
       sph_type = NV_SPH_TYPE_TESS;
-      nv_sph_build_graphics_exit_only(&blob, sph_type, (uint16_t)regs);
+      nv_sph_build_tess_mov_imm_exit(&blob, (uint16_t)regs);
       break;
    case NV_SHADER_KIND_VERTEX:
    default:
