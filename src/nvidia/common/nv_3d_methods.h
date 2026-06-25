@@ -433,9 +433,56 @@ struct nv_3d_surface {
    uint32_t height;
    uint32_t array_pitch;   /* ZT array pitch or third dimension */
    uint32_t format;        /* NVC597_SET_*_FORMAT_V_* value */
+   /* tick118: NV_TEX_GOBS_* / clc597 SET_*_BLOCK_SIZE log2 gobs (0..5) */
+   uint8_t gobs_width;
+   uint8_t gobs_height;
+   uint8_t gobs_depth;
    bool block_linear;
    bool enabled;
 };
+
+/* clc597 SET_ZT_BLOCK_SIZE / SET_DST_BLOCK_SIZE / CT block size field layout:
+ * WIDTH 3:0, HEIGHT 7:4, DEPTH 11:8 — values are log2(gobs) (0=1, 4=16 gobs). */
+#define NV_3D_BLOCK_SIZE_WIDTH_SHIFT   0
+#define NV_3D_BLOCK_SIZE_HEIGHT_SHIFT  4
+#define NV_3D_BLOCK_SIZE_DEPTH_SHIFT   8
+#define NV_3D_BLOCK_SIZE_GOBS_MASK     0xfu
+
+/** Pack SET_ZT_BLOCK_SIZE / CT block-size dword from NV_TEX_GOBS_* fields. */
+static inline uint32_t
+nv_3d_block_size_from_gobs(uint8_t gobs_w, uint8_t gobs_h, uint8_t gobs_d)
+{
+   return ((uint32_t)(gobs_w & NV_3D_BLOCK_SIZE_GOBS_MASK)
+              << NV_3D_BLOCK_SIZE_WIDTH_SHIFT) |
+          ((uint32_t)(gobs_h & NV_3D_BLOCK_SIZE_GOBS_MASK)
+              << NV_3D_BLOCK_SIZE_HEIGHT_SHIFT) |
+          ((uint32_t)(gobs_d & NV_3D_BLOCK_SIZE_GOBS_MASK)
+              << NV_3D_BLOCK_SIZE_DEPTH_SHIFT);
+}
+
+/**
+ * tick118: default 2D render/depth BL — 1×16×1 gobs (matches NV_TEX_GOBS_SIXTEEN
+ * height used in nvrm_memory / nvgpu_resource and RM gobs_height=4).
+ */
+static inline uint32_t
+nv_3d_block_size_default_2d_bl(void)
+{
+   return nv_3d_block_size_from_gobs(0 /* ONE */, 4 /* SIXTEEN */, 0 /* ONE */);
+}
+
+/** Resolve block_size dword: explicit >0 wins; else gobs on surface; else 2D BL default. */
+static inline uint32_t
+nv_3d_surface_block_size(const struct nv_3d_surface *s, uint32_t explicit_bs)
+{
+   if (!s || !s->block_linear)
+      return 0;
+   if (explicit_bs)
+      return explicit_bs;
+   if (s->gobs_width || s->gobs_height || s->gobs_depth)
+      return nv_3d_block_size_from_gobs(s->gobs_width, s->gobs_height,
+                                        s->gobs_depth);
+   return nv_3d_block_size_default_2d_bl();
+}
 
 static inline uint32_t
 nv_3d_topology_from_pipe_prim(unsigned pipe_prim)
@@ -545,8 +592,7 @@ nv_3d_set_color_target(struct nv_push *p, unsigned j,
 
 /**
  * Emit ZETA (depth/stencil) target setup.
- * block_size: SET_ZT_BLOCK_SIZE dword (0 = one gob / pitch default; non-zero for BL).
- * Common BL value uses log2 gobs in each dimension packed in low bits (refine on HW).
+ * block_size: SET_ZT_BLOCK_SIZE dword; 0 with block_linear uses gobs_* or 1x16x1 default.
  */
 static inline void
 nv_3d_set_zeta_target_ex(struct nv_push *p, const struct nv_3d_surface *s,
@@ -563,14 +609,13 @@ nv_3d_set_zeta_target_ex(struct nv_push *p, const struct nv_3d_surface *s,
    nv_push_method(p, NVC597_SET_ZT_A, (uint32_t)(s->gpu_addr >> 32) & 0xff);
    nv_push_method(p, NVC597_SET_ZT_B, (uint32_t)(s->gpu_addr & 0xffffffffu));
    nv_push_method(p, NVC597_SET_ZT_FORMAT, s->format);
-   if (s->block_linear && !block_size)
-      block_size = 0x00000000u; /* one gob each dim; HW may refine via array_pitch */
+   block_size = nv_3d_surface_block_size(s, block_size);
    nv_push_method(p, NVC597_SET_ZT_BLOCK_SIZE, block_size);
    if (s->array_pitch)
       nv_push_method(p, NVC597_SET_ZT_ARRAY_PITCH, s->array_pitch);
 }
 
-/** Emit ZETA target setup (pitch/linear default block_size 0). */
+/** Emit ZETA target setup (derives block_size from s->gobs_* when block_linear). */
 static inline void
 nv_3d_set_zeta_target(struct nv_push *p, const struct nv_3d_surface *s)
 {
@@ -3114,6 +3159,11 @@ nv_3d_emit_g3_bind_zeta_target_ex(struct nv_push *p, uint64_t zt_gpu_addr,
    s.format = zt_format;
    s.array_pitch = pitch_bytes;
    s.block_linear = block_linear;
+   if (block_linear && !zt_block_size) {
+      s.gobs_width = 0;
+      s.gobs_height = 4; /* SIXTEEN — RM depth_2d_ex / nvrm default */
+      s.gobs_depth = 0;
+   }
    nv_3d_set_zeta_target_ex(p, &s, zt_block_size);
    nv_3d_set_surface_clip(p, 0, 0, w, h);
    /* Enable depth test always-pass so clears/draws see ZT as active */

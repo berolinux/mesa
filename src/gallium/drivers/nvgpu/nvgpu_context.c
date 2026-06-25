@@ -483,6 +483,11 @@ nvgpu_emit_framebuffer(struct nvgpu_context *ctx, struct nv_push *push)
          s.height = th;
          s.format = nv_3d_color_format_from_pipe((unsigned)psurf->format);
          s.block_linear = res ? res->blocklinear : false;
+         if (s.block_linear && res) {
+            s.gobs_width = res->gobs_width;
+            s.gobs_height = res->gobs_height ? res->gobs_height : 4;
+            s.gobs_depth = 0;
+         }
          s.array_pitch = stride * th;
          n_cbufs++;
       }
@@ -505,6 +510,11 @@ nvgpu_emit_framebuffer(struct nvgpu_context *ctx, struct nv_push *push)
       s.height = zs->texture->height0;
       s.format = nv_3d_zt_format_from_pipe((unsigned)zs->format);
       s.block_linear = res ? res->blocklinear : false;
+      if (s.block_linear && res) {
+         s.gobs_width = res->gobs_width;
+         s.gobs_height = res->gobs_height ? res->gobs_height : 4;
+         s.gobs_depth = 0;
+      }
       nv_3d_set_zeta_target(push, &s);
    }
 

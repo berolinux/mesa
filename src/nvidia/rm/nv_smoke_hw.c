@@ -349,8 +349,8 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
                                             true);
       if (sc.zt_bo) {
          sc.zt_block_linear = true;
-         /* one-gob-each-dim default; non-zero refine on silicon traces */
-         sc.zt_block_size = 0;
+         /* tick118: 1x16x1 gobs (RM gobs_height=4 / NV_TEX_GOBS_SIXTEEN) */
+         sc.zt_block_size = nv_3d_block_size_default_2d_bl();
       }
       if (!sc.zt_bo) {
          zt_pitch = 64 * 4;

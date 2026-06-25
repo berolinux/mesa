@@ -1975,6 +1975,11 @@ nvrm_surface_from_view(struct nv_3d_surface *s, struct nvrm_image_view *view,
    s->width = w ? w : img->vk.extent.width;
    s->height = h ? h : img->vk.extent.height;
    s->block_linear = img->is_blocklinear;
+   if (img->is_blocklinear) {
+      s->gobs_width = img->gobs_width;
+      s->gobs_height = img->gobs_height ? img->gobs_height : NV_TEX_GOBS_SIXTEEN;
+      s->gobs_depth = img->gobs_depth;
+   }
    if (is_zt)
       s->format = vk_format_to_zt_format(view->format);
    else

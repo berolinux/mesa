@@ -735,19 +735,26 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -322;
    }
 
-   /* tick117: block-linear ZT bind emits SET_ZT_BLOCK_SIZE + depth methods */
+   /* tick117/118: block-linear ZT bind emits SET_ZT_BLOCK_SIZE + address methods */
    {
       uint64_t zt_gpu = 0x530000ull;
       uint32_t buf_bl[96];
       uint32_t nbl, ibl;
       bool saw_zt_a = false, saw_zt_fmt = false, saw_zt_bs = false;
       uint32_t zt_bs_val = 0xffffffffu;
+      uint32_t expect_bs = nv_3d_block_size_from_gobs(1, 1, 1); /* 0x00000111 */
+
+      if (nv_3d_block_size_default_2d_bl() !=
+          nv_3d_block_size_from_gobs(0, 4, 0))
+         return -326;
+      if (nv_3d_block_size_default_2d_bl() != 0x00000040u)
+         return -327;
 
       memset(buf_bl, 0, sizeof(buf_bl));
       nv_push_init(&p, buf_bl, (uint32_t)(sizeof(buf_bl) / 4));
       nv_3d_emit_g3_bind_zeta_target_ex(&p, zt_gpu, 64, 64,
                                         NVC597_SET_ZT_FORMAT_V_Z24S8, 0, true,
-                                        0x00001111u);
+                                        expect_bs);
       nbl = nv_push_dw_count(&p);
       if (nbl < 8)
          return -323;
@@ -767,8 +774,36 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
       if (!saw_zt_a || !saw_zt_fmt || !saw_zt_bs)
          return -324;
-      if (zt_bs_val != 0x00001111u)
+      if (zt_bs_val != expect_bs)
          return -325;
+   }
+
+   /* tick118: default BL gobs (no explicit block_size) yields 1x16x1 */
+   {
+      uint64_t zt_gpu = 0x540000ull;
+      uint32_t buf_d[96];
+      uint32_t nd, id;
+      uint32_t zt_bs_val = 0xffffffffu;
+      bool saw_zt_bs = false;
+
+      memset(buf_d, 0, sizeof(buf_d));
+      nv_push_init(&p, buf_d, (uint32_t)(sizeof(buf_d) / 4));
+      nv_3d_emit_g3_bind_zeta_target_ex(&p, zt_gpu, 64, 64,
+                                        NVC597_SET_ZT_FORMAT_V_Z24S8, 0, true,
+                                        0);
+      nd = nv_push_dw_count(&p);
+      for (id = 0; id + 1 < nd; id++) {
+         uint32_t hdr = buf_d[id];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_ZT_BLOCK_SIZE) {
+            saw_zt_bs = true;
+            zt_bs_val = buf_d[id + 1];
+         }
+      }
+      if (!saw_zt_bs || zt_bs_val != nv_3d_block_size_default_2d_bl())
+         return -328;
    }
 
    if (trace_push && trace_dwords) {
