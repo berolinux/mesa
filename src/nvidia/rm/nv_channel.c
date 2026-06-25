@@ -3389,10 +3389,10 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      /* tick111: try clear+sema, then clear+WFI+sema (drain before report) */
+      /* tick111/112: colour clear, WFI, colour+depth, sema bracket ladder */
       {
-         unsigned wfi_pass;
-         for (wfi_pass = 0; wfi_pass < 2; wfi_pass++) {
+         unsigned mode_pass;
+         for (mode_pass = 0; mode_pass < 4; mode_pass++) {
             if (sema_reset && sema_cpu)
                sema_cpu[0] = 0;
 
@@ -3405,15 +3405,23 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
                nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
                                              ct_format, c, false,
                                              sema_gpu_addr, sema_payload);
-            else if (wfi_pass == 0)
+            else if (mode_pass == 0)
                nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
                                               ct_format, c, sema_gpu_addr,
                                               sema_payload);
-            else
+            else if (mode_pass == 1)
                nv_3d_emit_g3_clear_color_sema_wfi(&push, c3, ct_gpu_addr, ct_w,
                                                   ct_h, ct_format, c,
                                                   sema_gpu_addr, sema_payload,
                                                   true);
+            else if (mode_pass == 2)
+               nv_3d_emit_g3_clear_color_depth_sema(
+                  &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c,
+                  0x100u /* PIPE_CLEAR_DEPTH */, 1.0f, 0, sema_gpu_addr,
+                  sema_payload, true);
+            else
+               nv_3d_emit_g3_sema_only_wfi_bracket(&push, c3, sema_gpu_addr,
+                                                   sema_payload);
             nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
             r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,

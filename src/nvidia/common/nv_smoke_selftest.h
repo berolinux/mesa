@@ -569,6 +569,34 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -309;
    }
 
+   /* tick112: colour+depth clear encodes two CLEAR_SURFACE methods */
+   {
+      uint32_t buf_cd[128];
+      uint32_t ncd, icd;
+      unsigned clear_count = 0;
+
+      memset(buf_cd, 0, sizeof(buf_cd));
+      nv_push_init(&p, buf_cd, (uint32_t)(sizeof(buf_cd) / 4));
+      nv_3d_emit_g3_clear_color_depth_sema(
+         &p, NV_SMOKE_G3_CLASS_PLACEHOLDER, ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+         NV_SMOKE_G3_CT_H_DEFAULT, NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+         color, 0x100u /* PIPE_CLEAR_DEPTH */, 1.0f, 0, sema_gpu, sema_payload,
+         true);
+      ncd = nv_push_dw_count(&p);
+      if (ncd < 12)
+         return -312;
+      for (icd = 0; icd + 1 < ncd; icd++) {
+         uint32_t hdr = buf_cd[icd];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_CLEAR_SURFACE)
+            clear_count++;
+      }
+      if (clear_count < 2)
+         return -313;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

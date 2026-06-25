@@ -891,9 +891,12 @@ nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
          }
       }
    } else {
+      /* tick112: PCI WC/uncached non-contig ATTR with GPU-appropriate page size
+       * (guest/vGPU sema/rings/push often need non-contig + WC CPU maps). */
+      uint32_t pgsz = nvidia_rm_os32_pick_attr_page_size(dev->info.max_page_size,
+                                                         size);
       h_class = NV01_MEMORY_SYSTEM;
-      attr = req->cpu_access ? NV_OS32_ATTR_PCI_4K_WRITECOMBINE
-                             : NV_OS32_ATTR_PCI_4K_UNCACHED;
+      attr = nvidia_rm_os32_attr_sysmem_mappable(pgsz, req->cpu_access);
       attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_DEFAULT_VAL;
       /* sysmem BL is unusual; fall through pitch unless caller insists */
       if (req->blocklinear)
@@ -928,6 +931,27 @@ nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
       /* retry strict contig / default cache (pitch or last resort) */
       attr = req->blocklinear ? NV_OS32_ATTR_VIDMEM_4K_UNCACHED_BL
                               : NV_OS32_ATTR_VIDMEM_4K_UNCACHED;
+      ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
+                                      flags, attr, attr2, req->format,
+                                      req->width, req->height, pitch_in,
+                                      size, align, h_vas, &off, &lim,
+                                      &pitch_out);
+   }
+   /* tick112: sysmem retry ladder — 4K WC/uncached then contig defaults */
+   if (ret != 0 && !req->vram) {
+      attr = req->cpu_access ? NV_OS32_ATTR_PCI_4K_WRITECOMBINE
+                             : NV_OS32_ATTR_PCI_4K_UNCACHED;
+      if (req->blocklinear)
+         attr |= NV_OS32_DRF_SHL(16, 17, NVOS32_ATTR_FORMAT_BLOCK_LINEAR);
+      ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
+                                      flags, attr, attr2, req->format,
+                                      req->width, req->height, pitch_in,
+                                      size, align, h_vas, &off, &lim,
+                                      &pitch_out);
+   }
+   if (ret != 0 && !req->vram && req->cpu_access) {
+      /* WC failed: uncached non-contig 4K often works for sema/notifier BOs */
+      attr = NV_OS32_ATTR_PCI_4K_UNCACHED;
       ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
                                       flags, attr, attr2, req->format,
                                       req->width, req->height, pitch_in,

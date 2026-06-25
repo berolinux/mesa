@@ -3059,6 +3059,106 @@ nv_3d_emit_g3_sema_only(struct nv_push *p, uint32_t class_3d,
    nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
 }
 
+/**
+ * tick112: G3 depth/stencil clear + sema.
+ * zs_pipe_flags: PIPE_CLEAR_DEPTH=0x100, PIPE_CLEAR_STENCIL=0x200 (nv_3d_emit_clear_surface).
+ * Does not bind depth target — assumes prior state or sema-only plumbing test.
+ */
+static inline void
+nv_3d_emit_g3_clear_depth_sema(struct nv_push *p, uint32_t class_3d,
+                               uint32_t zs_pipe_flags, float depth_val,
+                               uint32_t stencil_val,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               bool wfi_before_sema)
+{
+   uint32_t z_flags = zs_pipe_flags & 0x300u;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (!z_flags)
+      z_flags = 0x100u; /* default depth only */
+
+   nv_3d_emit_clear_surface(p, z_flags, NULL, depth_val, stencil_val);
+
+   if (wfi_before_sema)
+      nv_push_wfi(p);
+
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/**
+ * tick112: G3 colour + depth/stencil combined clear then sema (full RT reset).
+ * First CLEAR_SURFACE: COLOR0 (0x10); second: zs_pipe_flags (0x100/0x200/0x300).
+ */
+static inline void
+nv_3d_emit_g3_clear_color_depth_sema(struct nv_push *p, uint32_t class_3d,
+                                     uint64_t ct_gpu_addr, uint32_t ct_w,
+                                     uint32_t ct_h, uint32_t ct_format,
+                                     const uint32_t color_ui[4],
+                                     uint32_t zs_pipe_flags, float depth_val,
+                                     uint32_t stencil_val,
+                                     uint64_t sema_gpu_addr,
+                                     uint32_t sema_payload,
+                                     bool wfi_before_sema)
+{
+   uint32_t c[4];
+   uint32_t z_flags = zs_pipe_flags & 0x300u;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr,
+                                       ct_w ? ct_w : 1, ct_h ? ct_h : 1,
+                                       ct_format, false /* pitch */, 0);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10 /* COLOR0 */, c, 0.0f, 0);
+
+   if (!z_flags)
+      z_flags = 0x100u;
+   nv_3d_emit_clear_surface(p, z_flags, NULL, depth_val, stencil_val);
+
+   if (wfi_before_sema)
+      nv_push_wfi(p);
+
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/**
+ * tick112: G3 sema-only with WFI both before and after report (extra drain for
+ * virt/host where sema may race with prior 3D work on another subch).
+ */
+static inline void
+nv_3d_emit_g3_sema_only_wfi_bracket(struct nv_push *p, uint32_t class_3d,
+                                    uint64_t sema_gpu_addr,
+                                    uint32_t sema_payload)
+{
+   if (!p || !sema_gpu_addr || !sema_payload)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_push_wfi(p);
+   nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+   nv_push_wfi(p);
+}
+
 #ifdef __cplusplus
 }
 #endif

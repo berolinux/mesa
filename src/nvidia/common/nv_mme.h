@@ -244,7 +244,12 @@ nv_mme_build_channel_init_program_stub(struct nv_mme_program *prog,
    prog->is_stub_end_only = true;
 }
 
-/** tick105: clear/blit helper macro scaffold (slot 3) — END-terminated stub. */
+/**
+ * tick105/112: clear/blit helper macro scaffold (slot 3).
+ * Intended (unvalidated) sequence mirrors host G3: set colour clear values,
+ * CLEAR_SURFACE (0x19d0), optional report sema — all pseudo-ops until RE.
+ * Host nv_3d_emit_g3_* remains authoritative; this only primes MME RAM/CALL.
+ */
 static inline void
 nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
                                        uint32_t ram_offset)
@@ -254,13 +259,57 @@ nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
    memset(prog, 0, sizeof(*prog));
    prog->slot = NV_MME_SLOT_CLEAR_HELPER;
    prog->ram_offset = ram_offset;
-   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
-                    NV_MME_INSN_IMM16(0x0540u /* CLEAR surface method band */) |
+   /* Pseudo: load clear state, emit SET_COLOR_CLEAR_VALUE band, CLEAR_SURFACE, END */
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   prog->insns[1] = nv_mme_insn_emit_method(0x0d80u /* SET_COLOR_CLEAR_VALUE(0) */,
+                                            0);
+   prog->insns[2] = nv_mme_insn_emit_method(0x19d0u /* CLEAR_SURFACE */, 1);
+   prog->insns[3] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(0x1b00u /* report sema band approx */) |
                     NV_MME_INSN_MERGE_CLASS;
-   prog->insns[1] = nv_mme_insn_emit_method(0x0548u, 1);
-   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_END);
-   prog->insn_count = 3;
+   prog->insns[4] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 5;
    prog->is_stub_end_only = true;
+}
+
+/**
+ * tick112: full table prime helper — builds all extended slots with distinct
+ * RAM offsets so channel-init can LOAD each region without overlap.
+ * Returns number of programs written (0..NV_MME_SLOT_EXTENDED_COUNT).
+ */
+static inline unsigned
+nv_mme_prime_all_extended_stubs(struct nv_mme_program *progs,
+                                unsigned max_progs, uint32_t ram_base)
+{
+   unsigned n = 0;
+
+   if (!progs || max_progs < 1)
+      return 0;
+   if (n < max_progs) {
+      nv_mme_build_draw_indirect_program(&progs[n], NV_MME_SLOT_DRAW_INDIRECT,
+                                         ram_base + n * NV_MME_RAM_SLOT_STRIDE,
+                                         false);
+      n++;
+   }
+   if (n < max_progs) {
+      nv_mme_build_draw_indirect_program(&progs[n],
+                                         NV_MME_SLOT_DRAW_INDEXED_INDIRECT,
+                                         ram_base + n * NV_MME_RAM_SLOT_STRIDE,
+                                         true);
+      n++;
+   }
+   if (n < max_progs) {
+      nv_mme_build_channel_init_program_stub(
+         &progs[n], ram_base + n * NV_MME_RAM_SLOT_STRIDE);
+      n++;
+   }
+   if (n < max_progs) {
+      nv_mme_build_clear_helper_program_stub(
+         &progs[n], ram_base + n * NV_MME_RAM_SLOT_STRIDE);
+      n++;
+   }
+   return n;
 }
 
 /**
