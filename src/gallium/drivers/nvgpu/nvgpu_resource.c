@@ -158,11 +158,15 @@ nvgpu_resource_create(struct pipe_screen *pscreen,
                                           PIPE_BIND_DISPLAY_TARGET)));
 
       /*
-       * tick102: linear 2D render/display surfaces via memory_alloc_ex path
-       * (nv_rm_bo_alloc_2d) so RM gets correct pitch/ATTR; blocklinear and
-       * buffers keep the generic size-based alloc.
+       * tick102/103: linear 2D via alloc_2d; blocklinear 2D via alloc_bl
+       * (memory_alloc_ex with NVOS32_ATTR_FORMAT_BLOCK_LINEAR).
        */
-      if (is_2d_pitch && screen->rm) {
+      if (res->blocklinear && templ->target != PIPE_BUFFER &&
+          templ->height0 > 0 && screen->rm) {
+         res->bo = nv_rm_bo_alloc_bl(screen->rm, templ->width0, templ->height0,
+                                     size, res->gobs_height, vram, true,
+                                     0 /* IMAGE default */, 0);
+      } else if (is_2d_pitch && screen->rm) {
          int32_t pitch = (int32_t)res->row_pitch;
          res->bo = nv_rm_bo_alloc_2d(screen->rm, templ->width0, templ->height0,
                                      &pitch, vram, cpu_access, true,
@@ -187,6 +191,12 @@ nvgpu_resource_create(struct pipe_screen *pscreen,
          req.no_scanout = !(templ->bind & (PIPE_BIND_SCANOUT |
                                            PIPE_BIND_DISPLAY_TARGET));
          req.map_gpu_va = true;
+         if (res->blocklinear && templ->target != PIPE_BUFFER) {
+            req.blocklinear = true;
+            req.width = templ->width0;
+            req.height = templ->height0;
+            req.gobs_height = res->gobs_height;
+         }
 
          res->bo = nv_rm_bo_alloc(screen->rm, &req);
          if (!res->bo && req.vram) {

@@ -346,6 +346,11 @@ nv_nvenc_emit_execute(struct nv_push *p, uint32_t app_id, uint32_t execute_flags
 #define NV_NVDEC_SET_NVDEC_STATUS_OFFSET     0x0424
 #define NV_NVDEC_EXECUTE_AWAKEN              (1u << 8)
 
+/* Forward: max DPB slots (also defined with pic_setup dword indices below) */
+#ifndef NV_H264_PS_MAX_DPB_SLOTS
+#define NV_H264_PS_MAX_DPB_SLOTS             16
+#endif
+
 /* H.264/HEVC/AV1 picture setup is a driver-private structure written to a GPU
  * BO; the class only receives its GPU offset via SET_DRV_PIC_SETUP_OFFSET_NV.
  * We expose a minimal descriptor for userspace to populate before execute. */
@@ -379,6 +384,20 @@ struct nv_nvdec_frame_setup {
    uint64_t dpb_luma_gpu_addr[NV_H264_PS_MAX_DPB_SLOTS];
    uint64_t dpb_chroma_gpu_addr[NV_H264_PS_MAX_DPB_SLOTS];
    uint32_t dpb_slot_count;      /* active DPB entries (0 = none) */
+   /* tick103: H.264 SPS/PPS subset for pic_setup dwords 2/3 (refine on silicon) */
+   uint32_t h264_profile_idc;    /* e.g. 66/77/100 baseline/main/high */
+   uint32_t h264_level_idc;      /* e.g. 41 = 4.1 */
+   uint32_t h264_chroma_format_idc; /* 0=mono 1=420 2=422 3=444 */
+   uint32_t h264_sps_flags;      /* direct override; 0 = build from fields above */
+   uint32_t h264_pps_flags;      /* direct override; 0 = build from cabac/wp fields */
+   uint8_t  h264_entropy_coding_mode_flag; /* 1 = CABAC */
+   uint8_t  h264_weighted_pred_flag;
+   uint8_t  h264_weighted_bipred_idc; /* 0..2 */
+   uint8_t  h264_transform_8x8_mode_flag;
+   uint8_t  h264_constrained_intra_pred_flag;
+   uint8_t  h264_deblocking_filter_control_present_flag;
+   int8_t   h264_pic_init_qp_minus26;
+   int8_t   h264_chroma_qp_index_offset;
 };
 
 /*
@@ -415,7 +434,7 @@ struct nv_nvdec_frame_setup {
 #define NV_H264_PS_HISTOGRAM_OFF         18
 #define NV_H264_PS_COLOC_OFF             19
 #define NV_H264_PS_BITSTREAM_LEN         20
-#define NV_H264_PS_MAX_DPB_SLOTS         16
+/* NV_H264_PS_MAX_DPB_SLOTS defined above struct nv_nvdec_frame_setup */
 
 /* HEVC pic_setup */
 #define NV_HEVC_PS_PIC_WH                0   /* (height<<16)|width in pixels or CTBs */
@@ -452,6 +471,94 @@ nv_nvdec_pic_setup_size(uint32_t app_id)
    case NV_NVDEC_APP_ID_VP9:  return NV_NVDEC_PIC_SETUP_VP9_BYTES;
    default:                   return NV_NVDEC_PIC_SETUP_H264_BYTES;
    }
+}
+
+/**
+ * tick103: pack H.264 SPS/PPS flag dwords for pic_setup.
+ * Layout is a conservative proprietary subset (profile/level/chroma in SPS;
+ * entropy/weighted/transform/deblock in PPS).  Exact bit positions may need
+ * silicon/trace refinement; non-zero fields are still preferable to zeros.
+ *
+ * SPS dword (NV_H264_PS_SPS_FLAGS):
+ *   [7:0]   profile_idc
+ *   [15:8]  level_idc
+ *   [17:16] chroma_format_idc
+ *   [23:20] bit_depth_luma_minus8
+ *   [27:24] bit_depth_chroma_minus8
+ *
+ * PPS dword (NV_H264_PS_PPS_FLAGS):
+ *   [0]     entropy_coding_mode_flag (CABAC)
+ *   [1]     weighted_pred_flag
+ *   [3:2]   weighted_bipred_idc
+ *   [4]     transform_8x8_mode_flag
+ *   [5]     constrained_intra_pred_flag
+ *   [6]     deblocking_filter_control_present_flag
+ *   [15:8]  pic_init_qp_minus26 as uint8 (biased +128 for negative)
+ *   [23:16] chroma_qp_index_offset as uint8 (biased +128)
+ */
+static inline uint32_t
+nv_h264_pack_sps_flags(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t profile, level, chroma, bdl, bdc;
+   if (!fs)
+      return 0;
+   if (fs->h264_sps_flags)
+      return fs->h264_sps_flags;
+   profile = fs->h264_profile_idc ? fs->h264_profile_idc : 100; /* High */
+   level = fs->h264_level_idc ? fs->h264_level_idc : 41;
+   chroma = fs->h264_chroma_format_idc ? fs->h264_chroma_format_idc : 1; /* 4:2:0 */
+   bdl = fs->bit_depth_luma_minus8 & 0xfu;
+   bdc = fs->bit_depth_chroma_minus8 & 0xfu;
+   return (profile & 0xffu) |
+          ((level & 0xffu) << 8) |
+          ((chroma & 3u) << 16) |
+          (bdl << 20) |
+          (bdc << 24);
+}
+
+static inline uint32_t
+nv_h264_pack_pps_flags(const struct nv_nvdec_frame_setup *fs)
+{
+   uint32_t f = 0;
+   int qp, cqp;
+   if (!fs)
+      return 0;
+   if (fs->h264_pps_flags)
+      return fs->h264_pps_flags;
+   if (fs->h264_entropy_coding_mode_flag)
+      f |= 1u;
+   if (fs->h264_weighted_pred_flag)
+      f |= 2u;
+   f |= ((uint32_t)(fs->h264_weighted_bipred_idc & 3u)) << 2;
+   if (fs->h264_transform_8x8_mode_flag)
+      f |= 16u;
+   if (fs->h264_constrained_intra_pred_flag)
+      f |= 32u;
+   if (fs->h264_deblocking_filter_control_present_flag)
+      f |= 64u;
+   qp = (int)fs->h264_pic_init_qp_minus26 + 128;
+   if (qp < 0) qp = 0;
+   if (qp > 255) qp = 255;
+   cqp = (int)fs->h264_chroma_qp_index_offset + 128;
+   if (cqp < 0) cqp = 0;
+   if (cqp > 255) cqp = 255;
+   f |= ((uint32_t)qp) << 8;
+   f |= ((uint32_t)cqp) << 16;
+   return f;
+}
+
+/** Apply SPS/PPS into an existing pic_setup dword buffer (H.264 path only). */
+static inline void
+nv_nvdec_pic_setup_apply_h264_sps_pps(uint32_t *pic_dwords,
+                                      uint32_t pic_dwords_cap,
+                                      const struct nv_nvdec_frame_setup *fs)
+{
+   if (!pic_dwords || !fs)
+      return;
+   if (pic_dwords_cap > NV_H264_PS_SPS_FLAGS)
+      pic_dwords[NV_H264_PS_SPS_FLAGS] = nv_h264_pack_sps_flags(fs);
+   if (pic_dwords_cap > NV_H264_PS_PPS_FLAGS)
+      pic_dwords[NV_H264_PS_PPS_FLAGS] = nv_h264_pack_pps_flags(fs);
 }
 
 /**
@@ -500,6 +607,8 @@ nv_nvdec_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
    default:
       if (pic_dwords_cap > NV_H264_PS_MB_WH)
          pic_dwords[NV_H264_PS_MB_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+      /* tick103: SPS/PPS flags (profile/level/chroma + entropy/wp/deblock) */
+      nv_nvdec_pic_setup_apply_h264_sps_pps(pic_dwords, pic_dwords_cap, fs);
       if (pic_dwords_cap > NV_H264_PS_CURR_PIC_IDX)
          pic_dwords[NV_H264_PS_CURR_PIC_IDX] = fs->picture_index;
       if (pic_dwords_cap > NV_H264_PS_BITSTREAM_LEN)

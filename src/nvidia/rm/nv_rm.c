@@ -428,11 +428,12 @@ nv_rm_bo_map_gpu_va_flags(struct nv_rm_bo *bo, uint32_t os46_flags)
                                      os46_flags, &dma_off);
       flags_used = os46_flags;
    } else {
-      /* tick102: auto page-size ladder from probe max_page_size */
-      ret = nvidia_rm_map_memory_dma_auto(dev->nvdev, h_dev, dev->h_vaspace,
-                                          bo->rm_handle, 0, bo->size,
-                                          dev->info.max_page_size,
-                                          &dma_off, &flags_used);
+      /* tick103: BAR1-aware auto page-size ladder from probe */
+      ret = nvidia_rm_map_memory_dma_auto_bar1(dev->nvdev, h_dev, dev->h_vaspace,
+                                               bo->rm_handle, 0, bo->size,
+                                               dev->info.max_page_size,
+                                               dev->info.bar1_avail_size,
+                                               &dma_off, &flags_used);
    }
    if (ret != 0)
       return ret;
@@ -460,9 +461,12 @@ nv_rm_device_os46_page_size_sel(struct nv_rm_device *dev, uint64_t map_length)
 {
 #if defined(HAVE_LIBDRM_NVIDIA)
    uint64_t max_ps = 0;
-   if (dev)
+   uint64_t bar1 = 0;
+   if (dev) {
       max_ps = dev->info.max_page_size;
-   return nvidia_rm_os46_pick_page_size(max_ps, map_length);
+      bar1 = dev->info.bar1_avail_size;
+   }
+   return nvidia_rm_os46_pick_page_size_bar1(max_ps, map_length, bar1);
 #else
    (void)dev;
    (void)map_length;
@@ -863,13 +867,24 @@ nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
 
    if (req->vram) {
       h_class = NV01_MEMORY_LOCAL_USER;
-      attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_NONCONTIG;
-      attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_NO_VAL;
+      if (req->blocklinear && req->width && req->height) {
+         /* tick103: block-linear IMAGE/DEPTH; GPU-cacheable preferred for RT/tex */
+         attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_BL_NONCONTIG;
+         attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_YES_VAL;
+         align = req->alignment ? req->alignment : 512;
+         pitch_in = 0; /* BL: pitch is RM/gob internal, not linear row stride */
+      } else {
+         attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_NONCONTIG;
+         attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_NO_VAL;
+      }
    } else {
       h_class = NV01_MEMORY_SYSTEM;
       attr = req->cpu_access ? NV_OS32_ATTR_PCI_4K_WRITECOMBINE
                              : NV_OS32_ATTR_PCI_4K_UNCACHED;
       attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_DEFAULT_VAL;
+      /* sysmem BL is unusual; fall through pitch unless caller insists */
+      if (req->blocklinear)
+         attr |= NV_OS32_DRF_SHL(16, 17, NVOS32_ATTR_FORMAT_BLOCK_LINEAR);
    }
 
    if (req->map_gpu_va || dev->vas_ready) {
@@ -887,9 +902,19 @@ nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
                                    attr, attr2, req->format,
                                    req->width, req->height, pitch_in,
                                    size, align, h_vas, &off, &lim, &pitch_out);
+   if (ret != 0 && req->vram && req->blocklinear) {
+      /* retry contig BL then non-BL noncontig */
+      attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_BL;
+      ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
+                                      flags, attr, attr2, req->format,
+                                      req->width, req->height, pitch_in,
+                                      size, align, h_vas, &off, &lim,
+                                      &pitch_out);
+   }
    if (ret != 0 && req->vram) {
-      /* retry strict contig / default cache */
-      attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED;
+      /* retry strict contig / default cache (pitch or last resort) */
+      attr = req->blocklinear ? NV_OS32_ATTR_VIDMEM_4K_UNCACHED_BL
+                              : NV_OS32_ATTR_VIDMEM_4K_UNCACHED;
       ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
                                       flags, attr, attr2, req->format,
                                       req->width, req->height, pitch_in,
@@ -1019,6 +1044,39 @@ nv_rm_bo_alloc_2d(struct nv_rm_device *dev, uint32_t width, uint32_t height,
    bo = nv_rm_bo_alloc(dev, &req);
    if (bo && pitch_inout)
       *pitch_inout = bo->pitch;
+   return bo;
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_bl(struct nv_rm_device *dev, uint32_t width, uint32_t height,
+                  uint64_t size_bytes, uint8_t gobs_h, bool vram,
+                  bool map_gpu_va, uint32_t rm_type, uint32_t format)
+{
+   struct nv_rm_bo_req req;
+   struct nv_rm_bo *bo;
+
+   if (!dev || !width || !height || !size_bytes)
+      return NULL;
+   memset(&req, 0, sizeof(req));
+   req.width = width;
+   req.height = height;
+   req.pitch = 0;
+   req.size = size_bytes;
+   req.alignment = 512;
+   req.vram = vram;
+   req.cpu_access = false; /* BL typically GPU-only; staging is linear */
+   req.map_gpu_va = map_gpu_va;
+   req.no_scanout = true;
+   req.rm_type = rm_type ? rm_type : NVOS32_TYPE_IMAGE;
+   req.format = format;
+   req.blocklinear = true;
+   req.gobs_height = gobs_h ? gobs_h : 4;
+   bo = nv_rm_bo_alloc(dev, &req);
+   if (!bo && vram) {
+      req.vram = false;
+      req.cpu_access = true;
+      bo = nv_rm_bo_alloc(dev, &req);
+   }
    return bo;
 }
 

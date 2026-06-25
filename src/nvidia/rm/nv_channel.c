@@ -2764,8 +2764,16 @@ nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
-                          sass_version, sema_gpu_addr, sema_payload);
+   /* tick103: apply GR probe limits (max warps / thread stack scale) when known */
+   if (ch && ch->info) {
+      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
+                                sass_version, sema_gpu_addr, sema_payload,
+                                ch->info->max_warps_per_sm,
+                                ch->info->thread_stack_scaling);
+   } else {
+      nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
+                             sass_version, sema_gpu_addr, sema_payload);
+   }
    return nv_channel_g2_compute_dispatch_sema_submit(ch, class_compute, &desc,
                                                      qmd_gpu_addr, qmd_host,
                                                      sema_gpu_addr, sema_cpu,

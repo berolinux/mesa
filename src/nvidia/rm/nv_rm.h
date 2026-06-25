@@ -40,6 +40,9 @@ struct nv_rm_bo_req {
    int32_t pitch;       /* 0 = RM computes; returned via nv_rm_bo_pitch() */
    uint32_t rm_type;    /* NVOS32_TYPE_*; 0 = DMA or IMAGE when 2D */
    uint32_t format;     /* surface format dword when applicable */
+   /** tick103: request block-linear layout (NVOS32_ATTR_FORMAT_BLOCK_LINEAR) */
+   bool blocklinear;
+   uint8_t gobs_height; /* log2 gobs in height for BL (0 = default 4 => 16 gobs) */
 };
 
 struct nv_rm_device *
@@ -197,6 +200,16 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 struct nv_rm_bo *
 nv_rm_bo_alloc_2d(struct nv_rm_device *dev, uint32_t width, uint32_t height,
                   int32_t *pitch_inout, bool vram, bool cpu_access,
+                  bool map_gpu_va, uint32_t rm_type, uint32_t format);
+
+/**
+ * tick103: allocate block-linear 2D surface via memory_alloc_ex (BL ATTR).
+ * size_bytes: minimum allocation size (GOB-aligned layer); pitch_inout unused
+ * for BL (pitch field often 0 / RM-internal). gobs_h: log2 height gobs (4=16).
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_bl(struct nv_rm_device *dev, uint32_t width, uint32_t height,
+                  uint64_t size_bytes, uint8_t gobs_h, bool vram,
                   bool map_gpu_va, uint32_t rm_type, uint32_t format);
 
 void
