@@ -185,6 +185,7 @@ struct nv_smoke_hw_scratch {
    struct nv_rm_bo *dst_bo;   /* G1 dest */
    struct nv_rm_bo *qmd_bo;   /* G2 QMD */
    struct nv_rm_bo *ct_bo;    /* G3 colour target (optional) */
+   struct nv_rm_bo *zt_bo;    /* tick113: G3 depth/stencil ZETA (optional) */
    volatile uint32_t *sema_cpu;
    void *qmd_cpu;
    void *src_cpu;
@@ -194,6 +195,7 @@ struct nv_smoke_hw_scratch {
    uint64_t dst_gpu;
    uint64_t qmd_gpu;
    uint64_t ct_gpu;
+   uint64_t zt_gpu;           /* tick113: ZT pitch surface GPU VA */
    uint32_t sema_payload;
    uint32_t g2_store_imm;   /* value written by G2 store-imm smoke (default 0xdeadbeef) */
    bool sema_vram;

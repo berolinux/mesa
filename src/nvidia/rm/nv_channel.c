@@ -3389,10 +3389,10 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      /* tick111/112: colour clear, WFI, colour+depth, sema bracket ladder */
+      /* tick111-113: colour, WFI, colour+depth, RT full (CT+ZT), sema bracket */
       {
          unsigned mode_pass;
-         for (mode_pass = 0; mode_pass < 4; mode_pass++) {
+         for (mode_pass = 0; mode_pass < 5; mode_pass++) {
             if (sema_reset && sema_cpu)
                sema_cpu[0] = 0;
 
@@ -3419,6 +3419,12 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
                   &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c,
                   0x100u /* PIPE_CLEAR_DEPTH */, 1.0f, 0, sema_gpu_addr,
                   sema_payload, true);
+            else if (mode_pass == 3)
+               /* tick113: depth-only sema with ZT at ct_gpu+offset not available
+                * here; use depth sema without ZT then sema bracket below */
+               nv_3d_emit_g3_clear_depth_sema(&push, c3, 0x100u, 1.0f, 0,
+                                              sema_gpu_addr, sema_payload,
+                                              true);
             else
                nv_3d_emit_g3_sema_only_wfi_bracket(&push, c3, sema_gpu_addr,
                                                    sema_payload);
@@ -3511,6 +3517,121 @@ nv_channel_g3_sema_only_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+   }
+   return last;
+}
+
+int
+nv_channel_g3_clear_rt_sema_submit(struct nv_channel *ch,
+                                   uint32_t class_3d,
+                                   uint64_t ct_gpu_addr,
+                                   uint32_t ct_w, uint32_t ct_h,
+                                   uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t zt_gpu_addr,
+                                   uint32_t zt_format,
+                                   float depth_val, uint32_t stencil_val,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 192;
+   uint32_t classes[12];
+   unsigned n = 12, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
+   uint32_t c[4];
+   uint32_t prefer;
+   unsigned pass;
+
+   if (!ch || !sema_gpu_addr)
+      return -EINVAL;
+   if (!zt_gpu_addr)
+      return nv_channel_g3_clear_sema_submit(ch, class_3d, ct_gpu_addr, ct_w,
+                                             ct_h, ct_format, color_ui, false,
+                                             sema_gpu_addr, sema_cpu,
+                                             sema_payload, sema_reset,
+                                             wait_timeout_ns, check_notifier);
+   if (!sema_payload)
+      sema_payload = 0x42u;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   prefer = class_3d ? class_3d : 0;
+   nv_channel_g3_fill_class_ladder(ch, prefer, classes, &n, 12);
+
+   if (!ct_format)
+      ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+   if (!zt_format)
+      zt_format = NVC597_SET_ZT_FORMAT_V_Z24S8;
+   if (!ct_w)
+      ct_w = 64;
+   if (!ct_h)
+      ct_h = 64;
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+
+   for (i = 0; i < n; i++) {
+      uint32_t c3 = classes[i];
+      unsigned t;
+      int r;
+
+      if (!c3)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == c3)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = c3;
+
+      /* pass 0: full RT clear; pass 1: ZT depth-only; pass 2: sema bracket */
+      for (pass = 0; pass < 3; pass++) {
+         if (sema_reset && sema_cpu)
+            sema_cpu[0] = 0;
+
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+
+         nv_push_init(&push, map, need);
+         if (pass == 0)
+            nv_3d_emit_g3_clear_rt_full_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                             ct_format, c, zt_gpu_addr,
+                                             zt_format, depth_val, stencil_val,
+                                             sema_gpu_addr, sema_payload, true);
+         else if (pass == 1)
+            nv_3d_emit_g3_clear_depth_sema_zt(&push, c3, zt_gpu_addr, ct_w,
+                                              ct_h, zt_format, 0, 0x300u,
+                                              depth_val, stencil_val,
+                                              sema_gpu_addr, sema_payload,
+                                              true);
+         else
+            nv_3d_emit_g3_sema_only_wfi_bracket(&push, c3, sema_gpu_addr,
+                                                sema_payload);
+         nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                         wait_timeout_ns, check_notifier);
+         if (r == 0) {
+            if (!ch->class_3d_bound)
+               ch->class_3d_bound = c3;
+            return 0;
+         }
+         last = r;
+         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+            return r;
+      }
    }
    return last;
 }

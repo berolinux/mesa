@@ -597,6 +597,44 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -313;
    }
 
+   /* tick113: ZT bind + depth clear must program SET_ZT_A/B/FORMAT */
+   {
+      uint64_t zt_gpu = 0x510000ull;
+      uint32_t buf_zt[160];
+      uint32_t nzt, izt;
+      bool saw_zt_b = false, saw_zt_fmt = false, saw_z_clear = false;
+
+      memset(buf_zt, 0, sizeof(buf_zt));
+      nv_push_init(&p, buf_zt, (uint32_t)(sizeof(buf_zt) / 4));
+      nv_3d_emit_g3_clear_rt_full_sema(
+         &p, NV_SMOKE_G3_CLASS_PLACEHOLDER, ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+         NV_SMOKE_G3_CT_H_DEFAULT, NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+         color, zt_gpu, NVC597_SET_ZT_FORMAT_V_Z24S8, 1.0f, 0, sema_gpu,
+         sema_payload, true);
+      nzt = nv_push_dw_count(&p);
+      if (nzt < 16)
+         return -314;
+      for (izt = 0; izt + 1 < nzt; izt++) {
+         uint32_t hdr = buf_zt[izt];
+         uint32_t data = buf_zt[izt + 1];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_ZT_B && data == (uint32_t)(zt_gpu & 0xffffffffu))
+            saw_zt_b = true;
+         if (method == NVC597_SET_ZT_FORMAT &&
+             data == NVC597_SET_ZT_FORMAT_V_Z24S8)
+            saw_zt_fmt = true;
+         if (method == NVC597_CLEAR_SURFACE &&
+             (data & NVC597_CLEAR_SURFACE_Z_ENABLE_TRUE))
+            saw_z_clear = true;
+      }
+      if (!saw_zt_b || !saw_zt_fmt)
+         return -315;
+      if (!saw_z_clear)
+         return -316;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

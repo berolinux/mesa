@@ -340,6 +340,26 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       /* CT optional; G3 clear sema works without mapped CT for encode path */
    }
 
+   /* tick113: G3 ZETA pitch target (Z24S8, 4 Bpp, same 64x64 as CT) */
+   memset(&req, 0, sizeof(req));
+   req.width = 64;
+   req.height = 64;
+   req.pitch = 64 * 4;
+   req.size = 64 * 64 * 4;
+   req.alignment = 256;
+   req.vram = false;
+   req.cpu_access = true;
+   req.no_scanout = true;
+   req.map_gpu_va = true;
+   req.rm_type = 0; /* IMAGE/DMA default */
+   sc.zt_bo = nv_rm_bo_alloc(rm, &req);
+   if (!sc.zt_bo) {
+      req.vram = true;
+      sc.zt_bo = nv_rm_bo_alloc(rm, &req);
+   }
+   if (sc.zt_bo)
+      sc.zt_gpu = nv_rm_bo_gpu_offset(sc.zt_bo);
+
    *out = sc;
    return 0;
 
@@ -359,6 +379,8 @@ nv_smoke_hw_scratch_destroy(struct nv_smoke_hw_scratch *sc)
       scratch_zero(sc);
       return;
    }
+   if (sc->zt_bo)
+      nv_rm_bo_free(sc->zt_bo);
    if (sc->ct_bo)
       nv_rm_bo_free(sc->ct_bo);
    if (sc->qmd_bo) {
@@ -796,13 +818,17 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
          nv_channel_notifier_reset(ch);
-         /* emit_draw=false: no shaders; clear+sema only (safer first HW bring-up) */
-         res.g3_submit_rc = nv_channel_g3_clear_sema_submit(ch, 0, sc->ct_gpu,
-                                                            64, 64, 0, NULL,
-                                                            false /* no draw */,
-                                                            sc->sema_gpu, sc->sema_cpu,
-                                                            sc->sema_payload, true, to,
-                                                            check_notifier);
+         /* emit_draw=false: no shaders; prefer CT+ZT RT clear when ZT present */
+         if (sc->zt_gpu)
+            res.g3_submit_rc = nv_channel_g3_clear_rt_sema_submit(
+               ch, 0, sc->ct_gpu, 64, 64, 0, NULL, sc->zt_gpu, 0,
+               1.0f, 0, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true,
+               to, check_notifier);
+         else
+            res.g3_submit_rc = nv_channel_g3_clear_sema_submit(
+               ch, 0, sc->ct_gpu, 64, 64, 0, NULL, false /* no draw */,
+               sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+               check_notifier);
          res.g3_rc = res.g3_submit_rc;
          if (res.g3_submit_rc == 0) {
             res.slices_ok |= NV_SMOKE_HW_G3;

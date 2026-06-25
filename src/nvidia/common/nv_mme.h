@@ -559,6 +559,53 @@ nv_mme_emit_prime_full_table_stubs(struct nv_push *p)
    nv_mme_emit_load_and_call_end_stub(p, &pass5);
 }
 
+/**
+ * tick113: clear-helper macro only (slot 3) — lighter G3 channel-init path than
+ * full table prime.  Still is_stub_end_only; host G3 clear/draw remains authoritative.
+ */
+static inline void
+nv_mme_emit_prime_clear_helper_only(struct nv_push *p, uint32_t ram_offset)
+{
+   struct nv_mme_program clear_prog;
+
+   if (!p)
+      return;
+   nv_mme_build_clear_helper_program_stub(&clear_prog, ram_offset);
+   nv_mme_emit_load_and_call_end_stub(p, &clear_prog);
+}
+
+/**
+ * tick113: pseudo-instruction for method emit targeting CLEAR_SURFACE (0x19d0) +
+ * report sema band — documents intended clear macro body once ISA is proven.
+ */
+static inline void
+nv_mme_build_clear_surface_loop_scaffold(struct nv_mme_program *prog,
+                                         uint32_t ram_offset)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = NV_MME_SLOT_CLEAR_HELPER;
+   prog->ram_offset = ram_offset;
+   /* 0: load clear/color/depth values from CALL_MME_DATA / shadow */
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   /* 1-2: SET_COLOR_CLEAR_VALUE(0..1) pseudo emits */
+   prog->insns[1] = nv_mme_insn_emit_method(0x0d80u, 0);
+   prog->insns[2] = nv_mme_insn_emit_method(0x0d84u, 1);
+   /* 3: CLEAR_SURFACE */
+   prog->insns[3] = nv_mme_insn_emit_method(0x19d0u, 2);
+   /* 4: optional second clear (Z/S) */
+   prog->insns[4] = nv_mme_insn_emit_method(0x19d0u, 3);
+   /* 5: report sema release band */
+   prog->insns[5] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(0x1b00u) | NV_MME_INSN_MERGE_CLASS;
+   /* 6: END */
+   prog->insns[6] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 7;
+   prog->is_stub_end_only = true;
+}
+
 #ifdef __cplusplus
 }
 #endif

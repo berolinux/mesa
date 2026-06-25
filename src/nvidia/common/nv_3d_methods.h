@@ -3060,16 +3060,69 @@ nv_3d_emit_g3_sema_only(struct nv_push *p, uint32_t class_3d,
 }
 
 /**
- * tick112: G3 depth/stencil clear + sema.
- * zs_pipe_flags: PIPE_CLEAR_DEPTH=0x100, PIPE_CLEAR_STENCIL=0x200 (nv_3d_emit_clear_surface).
- * Does not bind depth target — assumes prior state or sema-only plumbing test.
+ * tick113: bind pitch ZETA (depth/stencil) target for G3 smoke/clear paths.
+ * zt_format: NVC597_SET_ZT_FORMAT_V_*; 0 => Z24S8.
+ * pitch_bytes 0 => width * bpp (4 for Z24S8/ZF32, 2 for Z16).
  */
 static inline void
-nv_3d_emit_g3_clear_depth_sema(struct nv_push *p, uint32_t class_3d,
-                               uint32_t zs_pipe_flags, float depth_val,
-                               uint32_t stencil_val,
-                               uint64_t sema_gpu_addr, uint32_t sema_payload,
-                               bool wfi_before_sema)
+nv_3d_emit_g3_bind_zeta_target(struct nv_push *p, uint64_t zt_gpu_addr,
+                               uint32_t zt_w, uint32_t zt_h,
+                               uint32_t zt_format, uint32_t pitch_bytes)
+{
+   struct nv_3d_surface s;
+   uint32_t w, h, bpp;
+
+   if (!p || !zt_gpu_addr)
+      return;
+   w = zt_w ? zt_w : 1;
+   h = zt_h ? zt_h : 1;
+   if (!zt_format)
+      zt_format = NVC597_SET_ZT_FORMAT_V_Z24S8;
+   if (zt_format == NVC597_SET_ZT_FORMAT_V_Z16)
+      bpp = 2;
+   else if (zt_format == NVC597_SET_ZT_FORMAT_V_ZF32)
+      bpp = 4;
+   else if (zt_format == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
+      bpp = 8;
+   else
+      bpp = 4;
+   if (!pitch_bytes)
+      pitch_bytes = w * bpp;
+
+   memset(&s, 0, sizeof(s));
+   s.enabled = true;
+   s.gpu_addr = zt_gpu_addr;
+   s.width = w;
+   s.height = h;
+   s.format = zt_format;
+   s.array_pitch = pitch_bytes;
+   s.block_linear = false;
+   nv_3d_set_zeta_target(p, &s);
+   nv_3d_set_surface_clip(p, 0, 0, w, h);
+   /* Enable depth test always-pass so clears/draws see ZT as active */
+   nv_push_method(p, NVC597_SET_DEPTH_TEST, 1);
+   nv_push_method(p, NVC597_SET_DEPTH_FUNC, NVC597_SET_DEPTH_FUNC_V_OGL_ALWAYS);
+   if (zt_format == NVC597_SET_ZT_FORMAT_V_Z24S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8Z24 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
+      nv_push_method(p, NVC597_SET_STENCIL_TEST, 1);
+}
+
+/**
+ * tick112/113: G3 depth/stencil clear + sema with optional ZT bind.
+ * zs_pipe_flags: PIPE_CLEAR_DEPTH=0x100, PIPE_CLEAR_STENCIL=0x200.
+ * zt_gpu_addr 0 skips ZT bind (legacy sema-only plumbing test).
+ */
+static inline void
+nv_3d_emit_g3_clear_depth_sema_zt(struct nv_push *p, uint32_t class_3d,
+                                  uint64_t zt_gpu_addr, uint32_t zt_w,
+                                  uint32_t zt_h, uint32_t zt_format,
+                                  uint32_t zt_pitch,
+                                  uint32_t zs_pipe_flags, float depth_val,
+                                  uint32_t stencil_val,
+                                  uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                  bool wfi_before_sema)
 {
    uint32_t z_flags = zs_pipe_flags & 0x300u;
 
@@ -3079,6 +3132,10 @@ nv_3d_emit_g3_clear_depth_sema(struct nv_push *p, uint32_t class_3d,
       nv_3d_set_object(p, class_3d);
    else
       nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (zt_gpu_addr)
+      nv_3d_emit_g3_bind_zeta_target(p, zt_gpu_addr, zt_w, zt_h, zt_format,
+                                     zt_pitch);
 
    if (!z_flags)
       z_flags = 0x100u; /* default depth only */
@@ -3092,23 +3149,42 @@ nv_3d_emit_g3_clear_depth_sema(struct nv_push *p, uint32_t class_3d,
       nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
 }
 
+static inline void
+nv_3d_emit_g3_clear_depth_sema(struct nv_push *p, uint32_t class_3d,
+                               uint32_t zs_pipe_flags, float depth_val,
+                               uint32_t stencil_val,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               bool wfi_before_sema)
+{
+   nv_3d_emit_g3_clear_depth_sema_zt(p, class_3d, 0, 0, 0, 0, 0,
+                                     zs_pipe_flags, depth_val, stencil_val,
+                                     sema_gpu_addr, sema_payload,
+                                     wfi_before_sema);
+}
+
 /**
- * tick112: G3 colour + depth/stencil combined clear then sema (full RT reset).
+ * tick112/113: G3 colour + depth/stencil combined clear then sema (full RT reset).
  * First CLEAR_SURFACE: COLOR0 (0x10); second: zs_pipe_flags (0x100/0x200/0x300).
+ * zt_gpu_addr 0: depth clear methods without ZT bind (may NOP on HW without prior ZT).
  */
 static inline void
-nv_3d_emit_g3_clear_color_depth_sema(struct nv_push *p, uint32_t class_3d,
-                                     uint64_t ct_gpu_addr, uint32_t ct_w,
-                                     uint32_t ct_h, uint32_t ct_format,
-                                     const uint32_t color_ui[4],
-                                     uint32_t zs_pipe_flags, float depth_val,
-                                     uint32_t stencil_val,
-                                     uint64_t sema_gpu_addr,
-                                     uint32_t sema_payload,
-                                     bool wfi_before_sema)
+nv_3d_emit_g3_clear_color_depth_sema_zt(struct nv_push *p, uint32_t class_3d,
+                                        uint64_t ct_gpu_addr, uint32_t ct_w,
+                                        uint32_t ct_h, uint32_t ct_format,
+                                        const uint32_t color_ui[4],
+                                        uint64_t zt_gpu_addr, uint32_t zt_w,
+                                        uint32_t zt_h, uint32_t zt_format,
+                                        uint32_t zt_pitch,
+                                        uint32_t zs_pipe_flags,
+                                        float depth_val, uint32_t stencil_val,
+                                        uint64_t sema_gpu_addr,
+                                        uint32_t sema_payload,
+                                        bool wfi_before_sema)
 {
    uint32_t c[4];
    uint32_t z_flags = zs_pipe_flags & 0x300u;
+   uint32_t w = ct_w ? ct_w : (zt_w ? zt_w : 1);
+   uint32_t h = ct_h ? ct_h : (zt_h ? zt_h : 1);
 
    if (!p)
       return;
@@ -3118,9 +3194,14 @@ nv_3d_emit_g3_clear_color_depth_sema(struct nv_push *p, uint32_t class_3d,
       nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
 
    if (ct_gpu_addr)
-      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr,
-                                       ct_w ? ct_w : 1, ct_h ? ct_h : 1,
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h,
                                        ct_format, false /* pitch */, 0);
+
+   if (zt_gpu_addr)
+      nv_3d_emit_g3_bind_zeta_target(p, zt_gpu_addr, zt_w ? zt_w : w,
+                                     zt_h ? zt_h : h, zt_format, zt_pitch);
+   else if (ct_gpu_addr)
+      nv_3d_set_surface_clip(p, 0, 0, w, h);
 
    if (color_ui)
       memcpy(c, color_ui, sizeof(c));
@@ -3137,6 +3218,24 @@ nv_3d_emit_g3_clear_color_depth_sema(struct nv_push *p, uint32_t class_3d,
 
    if (sema_gpu_addr && sema_payload)
       nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+static inline void
+nv_3d_emit_g3_clear_color_depth_sema(struct nv_push *p, uint32_t class_3d,
+                                     uint64_t ct_gpu_addr, uint32_t ct_w,
+                                     uint32_t ct_h, uint32_t ct_format,
+                                     const uint32_t color_ui[4],
+                                     uint32_t zs_pipe_flags, float depth_val,
+                                     uint32_t stencil_val,
+                                     uint64_t sema_gpu_addr,
+                                     uint32_t sema_payload,
+                                     bool wfi_before_sema)
+{
+   nv_3d_emit_g3_clear_color_depth_sema_zt(p, class_3d, ct_gpu_addr, ct_w, ct_h,
+                                           ct_format, color_ui, 0, 0, 0, 0, 0,
+                                           zs_pipe_flags, depth_val,
+                                           stencil_val, sema_gpu_addr,
+                                           sema_payload, wfi_before_sema);
 }
 
 /**
@@ -3157,6 +3256,34 @@ nv_3d_emit_g3_sema_only_wfi_bracket(struct nv_push *p, uint32_t class_3d,
    nv_push_wfi(p);
    nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
    nv_push_wfi(p);
+}
+
+/**
+ * tick113: full G3 RT setup — CT + ZT + colour clear + depth/stencil clear + sema.
+ * Convenience wrapper for HW smoke when both surfaces are allocated.
+ */
+static inline void
+nv_3d_emit_g3_clear_rt_full_sema(struct nv_push *p, uint32_t class_3d,
+                                 uint64_t ct_gpu_addr, uint32_t ct_w,
+                                 uint32_t ct_h, uint32_t ct_format,
+                                 const uint32_t color_ui[4],
+                                 uint64_t zt_gpu_addr, uint32_t zt_format,
+                                 float depth_val, uint32_t stencil_val,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                 bool wfi_before_sema)
+{
+   uint32_t zs = 0x100u;
+   if (zt_format == NVC597_SET_ZT_FORMAT_V_Z24S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8Z24 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8 ||
+       zt_format == 0)
+      zs = 0x300u; /* depth + stencil for combined formats */
+   nv_3d_emit_g3_clear_color_depth_sema_zt(
+      p, class_3d, ct_gpu_addr, ct_w, ct_h, ct_format, color_ui,
+      zt_gpu_addr, ct_w, ct_h, zt_format ? zt_format : NVC597_SET_ZT_FORMAT_V_Z24S8,
+      0, zs, depth_val, stencil_val, sema_gpu_addr, sema_payload,
+      wfi_before_sema);
 }
 
 #ifdef __cplusplus

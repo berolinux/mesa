@@ -435,6 +435,13 @@ nv_rm_bo_map_gpu_va_flags(struct nv_rm_bo *bo, uint32_t os46_flags)
                                      bo->rm_handle, 0, bo->size,
                                      os46_flags, &dma_off);
       flags_used = os46_flags;
+      /* tick113: explicit flags failed — fall back to auto BAR1 ladder */
+      if (ret != 0) {
+         ret = nvidia_rm_map_memory_dma_auto_bar1(
+            dev->nvdev, h_dev, dev->h_vaspace, bo->rm_handle, 0, bo->size,
+            dev->info.max_page_size, dev->info.bar1_avail_size, &dma_off,
+            &flags_used);
+      }
    } else {
       /* tick103: BAR1-aware auto page-size ladder from probe */
       ret = nvidia_rm_map_memory_dma_auto_bar1(dev->nvdev, h_dev, dev->h_vaspace,
@@ -442,6 +449,17 @@ nv_rm_bo_map_gpu_va_flags(struct nv_rm_bo *bo, uint32_t os46_flags)
                                                dev->info.max_page_size,
                                                dev->info.bar1_avail_size,
                                                &dma_off, &flags_used);
+   }
+   /* tick113: last resort — 4K page size only (guest/vGPU sometimes rejects big pages) */
+   if (ret != 0) {
+      uint32_t fl4k = NVOS46_FLAGS_PAGE_SIZE_4KB_SHL;
+      if (fl4k != os46_flags) {
+         ret = nvidia_rm_map_memory_dma(dev->nvdev, h_dev, dev->h_vaspace,
+                                        bo->rm_handle, 0, bo->size, fl4k,
+                                        &dma_off);
+         if (ret == 0)
+            flags_used = fl4k;
+      }
    }
    if (ret != 0)
       return ret;

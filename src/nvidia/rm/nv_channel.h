@@ -673,6 +673,28 @@ nv_channel_g3_sema_only_submit(struct nv_channel *ch,
                                uint64_t wait_timeout_ns,
                                bool check_notifier);
 
+/**
+ * tick113: G3 CT + ZT bind, colour+depth/stencil clear, sema submit/wait.
+ * zt_gpu_addr 0 falls back to colour-only ladder (nv_channel_g3_clear_sema_submit).
+ * zt_format 0 => Z24S8; zs clear uses depth+stencil for combined formats.
+ */
+int
+nv_channel_g3_clear_rt_sema_submit(struct nv_channel *ch,
+                                   uint32_t class_3d,
+                                   uint64_t ct_gpu_addr,
+                                   uint32_t ct_w, uint32_t ct_h,
+                                   uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t zt_gpu_addr,
+                                   uint32_t zt_format,
+                                   float depth_val, uint32_t stencil_val,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif
