@@ -1643,10 +1643,12 @@ nv_compute_emit_g2_qmd_launch_pass17(struct nv_push *p, uint32_t class_compute,
    nv_compute_emit_inline_qmd_launch_pass20(p, qmd_gpu_addr, qmd_dwords, true,
                                             post_wfi);
    if (host_sema_gpu) {
-      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
-      nv_push_sema_release_mode_pass17(
-         p, host_sema_gpu,
-         host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+      /* tick156: unified pass21 sema tail (same formal policy as pass17 direct) */
+      if (nv_push_g0_g4_host_sema_tail_pass21(
+             p, false, host_sema_gpu,
+             host_sema_payload ? host_sema_payload : 1u,
+             host_sema_mode) != 0)
+         return -1;
    }
    return 0;
 }

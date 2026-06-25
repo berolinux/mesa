@@ -3343,6 +3343,103 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -688;
    }
 
+   /* tick156: pass21 MME RAM_DATA scaffold + channel prime wire-up */
+   {
+      struct nv_push mp;
+      uint32_t mb[512], mi, li;
+      uint32_t insns[4];
+      unsigned wrote, ram_hits = 0, addr_hits = 0, cfg_hits = 0;
+      bool stubs_only;
+
+      if (NV_MME_PASS21_RAM_DATA_METHOD_OFF != 0x3884u)
+         return -689;
+      if (NV_MME_PASS21_RAM_ADDR_METHOD_OFF != 0x385cu)
+         return -690;
+      if (NV_MME_PASS21_GPUCOMP_RAM_DATA_IMM_CAPPED != 100u)
+         return -691;
+      if (NV_PASS20_GPUCOMP_RAM_DATA_IMM_CAPPED !=
+          NV_MME_PASS21_GPUCOMP_RAM_DATA_IMM_CAPPED)
+         return -692;
+
+      memset(mb, 0, sizeof(mb));
+      nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+      insns[0] = NV_MME_INSN_END;
+      insns[1] = NV_MME_INSN_NOP;
+      wrote = nv_mme_emit_ram_upload_scaffold_pass21(&mp, 0, insns, 2);
+      if (wrote != 2)
+         return -693;
+      mi = nv_push_dw_count(&mp);
+      for (li = 0; li + 1 < mi; li++) {
+         uint32_t hdr = mb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS21_RAM_ADDR_METHOD_OFF)
+            addr_hits++;
+         if (method == NV_MME_PASS21_RAM_DATA_METHOD_OFF)
+            ram_hits++;
+      }
+      if (addr_hits < 1 || ram_hits < 2)
+         return -694;
+
+      /* stub end probe: 2× (addr+data) for slots 0/1 */
+      memset(mb, 0, sizeof(mb));
+      nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+      wrote = nv_mme_emit_ram_data_stub_end_probe_pass21(&mp, 0);
+      if (wrote != 2)
+         return -695;
+
+      /* pass21 prime with RAM_DATA probe */
+      memset(mb, 0, sizeof(mb));
+      nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+      stubs_only = nv_mme_emit_channel_prime_upload_pass21(&mp, true);
+      if (!stubs_only)
+         return -696; /* must still report stubs / no path C */
+      if (nv_mme_path_c_indirect_ready())
+         return -697;
+      mi = nv_push_dw_count(&mp);
+      if (mi < 8)
+         return -698;
+      ram_hits = 0;
+      for (li = 0; li + 1 < mi; li++) {
+         uint32_t hdr = mb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS21_RAM_DATA_METHOD_OFF)
+            ram_hits++;
+         if (method == NV_MME_PASS16_POST_CONFIG_METHOD_OFF)
+            cfg_hits++;
+      }
+      if (ram_hits < 2)
+         return -699;
+      if (cfg_hits < 1)
+         return -700;
+
+      /* prime without probe must not emit RAM_DATA (default channel path) */
+      memset(mb, 0, sizeof(mb));
+      nv_push_init(&mp, mb, (uint32_t)(sizeof(mb) / 4));
+      (void)nv_mme_emit_channel_prime_upload_only(&mp);
+      mi = nv_push_dw_count(&mp);
+      ram_hits = 0;
+      for (li = 0; li + 1 < mi; li++) {
+         uint32_t hdr = mb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS21_RAM_DATA_METHOD_OFF)
+            ram_hits++;
+      }
+      if (ram_hits != 0)
+         return -701;
+
+      /* empty ram_data stream is no-op */
+      if (nv_mme_emit_ram_data_stream_pass21(&mp, NULL, 0) != 0)
+         return -702;
+      if (nv_mme_emit_ram_data_stream_pass21(&mp, insns, 0) != 0)
+         return -703;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

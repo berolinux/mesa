@@ -862,14 +862,117 @@ nv_mme_emit_channel_prime_upload_pass17(struct nv_push *p)
    return nv_mme_emit_channel_prime_upload_pass16(p);
 }
 
+/*
+ * tick156 / pass21: RAM_DATA / RAM_ADDR method scaffold (NVC597-class offsets).
+ * pass20 RE: gpucomp 100× 0x3884 imm, glcore ~2064B from func prologue (runtime
+ * fill).  Static binaries lack ordered microcode; these helpers emit the method
+ * vocabulary for channel prime / silicon capture without enabling path C CALL
+ * on stubs.  insn_count=0 is a no-op (addr only optional); non-zero writes
+ * successive RAM_DATA dwords starting at ram_addr.
+ */
+#define NV_MME_PASS21_RAM_DATA_METHOD_OFF   NV_MME_PASS20_RAM_DATA_METHOD_OFF
+#define NV_MME_PASS21_RAM_ADDR_METHOD_OFF   NV_MME_PASS20_RAM_ADDR_METHOD_OFF
+#define NV_MME_PASS21_CFG_END_METHOD_OFF    NV_MME_PASS20_CFG_END_METHOD_OFF
+#define NV_MME_PASS21_MAX_RAM_DATA_DWORDS   64u
+#define NV_MME_PASS21_GPUCOMP_RAM_DATA_IMM_CAPPED  100u /* pass20 measurement */
+
+/**
+ * tick156: set MME instruction RAM address pointer (method 0x385c).
+ * ram_addr is HW RAM word index / offset as programmed by the binary driver
+ * (typically start of macro slot region; 0 = base).
+ */
+static inline void
+nv_mme_emit_ram_addr_pass21(struct nv_push *p, uint32_t ram_addr)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_push_method(p, NV_MME_PASS21_RAM_ADDR_METHOD_OFF, ram_addr);
+}
+
+/**
+ * tick156: stream MME instruction words via method 0x3884 (RAM_DATA).
+ * Does not CALL_MME; safe for capture/scaffold.  Caps at
+ * NV_MME_PASS21_MAX_RAM_DATA_DWORDS.
+ */
+static inline unsigned
+nv_mme_emit_ram_data_stream_pass21(struct nv_push *p,
+                                   const uint32_t *insns,
+                                   unsigned insn_count)
+{
+   unsigned i, n;
+
+   if (!p || !insns || !insn_count)
+      return 0;
+   n = insn_count;
+   if (n > NV_MME_PASS21_MAX_RAM_DATA_DWORDS)
+      n = NV_MME_PASS21_MAX_RAM_DATA_DWORDS;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   for (i = 0; i < n; i++)
+      nv_push_method(p, NV_MME_PASS21_RAM_DATA_METHOD_OFF, insns[i]);
+   return n;
+}
+
+/**
+ * tick156: RAM_ADDR + RAM_DATA stream for one program (upload scaffold only).
+ * Returns dwords written via RAM_DATA (0 if no insns).
+ */
+static inline unsigned
+nv_mme_emit_ram_upload_scaffold_pass21(struct nv_push *p,
+                                       uint32_t ram_addr,
+                                       const uint32_t *insns,
+                                       unsigned insn_count)
+{
+   if (!p)
+      return 0;
+   nv_mme_emit_ram_addr_pass21(p, ram_addr);
+   return nv_mme_emit_ram_data_stream_pass21(p, insns, insn_count);
+}
+
+/**
+ * tick156: upload stub END programs through RAM_DATA path (vocab probe).
+ * Writes END (0x1) for indirect slots 0/1 at ram_addr and ram_addr+1.
+ * Still does not CALL — path C remains gated.
+ */
+static inline unsigned
+nv_mme_emit_ram_data_stub_end_probe_pass21(struct nv_push *p,
+                                           uint32_t ram_addr_base)
+{
+   uint32_t end_insn = NV_MME_INSN_END;
+   unsigned n = 0;
+
+   if (!p)
+      return 0;
+   n += nv_mme_emit_ram_upload_scaffold_pass21(p, ram_addr_base, &end_insn, 1);
+   n += nv_mme_emit_ram_upload_scaffold_pass21(p, ram_addr_base + 1u,
+                                               &end_insn, 1);
+   return n;
+}
+
+/**
+ * tick156 / pass21: channel prime = pass17 path + optional RAM_DATA stub probe.
+ * probe_ram_data=true emits END via 0x3884 for silicon capture; false = pass17
+ * only.  Always returns true (stubs still active; path C not enabled).
+ */
+static inline bool
+nv_mme_emit_channel_prime_upload_pass21(struct nv_push *p, bool probe_ram_data)
+{
+   if (!p)
+      return true;
+   nv_mme_emit_channel_prime_upload_pass17(p);
+   if (probe_ram_data)
+      (void)nv_mme_emit_ram_data_stub_end_probe_pass21(p, 0);
+   return true;
+}
+
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
 static inline bool
 nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
-   /* tick143/145/146: scratch + RAM; pass16/17 0x39e0 post-config */
-   return nv_mme_emit_channel_prime_upload_pass17(p);
+   /* tick143/145/146/156: scratch + RAM; pass16/17 0x39e0; pass21 no probe by default */
+   return nv_mme_emit_channel_prime_upload_pass21(p, false);
 }
 
 /**
