@@ -4630,6 +4630,65 @@ nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+
+      /* tick170 / pass23: pass17 host tail timed out — pass21 then pass23 (NVDEC parity) */
+      {
+         enum nv_host_sema_mode hs =
+            (ch->host_sema_mode_pref >= 0 &&
+             ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+               ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+               : NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+         if (sema_reset)
+            sema_cpu[0] = 0;
+         map = nv_channel_push_begin(ch, need + 40);
+         if (!map)
+            return -ENOMEM;
+         nv_push_init(&push, map, need + 40);
+         if (nv_g4_emit_nvenc_bringup_pass21(
+                &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+                width, height, sema_gpu_addr, sema_payload, NULL, true,
+                hs) == 0) {
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (r == 0) {
+               if (!ch->class_nvenc_bound)
+                  ch->class_nvenc_bound = ce;
+               if (class_used_out)
+                  *class_used_out = ce;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+         }
+         if (NV_PASS23_RE_SCAFFOLD && nv_pass23_explicit_emit_required()) {
+            if (sema_reset)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need + 40);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need + 40);
+            if (nv_g4_emit_nvenc_bringup_pass23(
+                   &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+                   width, height, sema_gpu_addr, sema_payload, NULL, true,
+                   hs) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (r == 0) {
+                  if (!ch->class_nvenc_bound)
+                     ch->class_nvenc_bound = ce;
+                  if (class_used_out)
+                     *class_used_out = ce;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
+      }
    }
    return last;
 }
