@@ -3943,6 +3943,125 @@ nv_nvdec_status_poll_snapshot(const void *status_cpu, uint32_t status_bytes,
    return 0;
 }
 
+/**
+ * tick153 / pass17: G4 NVDEC smoke + optional host sema pass17 tail (NVC36F
+ * slot-aware execute).  Engine sema (NV_NVDEC_SEMAPHORE_*) remains in frame_kick
+ * when sema_gpu set; host tail is belt-and-suspenders when engine sema unproven
+ * on silicon (mirrors G1/G2 host sema ladders).  host_sema_gpu 0 skips tail.
+ */
+static inline int
+nv_nvdec_emit_smoke_slice_pass17(struct nv_push *p, uint32_t class_nvdec,
+                                 const struct nv_nvdec_pic_setup *pic,
+                                 uint64_t engine_sema_gpu,
+                                 uint32_t engine_sema_payload,
+                                 volatile uint32_t *status_cpu,
+                                 uint64_t host_sema_gpu,
+                                 uint32_t host_sema_payload,
+                                 enum nv_host_sema_mode host_sema_mode)
+{
+   int r;
+
+   if (!p || !pic)
+      return -1;
+   r = nv_nvdec_emit_smoke_slice(p, class_nvdec, pic, engine_sema_gpu,
+                                 engine_sema_payload ? engine_sema_payload : 1u,
+                                 status_cpu);
+   if (r != 0)
+      return r;
+   if (host_sema_gpu) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+      nv_push_sema_release_mode_pass17(
+         p, host_sema_gpu,
+         host_sema_payload ? host_sema_payload : 1u,
+         host_sema_mode);
+   }
+   return 0;
+}
+
+/**
+ * tick153: G4 NVENC H.264 smoke + optional pass17 host sema tail (same policy).
+ */
+static inline int
+nv_nvenc_emit_h264_smoke_slice_pass17(struct nv_push *p, uint32_t class_nvenc,
+                                      uint64_t pic_setup_gpu,
+                                      uint64_t input_yuv_gpu,
+                                      uint64_t bitstream_gpu,
+                                      uint64_t status_gpu,
+                                      uint32_t width, uint32_t height,
+                                      uint64_t engine_sema_gpu,
+                                      uint32_t engine_sema_payload,
+                                      volatile uint32_t *status_cpu,
+                                      uint64_t host_sema_gpu,
+                                      uint32_t host_sema_payload,
+                                      enum nv_host_sema_mode host_sema_mode)
+{
+   int r;
+
+   r = nv_nvenc_emit_h264_smoke_slice(p, class_nvenc, pic_setup_gpu,
+                                      input_yuv_gpu, bitstream_gpu, status_gpu,
+                                      width, height, engine_sema_gpu,
+                                      engine_sema_payload, status_cpu);
+   if (r != 0)
+      return r;
+   if (host_sema_gpu && p) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+      nv_push_sema_release_mode_pass17(
+         p, host_sema_gpu,
+         host_sema_payload ? host_sema_payload : 1u,
+         host_sema_mode);
+   }
+   return 0;
+}
+
+/**
+ * tick153: G4 bring-up ladder — try engine sema only, then pass17 host sema
+ * tail on same sema slot (when engine sema may not complete but channel runs).
+ * emit_host_tail_first=false: engine sema in kick, then optional host tail.
+ * emit_host_tail_first=true: host sema in prep then engine sema (rare; silicon try).
+ *
+ * Returns 0 on emit success (caller waits sema_cpu externally).
+ */
+static inline int
+nv_g4_emit_nvdec_bringup_pass17(struct nv_push *p, uint32_t class_nvdec,
+                                const struct nv_nvdec_pic_setup *pic,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !pic || !sema_gpu)
+      return -1;
+   if (add_host_sema_tail)
+      return nv_nvdec_emit_smoke_slice_pass17(
+         p, class_nvdec, pic, sema_gpu, sema_payload, status_cpu,
+         sema_gpu, sema_payload, host_sema_mode);
+   return nv_nvdec_emit_smoke_slice(p, class_nvdec, pic, sema_gpu, sema_payload,
+                                    status_cpu);
+}
+
+static inline int
+nv_g4_emit_nvenc_bringup_pass17(struct nv_push *p, uint32_t class_nvenc,
+                                uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                                uint64_t bitstream_gpu, uint64_t status_gpu,
+                                uint32_t width, uint32_t height,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !pic_setup_gpu || !bitstream_gpu || !sema_gpu)
+      return -1;
+   if (add_host_sema_tail)
+      return nv_nvenc_emit_h264_smoke_slice_pass17(
+         p, class_nvenc, pic_setup_gpu, input_yuv_gpu, bitstream_gpu,
+         status_gpu, width, height, sema_gpu, sema_payload, status_cpu,
+         sema_gpu, sema_payload, host_sema_mode);
+   return nv_nvenc_emit_h264_smoke_slice(p, class_nvenc, pic_setup_gpu,
+                                         input_yuv_gpu, bitstream_gpu,
+                                         status_gpu, width, height, sema_gpu,
+                                         sema_payload, status_cpu);
+}
+
 #ifdef __cplusplus
 }
 #endif

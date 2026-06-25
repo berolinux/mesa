@@ -24,9 +24,26 @@
  * ISA still unvalidated → keep END stubs; host path A/B/C' for indirect draws.
  * Tick88: emit uses full POINTER+RAM+START_ADDRESS+CALL sequence (clc597.h).
  *
+ * pass20 (tick153): gpucomp has 100× 0x3884 RAM_DATA imm (compiler/SASS path)
+ * and 19× 0x34a8 / 35× 0x39e0 — confirms MME method vocabulary in compiler
+ * libs, not ordered microcode programs in static binary.  glcore RAM_DATA imm
+ * sits ~2064B from nearest func prologue (runtime fill, not rodata template).
+ * Indirect path C remains gated (is_stub_end_only) until live MME ISA capture.
+ *
  * Host-side shadow programs live in nv_3d_methods.h / callers; this header
  * owns instruction constants and multi-insn program tables.
  */
+
+/* pass20/tick153: provisional insn classes refined with gpucomp density notes */
+#define NV_MME_PASS20_RAM_DATA_METHOD_OFF        0x3884u
+#define NV_MME_PASS20_RAM_ADDR_METHOD_OFF        0x385cu
+#define NV_MME_PASS20_CFG_END_METHOD_OFF         0x3880u
+/* pass20: indirect scaffold method offs (draw vs indexed) — host shadow uses
+ * real 3D methods; these are only MME pseudo-emit targets in scaffolds */
+#define NV_MME_PASS20_SCAFFOLD_DRAW_METHOD       0x1610u
+#define NV_MME_PASS20_SCAFFOLD_DRAW_IDX_METHOD   0x1620u
+#define NV_MME_PASS20_SCAFFOLD_MERGE_DRAW        0x1618u
+#define NV_MME_PASS20_SCAFFOLD_MERGE_DRAW_IDX    0x1630u
 
 #ifndef NV_MME_H
 #define NV_MME_H
@@ -387,11 +404,14 @@ nv_mme_build_draw_indirect_loop_scaffold(struct nv_mme_program *prog,
    /* 0: state load (indirect buffer / CALL_MME_DATA draw_count into R0) */
    prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
                     NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
-   /* 1: loop body — method emit band (draw vs indexed draw) */
-   prog->insns[1] = nv_mme_insn_emit_method(indexed ? 0x1620u : 0x1610u, 0);
+   /* 1: loop body — method emit band (draw vs indexed draw; pass20 names) */
+   prog->insns[1] = nv_mme_insn_emit_method(
+      indexed ? NV_MME_PASS20_SCAFFOLD_DRAW_IDX_METHOD
+              : NV_MME_PASS20_SCAFFOLD_DRAW_METHOD, 0);
    /* 2: merge/call helper for secondary method burst */
    prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
-                    NV_MME_INSN_IMM16(indexed ? 0x1630u : 0x1618u) |
+                    NV_MME_INSN_IMM16(indexed ? NV_MME_PASS20_SCAFFOLD_MERGE_DRAW_IDX
+                                             : NV_MME_PASS20_SCAFFOLD_MERGE_DRAW) |
                     NV_MME_INSN_MERGE_CLASS;
    /* 3: decrement loop counter R0 */
    prog->insns[3] = nv_mme_insn_alu_add_imm(0, -1);

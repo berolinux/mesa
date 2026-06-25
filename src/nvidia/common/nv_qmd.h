@@ -57,6 +57,11 @@ extern "C" {
 #define NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE   428u
 #define NV_PASS20_INLINE_TO_PCAS_MEDIAN_CUDA     2204u
 #define NV_PASS20_INLINE_TO_PCAS_MEDIAN_VKSC     2724u
+/* pass20 gpucomp: 547s scan; no inline→PCAS median (sparse ordered sites);
+ * heavy RAM_DATA (0x3884) imm — compiler path, not pushbuffer template */
+#define NV_PASS20_GPUCOMP_RAM_DATA_IMM_CAPPED    100u
+#define NV_PASS20_GPUCOMP_MME_SC42_IMM_CAPPED    19u
+#define NV_PASS20_GPUCOMP_MME_POST_IMM_CAPPED    35u
 #define NV_PASS20_SEMA_IMM_FUNC_DIST_MIN         80u
 #define NV_PASS20_SEMA_IMM_FUNC_DIST_TYPICAL     848u
 #define NV_PASS20_MME_RAM_DATA_FUNC_DIST_GLCORE  2064u

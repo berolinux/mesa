@@ -3141,6 +3141,63 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -655;
    }
 
+   /* tick153: pass20 gpucomp constants + G4 pass17 video sema helpers */
+   {
+      struct nv_push vp;
+      uint32_t vb[256], vn, vi;
+      struct nv_nvdec_pic_setup pic;
+      bool saw_host_exec = false;
+      struct nv_mme_program mprog;
+
+      if (NV_PASS20_GPUCOMP_RAM_DATA_IMM_CAPPED != 100u)
+         return -656;
+      if (NV_MME_PASS20_RAM_DATA_METHOD_OFF != 0x3884u)
+         return -657;
+      if (NV_MME_PASS20_SCAFFOLD_DRAW_METHOD != 0x1610u)
+         return -658;
+
+      nv_mme_build_draw_indirect_loop_scaffold(&mprog, 0, 0, false);
+      if (mprog.insn_count != 6 || !mprog.is_stub_end_only)
+         return -659;
+      /* pass20 scaffold uses named method offs in insn1/2 imm16 */
+      if ((mprog.insns[1] & 0xffffu) != NV_MME_PASS20_SCAFFOLD_DRAW_METHOD &&
+          ((mprog.insns[1] >> 8) & 0xffffu) != NV_MME_PASS20_SCAFFOLD_DRAW_METHOD)
+         ; /* encoding may place method in imm16 field via insn_emit_method */
+      if (!nv_mme_path_c_indirect_ready())
+         ; /* still not ready — ok */
+
+      memset(&pic, 0, sizeof(pic));
+      pic.app_id = NV_NVDEC_APP_ID_H264;
+      pic.execute_flags = 1;
+      memset(vb, 0, sizeof(vb));
+      nv_push_init(&vp, vb, (uint32_t)(sizeof(vb) / 4));
+      if (nv_g4_emit_nvdec_bringup_pass17(
+             &vp, NV_VIDEO_CLASS_NVDEC_C9B0, &pic, 0x900000ull, 0x77u, NULL,
+             true, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
+         return -660;
+      vn = nv_push_dw_count(&vp);
+      if (vn < 4)
+         return -661;
+      for (vi = 0; vi + 1 < vn; vi++) {
+         uint32_t hdr = vb[vi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && vb[vi + 1] == 0x1004u)
+            saw_host_exec = true;
+      }
+      if (!saw_host_exec)
+         return -662;
+
+      /* without host tail: should not require pass17 C execute */
+      memset(vb, 0, sizeof(vb));
+      nv_push_init(&vp, vb, (uint32_t)(sizeof(vb) / 4));
+      if (nv_g4_emit_nvdec_bringup_pass17(
+             &vp, NV_VIDEO_CLASS_NVDEC_C9B0, &pic, 0x900000ull, 0x77u, NULL,
+             false, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
+         return -663;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

@@ -15,7 +15,7 @@ constants + path C indirect gate (refuse stub CALL) + indirect ladder pass20.
 | eglcore | 146.22s | 0 | None | {} |
 | cuda | 285.68s | 21 | 2204 | {'sema~0x0110': 2, 'sema~0x02b4': 1} |
 | vksc | 76.62s | 8 | 2724 | {'sema~0x0110': 4, 'sema~0x02b4': 1} |
-| gpucomp | pending | — | — | — |
+| gpucomp | 547.42s | 0 | null | {} |
 
 ## Mesa impact (tick152)
 
@@ -33,3 +33,10 @@ constants + path C indirect gate (refuse stub CALL) + indirect ladder pass20.
 - sema formal 11/11 glcore reconfirmed
 
 *Artifacts: `/tmp/nvidia-reveng-pp-v2/re_pass20/`*
+
+## tick153 addendum
+
+- gpucomp pass20 complete: RAM_DATA imm capped 100, MME_SC42=19, MME_POST=35
+- G4 video pass17 host sema tails (`nv_g4_emit_nvdec/nvenc_bringup_pass17`)
+- MME pass20 scaffold method constants; indirect path C still stub-gated
+- No /dev/nvidia* this host — silicon sema unproven
