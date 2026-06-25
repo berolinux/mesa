@@ -669,6 +669,38 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -318;
    }
 
+   /* tick115: full draw path with VB setup encodes vertex stream methods */
+   {
+      uint64_t zt_gpu = 0x510000ull;
+      uint64_t vb_gpu = 0x520000ull;
+      uint32_t buf_vb[224];
+      uint32_t nvb, ivb;
+      bool saw_vs_loc = false, saw_vattr = false;
+
+      memset(buf_vb, 0, sizeof(buf_vb));
+      nv_push_init(&p, buf_vb, (uint32_t)(sizeof(buf_vb) / 4));
+      nv_3d_emit_g3_clear_draw_full_sema(
+         &p, NV_SMOKE_G3_CLASS_PLACEHOLDER, ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+         NV_SMOKE_G3_CT_H_DEFAULT, NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+         color, zt_gpu, NVC597_SET_ZT_FORMAT_V_Z24S8, vb_gpu, 36, 0, 0, 0,
+         sema_gpu, sema_payload, true);
+      nvb = nv_push_dw_count(&p);
+      if (nvb < 24)
+         return -319;
+      for (ivb = 0; ivb + 1 < nvb; ivb++) {
+         uint32_t hdr = buf_vb[ivb];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_VERTEX_STREAM_A_LOCATION_B(0))
+            saw_vs_loc = true;
+         if (method == NVC597_SET_VERTEX_ATTRIBUTE_A(0))
+            saw_vattr = true;
+      }
+      if (!saw_vs_loc || !saw_vattr)
+         return -320;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

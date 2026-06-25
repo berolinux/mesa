@@ -695,6 +695,47 @@ nv_channel_g3_clear_rt_sema_submit(struct nv_channel *ch,
                                    uint64_t wait_timeout_ns,
                                    bool check_notifier);
 
+/**
+ * tick115: G3 RT/ZT clear + optional VB + draw sema (vertex stream setup).
+ * vb_gpu_addr 0: falls back to nv_channel_g3_clear_rt_sema_submit / clear sema.
+ */
+int
+nv_channel_g3_draw_rt_sema_submit(struct nv_channel *ch,
+                                  uint32_t class_3d,
+                                  uint64_t ct_gpu_addr,
+                                  uint32_t ct_w, uint32_t ct_h,
+                                  uint32_t ct_format,
+                                  const uint32_t color_ui[4],
+                                  uint64_t zt_gpu_addr,
+                                  uint32_t zt_format,
+                                  uint64_t vb_gpu_addr,
+                                  uint32_t vb_size_bytes,
+                                  uint64_t sema_gpu_addr,
+                                  volatile uint32_t *sema_cpu,
+                                  uint32_t sema_payload,
+                                  bool sema_reset,
+                                  uint64_t wait_timeout_ns,
+                                  bool check_notifier);
+
+/** tick115: see nv_video_methods.h nv_nvdec_pic_setup (opaque in header). */
+struct nv_nvdec_pic_setup;
+
+/**
+ * tick115: NVDEC pic_setup + sema + EXECUTE submit/wait (video vertical slice).
+ * class_nvdec 0 uses channel class_nvdec_bound / resolve ladder.
+ * pic may be NULL (EXECUTE-only smoke). sema via NVDEC sema methods then wait.
+ */
+int
+nv_channel_nvdec_frame_sema_submit(struct nv_channel *ch,
+                                   uint32_t class_nvdec,
+                                   const struct nv_nvdec_pic_setup *pic,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier);
+
 #ifdef __cplusplus
 }
 #endif

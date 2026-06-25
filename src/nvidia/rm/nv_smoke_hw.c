@@ -8,6 +8,8 @@
 #include "nv_device_info.h"
 #include "nv_rm.h"
 #include "nv_shader.h"
+#include "nv_3d_methods.h"
+#include "nv_video_methods.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -350,6 +352,26 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
          sc.zt_gpu = nv_rm_bo_gpu_offset(sc.zt_bo);
    }
 
+   /* tick115: G3 smoke VB (3 verts × 3 floats) + optional NVDEC pic_setup BO */
+   sc.vb_bo = smoke_alloc_mapped_bo(rm, 4096, 256, false, NULL);
+   if (sc.vb_bo) {
+      sc.vb_cpu = nv_rm_bo_map(sc.vb_bo);
+      sc.vb_gpu = nv_rm_bo_gpu_offset(sc.vb_bo);
+      if (sc.vb_cpu) {
+         float verts[9];
+         nv_3d_g3_smoke_triangle_verts_f32(verts);
+         memcpy(sc.vb_cpu, verts, sizeof(verts));
+      }
+   }
+   sc.vid_ps_bo = smoke_alloc_mapped_bo(rm, 4096, 256, false, NULL);
+   if (sc.vid_ps_bo) {
+      sc.vid_ps_cpu = nv_rm_bo_map(sc.vid_ps_bo);
+      sc.vid_ps_gpu = nv_rm_bo_gpu_offset(sc.vid_ps_bo);
+      if (sc.vid_ps_cpu)
+         nv_nvdec_pic_setup_fill_h264_intra_smoke((uint32_t *)sc.vid_ps_cpu,
+                                                  256, 4, 4, 0, 0);
+   }
+
    *out = sc;
    return 0;
 
@@ -368,6 +390,16 @@ nv_smoke_hw_scratch_destroy(struct nv_smoke_hw_scratch *sc)
    if (!sc->owned) {
       scratch_zero(sc);
       return;
+   }
+   if (sc->vid_ps_bo) {
+      if (sc->vid_ps_cpu)
+         nv_rm_bo_unmap(sc->vid_ps_bo);
+      nv_rm_bo_free(sc->vid_ps_bo);
+   }
+   if (sc->vb_bo) {
+      if (sc->vb_cpu)
+         nv_rm_bo_unmap(sc->vb_bo);
+      nv_rm_bo_free(sc->vb_bo);
    }
    if (sc->zt_bo)
       nv_rm_bo_free(sc->zt_bo);
@@ -808,8 +840,13 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (sc->sema_cpu)
             sc->sema_cpu[0] = 0;
          nv_channel_notifier_reset(ch);
-         /* emit_draw=false: no shaders; prefer CT+ZT RT clear when ZT present */
-         if (sc->zt_gpu)
+         /* tick115: prefer VB+RT draw when VB ready; else CT+ZT clear; else colour */
+         if (sc->vb_gpu)
+            res.g3_submit_rc = nv_channel_g3_draw_rt_sema_submit(
+               ch, 0, sc->ct_gpu, 64, 64, 0, NULL, sc->zt_gpu, 0,
+               sc->vb_gpu, 36, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+               true, to, check_notifier);
+         else if (sc->zt_gpu)
             res.g3_submit_rc = nv_channel_g3_clear_rt_sema_submit(
                ch, 0, sc->ct_gpu, 64, 64, 0, NULL, sc->zt_gpu, 0,
                1.0f, 0, sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true,
@@ -823,6 +860,20 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
          if (res.g3_submit_rc == 0) {
             res.slices_ok |= NV_SMOKE_HW_G3;
          } else if (res.g3_submit_rc != 0 && res.g3_submit_rc != -EAGAIN) {
+            /* tick115: optional NVDEC sema smoke (non-fatal; does not set G3 ok) */
+            if (sc->vid_ps_gpu && sc->sema_gpu) {
+               struct nv_nvdec_pic_setup vpic;
+               memset(&vpic, 0, sizeof(vpic));
+               vpic.app_id = NV_NVDEC_APP_ID_H264;
+               vpic.pic_setup_gpu = sc->vid_ps_gpu;
+               vpic.execute_flags = 1;
+               if (sc->sema_cpu)
+                  sc->sema_cpu[0] = 0;
+               nv_channel_notifier_reset(ch);
+               (void)nv_channel_nvdec_frame_sema_submit(
+                  ch, 0, &vpic, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+                  true, to, check_notifier);
+            }
             /* Secondary: 3D sema-only (isolates clear methods vs sema/class) */
             if (sc->sema_cpu)
                sc->sema_cpu[0] = 0;

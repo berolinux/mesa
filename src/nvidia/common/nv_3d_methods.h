@@ -3360,6 +3360,158 @@ nv_3d_emit_g3_clear_draw_sema_zt(struct nv_push *p, uint32_t class_3d,
                                              sema_payload);
 }
 
+/**
+ * tick115: G3 smoke vertex buffer — stream 0 with position (R32G32B32_FLOAT)
+ * at offset 0, stride 12.  vb_gpu_addr points at 3×float3 triangle verts.
+ * component_format 0x2e is a common R32G32B32_FLOAT code (refine on silicon).
+ */
+#ifndef NV_3D_G3_SMOKE_VTX_FMT_R32G32B32_FLOAT
+#define NV_3D_G3_SMOKE_VTX_FMT_R32G32B32_FLOAT  0x2eu
+#endif
+
+static inline void
+nv_3d_emit_g3_smoke_vertex_setup(struct nv_push *p, uint64_t vb_gpu_addr,
+                                 uint32_t vb_size_bytes)
+{
+   if (!p || !vb_gpu_addr)
+      return;
+   if (!vb_size_bytes)
+      vb_size_bytes = 36; /* 3 verts × 12 bytes */
+   nv_3d_set_vertex_stream(p, 0, vb_gpu_addr, vb_size_bytes, 12);
+   nv_3d_set_vertex_attribute(p, 0, 0, 0, NV_3D_G3_SMOKE_VTX_FMT_R32G32B32_FLOAT,
+                              true);
+   /* Disable other attribs 1..7 for clean state */
+   {
+      unsigned i;
+      for (i = 1; i < 8; i++)
+         nv_3d_set_vertex_attribute(p, i, 0, 0, 0, false);
+   }
+}
+
+/**
+ * tick115: optional VS/PS program region + pipeline shader bind for G3 smoke.
+ * program_region_gpu: base of SPH/program region (SET_PROGRAM_REGION_*).
+ * vs_gpu/ps_gpu: shader entry VAs (0 = disable that stage).
+ * Without real SASS this only exercises method plumbing; draw may still fault on HW.
+ */
+static inline void
+nv_3d_emit_g3_smoke_shader_setup(struct nv_push *p,
+                                 uint64_t program_region_gpu,
+                                 uint64_t vs_gpu, uint32_t vs_regs,
+                                 uint64_t ps_gpu, uint32_t ps_regs)
+{
+   if (!p)
+      return;
+   if (program_region_gpu) {
+      nv_push_method(p, NVC597_SET_PROGRAM_REGION_A,
+                     (uint32_t)(program_region_gpu >> 32) & 0xff);
+      nv_push_method(p, NVC597_SET_PROGRAM_REGION_B,
+                     (uint32_t)(program_region_gpu & 0xffffffffu));
+   }
+   if (vs_gpu) {
+      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX,
+                                 NVC597_SET_PIPELINE_SHADER_TYPE_VERTEX,
+                                 vs_gpu, vs_regs ? vs_regs : 16, 0);
+   } else {
+      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_VERTEX);
+   }
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS_INIT);
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS);
+   nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_GEOMETRY);
+   if (ps_gpu) {
+      nv_3d_load_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL,
+                                 NVC597_SET_PIPELINE_SHADER_TYPE_PIXEL,
+                                 ps_gpu, ps_regs ? ps_regs : 8, 0);
+   } else {
+      nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_PIXEL);
+   }
+}
+
+/**
+ * tick115: full G3 RT + optional VB/shaders + clear/draw/sema.
+ * vb_gpu_addr 0 skips vertex setup (fixed-function tri may still not render).
+ * vs_gpu/ps_gpu 0 skips shader bind (disable stages).
+ */
+static inline void
+nv_3d_emit_g3_clear_draw_full_sema(struct nv_push *p, uint32_t class_3d,
+                                   uint64_t ct_gpu_addr, uint32_t ct_w,
+                                   uint32_t ct_h, uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t zt_gpu_addr, uint32_t zt_format,
+                                   uint64_t vb_gpu_addr, uint32_t vb_size,
+                                   uint64_t program_region_gpu,
+                                   uint64_t vs_gpu, uint64_t ps_gpu,
+                                   uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                   bool wfi_before_draw)
+{
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   /* CT/ZT/clear/draw via ZT path; inject VB/shader before draw by splitting */
+   {
+      uint32_t c[4];
+      uint32_t w = ct_w ? ct_w : 1;
+      uint32_t h = ct_h ? ct_h : 1;
+      uint32_t zs = 0x100u;
+      uint32_t ztf = zt_format ? zt_format : NVC597_SET_ZT_FORMAT_V_Z24S8;
+
+      if (ct_gpu_addr)
+         nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format,
+                                          false, 0);
+      if (zt_gpu_addr) {
+         nv_3d_emit_g3_bind_zeta_target(p, zt_gpu_addr, w, h, ztf, 0);
+         if (ztf == NVC597_SET_ZT_FORMAT_V_Z24S8 ||
+             ztf == NVC597_SET_ZT_FORMAT_V_S8Z24 ||
+             ztf == NVC597_SET_ZT_FORMAT_V_S8 ||
+             ztf == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
+            zs = 0x300u;
+      } else if (ct_gpu_addr) {
+         nv_3d_set_surface_clip(p, 0, 0, w, h);
+      }
+
+      if (color_ui)
+         memcpy(c, color_ui, sizeof(c));
+      else
+         memset(c, 0, sizeof(c));
+      nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
+      if (zt_gpu_addr)
+         nv_3d_emit_clear_surface(p, zs, NULL, 1.0f, 0);
+
+      if (vb_gpu_addr || vs_gpu || ps_gpu || program_region_gpu)
+         nv_3d_emit_g3_smoke_shader_setup(p, program_region_gpu, vs_gpu, 16,
+                                          ps_gpu, 8);
+      if (vb_gpu_addr)
+         nv_3d_emit_g3_smoke_vertex_setup(p, vb_gpu_addr, vb_size);
+
+      if (wfi_before_draw)
+         nv_push_wfi(p);
+
+      nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+      nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+      if (sema_gpu_addr && sema_payload)
+         nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                                sema_payload);
+      else
+         nv_3d_emit_draw_vertex_array(p, 0, 3);
+   }
+}
+
+/** tick115: host-side default smoke triangle (NDC-ish positions in float). */
+static inline void
+nv_3d_g3_smoke_triangle_verts_f32(float out_verts9[9])
+{
+   if (!out_verts9)
+      return;
+   /* simple upright triangle in clip space */
+   out_verts9[0] = 0.0f;  out_verts9[1] =  0.75f; out_verts9[2] = 0.0f;
+   out_verts9[3] = -0.75f; out_verts9[4] = -0.75f; out_verts9[5] = 0.0f;
+   out_verts9[6] =  0.75f; out_verts9[7] = -0.75f; out_verts9[8] = 0.0f;
+}
+
 #ifdef __cplusplus
 }
 #endif
