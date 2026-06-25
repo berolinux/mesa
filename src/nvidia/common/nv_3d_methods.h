@@ -1541,6 +1541,14 @@ nv_3d_emit_g3_pipeline_bind_smoke(struct nv_push *p,
    nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_GEOMETRY);
    nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS_INIT);
    nv_3d_disable_pipeline_shader(p, NV_3D_PIPE_STAGE_TESS);
+
+   /* tick133: post-bind shader I/D/C invalidate (inline; helper is later in hdr) */
+   if (vs_addr || fs_addr) {
+      uint32_t inv = NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
+   }
 }
 
 /** Select constant buffer for subsequent BIND_GROUP_CONSTANT_BUFFER. */
@@ -3904,6 +3912,56 @@ nv_3d_emit_g3_shader_draw_sema(struct nv_push *p, uint32_t class_3d,
 
    if (wfi_before_draw)
       nv_push_wfi(p);
+
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                             sema_payload);
+   else
+      nv_3d_emit_draw_vertex_array(p, 0, 3);
+}
+
+/**
+ * tick133: G3 fixed-func + optional shader pipeline + clear/draw/sema one-shot.
+ * Prefer fixed-func (vs/fs = 0) for first silicon bring-up; pass real SPH VAs
+ * when upload_graphics_smoke has completed on the channel.
+ * Placed at end of header so blit/fixed_func helpers are already defined.
+ */
+static inline void
+nv_3d_emit_g3_bringup_slice(struct nv_push *p, uint32_t class_3d,
+                            uint64_t ct_gpu_addr, uint32_t ct_w, uint32_t ct_h,
+                            uint32_t ct_format, const uint32_t color_ui[4],
+                            uint64_t program_region_gpu,
+                            uint64_t vs_gpu, uint32_t vs_regs,
+                            uint64_t ps_gpu, uint32_t ps_regs,
+                            uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   uint32_t c[4];
+   uint32_t w = ct_w ? ct_w : 1;
+   uint32_t h = ct_h ? ct_h : 1;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format, false, 0);
+
+   nv_3d_emit_g3_viewport_scissor_full(p, w, h, true);
+   nv_3d_emit_viewport_z_clip_range(p, true);
+   nv_3d_emit_g3_fixed_func_smoke(p, w, h, false);
+
+   if (program_region_gpu || vs_gpu || ps_gpu)
+      nv_3d_emit_g3_pipeline_bind_smoke(p, 0, 0, program_region_gpu,
+                                        vs_gpu, vs_regs, ps_gpu, ps_regs);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
 
    nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
    nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);

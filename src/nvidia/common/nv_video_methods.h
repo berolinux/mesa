@@ -3826,6 +3826,95 @@ nv_nvenc_emit_pic_setup_simple(struct nv_push *p, uint32_t app_id,
    }
 }
 
+/**
+ * tick133: NVENC vertical-slice bring-up — H.264 smoke frame_setup + encode emit.
+ * Caller supplies GPU VAs for pic_setup / input / bitstream / status BOs and
+ * host sema; pic_setup host buffer should be pre-filled via
+ * nv_nvenc_pic_setup_init_minimal when the BO is CPU-mapped.
+ * Returns 0 on success, -1 on bad args.
+ */
+static inline int
+nv_nvenc_emit_h264_smoke_slice(struct nv_push *p, uint32_t class_nvenc,
+                               uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                               uint64_t bitstream_gpu, uint64_t status_gpu,
+                               uint32_t width, uint32_t height,
+                               uint64_t sema_gpu, uint32_t sema_payload,
+                               volatile uint32_t *status_cpu)
+{
+   struct nv_nvenc_frame_setup fs;
+
+   if (!p || !pic_setup_gpu || !bitstream_gpu)
+      return -1;
+   nv_nvenc_frame_setup_init_h264_smoke(&fs, pic_setup_gpu, input_yuv_gpu,
+                                        bitstream_gpu,
+                                        width ? width : 64,
+                                        height ? height : 64);
+   fs.status_gpu_addr = status_gpu;
+   fs.emit_set_out_methods = true;
+   nv_nvenc_frame_setup_ensure_control_defaults(&fs);
+   return nv_nvenc_emit_encode_frame(p, class_nvenc, &fs, sema_gpu,
+                                     sema_payload, status_cpu);
+}
+
+/**
+ * tick133: NVDEC vertical-slice bring-up — minimal pic setup kick + sema.
+ * sema is recommended so host can poll before reading nvdec_status_s.
+ * status_cpu optional host mirror for sema reset path.
+ * Returns 0 on success, -1 on bad args.
+ */
+static inline int
+nv_nvdec_emit_smoke_slice(struct nv_push *p, uint32_t class_nvdec,
+                          const struct nv_nvdec_pic_setup *pic,
+                          uint64_t sema_gpu, uint32_t sema_payload,
+                          volatile uint32_t *status_cpu)
+{
+   if (!p || !pic)
+      return -1;
+   nv_nvdec_emit_frame_kick(p, class_nvdec, pic, sema_gpu, sema_payload,
+                            status_cpu);
+   return 0;
+}
+
+/**
+ * tick133: after sema observed, parse NVENC status BO into snapshot.
+ * status_cpu must point at least NV_NVENC_STATUS_BO_MIN_BYTES mapped bytes.
+ * Returns 0 on success, -1 if status missing or error_status non-zero.
+ */
+static inline int
+nv_nvenc_status_poll_snapshot(const void *status_cpu, uint32_t status_bytes,
+                              uint32_t app_id,
+                              struct nv_nvenc_status_snapshot *out)
+{
+   if (!status_cpu || !out)
+      return -1;
+   if (status_bytes < NV_NVENC_STATUS_BO_MIN_BYTES)
+      status_bytes = NV_NVENC_STATUS_BO_MIN_BYTES;
+   if (nv_nvenc_status_read(status_cpu, status_bytes, app_id, out) != 0)
+      return -1;
+   if (out->error_status != 0 || out->hw_error)
+      return -1;
+   return 0;
+}
+
+/**
+ * tick133: after sema observed, parse NVDEC status BO into snapshot.
+ * Returns 0 on success, -1 if status missing or mbs_error / error fields set.
+ */
+static inline int
+nv_nvdec_status_poll_snapshot(const void *status_cpu, uint32_t status_bytes,
+                              struct nv_nvdec_status_snapshot *out)
+{
+   if (!status_cpu || !out)
+      return -1;
+   if (status_bytes < NV_NVDEC_STATUS_BO_MIN_BYTES)
+      status_bytes = NV_NVDEC_STATUS_BO_MIN_BYTES;
+   if (nv_nvdec_status_read(status_cpu, status_bytes, out) != 0)
+      return -1;
+   if (out->error_status != 0 || out->mbs_in_error != 0 || out->hw_error)
+      return -1;
+   return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -976,6 +976,39 @@ nv_compute_emit_invalidate_caches(struct nv_push *p)
 }
 
 /**
+ * tick133: compute channel bring-up — SET_OBJECT + SPA/CWD + method invalidates
+ * + optional LMEM window.  Call before first QMD/PCAS launch on a fresh channel.
+ *
+ * spa_version: 0 uses 0x53 (Ampere-era default, same as G3 pipeline bind).
+ * lmem_gpu_addr: 0 skips SET_SHADER_LOCAL_MEMORY_*.
+ * local_mem_low_bytes: per-thread low partition (0 = 256 B smoke default).
+ */
+static inline void
+nv_compute_emit_g2_bringup_init(struct nv_push *p, uint32_t class_compute,
+                                uint8_t spa_version, uint32_t cwd_slot_count,
+                                uint64_t lmem_gpu_addr,
+                                uint32_t local_mem_low_bytes)
+{
+   uint8_t spa = spa_version ? spa_version : (uint8_t)0x53u;
+   uint32_t low = local_mem_low_bytes ? local_mem_low_bytes : 256u;
+
+   if (!p)
+      return;
+   nv_compute_emit_init_state(p, class_compute, spa, cwd_slot_count);
+   nv_compute_emit_invalidate_caches(p);
+   if (lmem_gpu_addr) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+      nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_A,
+                     (uint32_t)((lmem_gpu_addr >> 32) & 0xffu));
+      nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_B,
+                     (uint32_t)(lmem_gpu_addr & 0xffffffffu));
+      nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A, low);
+      nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B, 0);
+      nv_push_method(p, NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_C, 0);
+   }
+}
+
+/**
  * Attach QMD sema release0 to a desc (one-word payload when grid completes).
  * Returns sema_payload for CPU wait via nvidia_sema_wait_geq / nv_fence_wait.
  */
@@ -1135,6 +1168,45 @@ nv_qmd_desc_init_smoke_grid(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
       d->cta_y = 1024;
    if (d->cta_z > 64)
       d->cta_z = 64;
+}
+
+/**
+ * tick133: full G2 smoke slice — bringup init + QMD encode (G2 defaults) +
+ * materialize + PCAS launch.  program_gpu_addr may be 0 for encode-only tests.
+ * Must follow nv_qmd_desc_init_smoke_grid / apply_g2_bringup_defaults in this header.
+ * Returns 0 on success, -1 on bad args.
+ */
+static inline int
+nv_compute_emit_g2_smoke_slice(struct nv_push *p, uint32_t class_compute,
+                               uint64_t program_gpu_addr,
+                               uint32_t register_count, uint8_t sass_version,
+                               uint64_t qmd_gpu_addr, void *qmd_host,
+                               uint64_t lmem_gpu_addr,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               uint32_t grid_x, uint32_t cta_x)
+{
+   struct nv_qmd_desc d;
+   uint32_t qmd[NV_QMD_DWORDS];
+
+   if (!p)
+      return -1;
+
+   nv_compute_emit_g2_bringup_init(p, class_compute, 0, 0, lmem_gpu_addr, 256u);
+
+   nv_qmd_desc_init_smoke_grid(&d, program_gpu_addr, register_count,
+                               sass_version,
+                               grid_x ? grid_x : 1, 1, 1,
+                               cta_x ? cta_x : 1, 1, 1,
+                               0, 0);
+   nv_qmd_desc_apply_g2_bringup_defaults(&d, sema_gpu_addr, sema_payload);
+   nv_qmd_materialize(&d, qmd, qmd_host);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
+   return 0;
 }
 
 /** Encode smoke QMD with optional non-1x1x1 grid; returns 0 on success. */

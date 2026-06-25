@@ -1603,6 +1603,99 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -438;
    }
 
+   /* tick133: G2/G3 bringup slices + video status poll + NVENC smoke slice */
+   {
+      uint32_t g2buf[200], g3buf[200], vbuf[180];
+      uint32_t n2, n3, nv, i;
+      bool saw_inv = false, saw_pcas = false, saw_clear = false;
+      bool saw_enc_app = false, saw_enc_exec = false;
+      struct nv_nvenc_status_snapshot ens;
+      struct nv_nvdec_status_snapshot dns;
+      uint8_t enc_st[NV_NVENC_STATUS_BO_MIN_BYTES];
+      uint8_t dec_st[NV_NVDEC_STATUS_BO_MIN_BYTES];
+      uint32_t *edw = (uint32_t *)enc_st;
+      uint32_t *ddw = (uint32_t *)dec_st;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      if (nv_compute_emit_g2_smoke_slice(&p, 0xc5c0u, 0x900000ull, 16, 0x53,
+                                         0xa00000ull, NULL, 0xb00000ull,
+                                         0xc00000ull, 7u, 2u, 32u) != 0)
+         return -439;
+      n2 = nv_push_dw_count(&p);
+      if (n2 < 20)
+         return -440;
+      for (i = 0; i + 1 < n2; i++) {
+         uint32_t hdr = g2buf[i];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_INVALIDATE_SHADER_CACHES)
+            saw_inv = true;
+         if (method == NVC3C0_SEND_PCAS_A)
+            saw_pcas = true;
+      }
+      if (!saw_inv || !saw_pcas)
+         return -441;
+
+      memset(g3buf, 0, sizeof(g3buf));
+      nv_push_init(&p, g3buf, (uint32_t)(sizeof(g3buf) / 4));
+      nv_3d_emit_g3_bringup_slice(&p, 0xc597u, 0x800000ull, 32, 32, 0xcf,
+                                  NULL, 0, 0, 0, 0, 0, 0xd00000ull, 9u);
+      n3 = nv_push_dw_count(&p);
+      if (n3 < 16)
+         return -442;
+      for (i = 0; i + 1 < n3; i++) {
+         uint32_t hdr = g3buf[i];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_CLEAR_SURFACE || method == 0x19d0u)
+            saw_clear = true;
+      }
+      if (!saw_clear)
+         return -443;
+
+      memset(vbuf, 0, sizeof(vbuf));
+      nv_push_init(&p, vbuf, (uint32_t)(sizeof(vbuf) / 4));
+      if (nv_nvenc_emit_h264_smoke_slice(&p, 0xc8b7u, 0x710000ull, 0x800000ull,
+                                         0x810000ull, 0x300000ull, 64, 64,
+                                         0xe00000ull, 11u, NULL) != 0)
+         return -444;
+      nv = nv_push_dw_count(&p);
+      for (i = 0; i + 1 < nv; i++) {
+         uint32_t hdr = vbuf[i];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVENC_SET_APPLICATION_ID)
+            saw_enc_app = true;
+         if (method == NV_NVENC_EXECUTE)
+            saw_enc_exec = true;
+      }
+      if (!saw_enc_app || !saw_enc_exec)
+         return -445;
+
+      memset(enc_st, 0, sizeof(enc_st));
+      edw[NV_NVENC_STATUS_DW_PICTURE_INDEX] = 1;
+      edw[NV_NVENC_STATUS_DW_ERROR_PACKED] = 0;
+      edw[NV_NVENC_STATUS_DW_TOTAL_BIT_COUNT] = 1024;
+      if (nv_nvenc_status_poll_snapshot(enc_st, sizeof(enc_st),
+                                        NV_NVENC_APP_ID_H264, &ens) != 0)
+         return -446;
+      if (ens.total_bit_count != 1024)
+         return -447;
+
+      memset(dec_st, 0, sizeof(dec_st));
+      ddw[NV_NVDEC_STATUS_DW_MBS_ERR] = 0;
+      ddw[NV_NVDEC_STATUS_DW_ERROR_STATUS] = 0;
+      if (nv_nvdec_status_poll_snapshot(dec_st, sizeof(dec_st), &dns) != 0)
+         return -448;
+      ddw[NV_NVDEC_STATUS_DW_ERROR_STATUS] = 1;
+      if (nv_nvdec_status_poll_snapshot(dec_st, sizeof(dec_st), &dns) == 0)
+         return -449; /* must fail on hw_error */
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
