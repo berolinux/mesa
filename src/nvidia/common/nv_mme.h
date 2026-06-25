@@ -95,6 +95,16 @@ extern "C" {
 #define NV_MME_PASS5_HOT_MACRO_INDEX         28u
 
 /*
+ * pass16 RE: 0x39e0 is MME-adjacent post-config (follows 0x3800 in glcore imm
+ * ngrams), not SET_MME_SHADOW_SCRATCH(i) — off >= 0x3800 is outside the
+ * 0x3400..0x37fc scratch window.  Emit as a direct 3D method imm=0 after
+ * shadow-scratch init / RAM prime to probe channel completeness on silicon;
+ * never required for smoke success and never substitutes for RAM_DATA.
+ */
+#define NV_MME_PASS16_POST_CONFIG_METHOD_OFF NV_MME_PASS5_HOT_METHOD_OFF /* 0x39e0 */
+#define NV_MME_PASS16_NEAR_MME_METHOD_OFF    0x3998u /* pass15 gap; lower priority */
+
+/*
  * tick100: provisional MME instruction bitfields (Maxwell/Pascal+ class family).
  * Not validated against silicon; used only to document RE progress.  Production
  * paths must keep is_stub_end_only=true until opcode table is proven.
@@ -793,16 +803,42 @@ nv_mme_emit_shadow_scratch_init_range(struct nv_push *p, unsigned count)
       nv_mme_emit_set_shadow_scratch(p, idx_39e0, 0);
 }
 
+/**
+ * tick145 / pass16: emit method 0x39e0 with imm 0 after MME scratch/RAM setup.
+ * Documents RE-observed post-MME config probe; safe no-op imm on unknown state.
+ */
+static inline void
+nv_mme_emit_pass16_post_config_probe(struct nv_push *p)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_push_method(p, NV_MME_PASS16_POST_CONFIG_METHOD_OFF, 0);
+}
+
+/**
+ * tick145: full MME channel prime — scratch init, RAM/table upload, pass16
+ * post-config probe (0x39e0).  Still no CALL_MME while stubs remain.
+ */
+static inline bool
+nv_mme_emit_channel_prime_upload_pass16(struct nv_push *p)
+{
+   if (!p)
+      return true;
+   nv_mme_emit_shadow_scratch_init_range(p, 16);
+   nv_mme_emit_upload_full_table_only(p);
+   nv_mme_emit_pass16_post_config_probe(p);
+   return true;
+}
+
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
 static inline bool
 nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
-   /* tick143: clear 16 scratch slots + pass14/15 hot indices before RAM upload */
-   nv_mme_emit_shadow_scratch_init_range(p, 16);
-   nv_mme_emit_upload_full_table_only(p);
-   return true;
+   /* tick143/145: scratch + RAM; pass16 adds 0x39e0 post-config via pass16 helper */
+   return nv_mme_emit_channel_prime_upload_pass16(p);
 }
 
 /**

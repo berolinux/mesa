@@ -256,6 +256,54 @@ nv_qmd_get(const uint32_t *qmd, unsigned hi, unsigned lo)
    return nv_qmd_mw_get(qmd, NV_QMD_DWORDS, hi, lo);
 }
 
+/**
+ * tick144 / pass15: init QMD desc with PCAS-friendly defaults + full invalidate
+ * sextet (matches channel_prep invalidate intent for compute dispatches).
+ * program_addr/offset and CTA/grid must still be set by caller.
+ */
+static inline void
+nv_qmd_desc_init_pass15_defaults(struct nv_qmd_desc *d, uint64_t program_addr,
+                                 uint32_t program_offset, uint32_t register_count)
+{
+   if (!d)
+      return;
+   memset(d, 0, sizeof(*d));
+   d->program_addr = program_addr;
+   d->program_offset = program_offset;
+   d->register_count = register_count ? register_count : 16;
+   d->cta_x = 32;
+   d->cta_y = 1;
+   d->cta_z = 1;
+   d->grid_x = 1;
+   d->grid_y = 1;
+   d->grid_z = 1;
+   d->sm_global_caching = true;
+   d->invalidate_caches = true;
+   d->barrier_count = 1;
+   d->sass_version = 0; /* leave 0 unless caller knows sm/sass mapping */
+}
+
+/**
+ * tick145 / pass16: same as pass15 defaults plus optional sema completion
+ * (release0) for G2 smoke/dispatch when sema_gpu_addr != 0.  Static QMD
+ * templates from binary scans remain untrustworthy (pass16 strict scan); this
+ * builder is still the sole authoritative QMD source.
+ */
+static inline void
+nv_qmd_desc_init_pass16_defaults(struct nv_qmd_desc *d, uint64_t program_addr,
+                                 uint32_t program_offset, uint32_t register_count,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_qmd_desc_init_pass15_defaults(d, program_addr, program_offset,
+                                    register_count);
+   if (!d)
+      return;
+   if (sema_gpu_addr) {
+      d->sema_release0_addr = sema_gpu_addr;
+      d->sema_release0_value = sema_payload ? sema_payload : 1u;
+   }
+}
+
 /** Encode a QMD v02.02 descriptor into a 64-dword buffer. */
 static inline void
 nv_qmd_encode(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])

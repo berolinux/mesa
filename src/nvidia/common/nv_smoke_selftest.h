@@ -2413,6 +2413,105 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       (void)idx_39e0;
    }
 
+   /* tick144: pass15 multi-SR S2R SPH; QMD pass15 defaults with invalidate bits */
+   {
+      struct nv_sph_blob p15_sph;
+      struct nv_qmd_desc qd;
+      uint32_t qmd[NV_QMD_DWORDS];
+      bool inv_tex = false, inv_ins = false, inv_const = false;
+
+      nv_sph_build_compute_s2r_pass15_multi_sr_exit(&p15_sph, 0xaau, 16);
+      if (nv_sph_smoke_validate_blob(&p15_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -561;
+      if (p15_sph.sass_dwords < 10)
+         return -562;
+      /* second insn hi should be S2R class for first S2R */
+      if (p15_sph.sass[1] != NV_SPH_SASS_S2R_HI_CS &&
+          p15_sph.sass[1] != 0x86400000u)
+         return -563;
+      /* SR index 0x48 in second S2R lo (bits 27:20) */
+      if (((p15_sph.sass[2] >> 20) & 0xffu) != 0x48u)
+         return -564;
+      if (((p15_sph.sass[4] >> 20) & 0xffu) != 0x50u)
+         return -565;
+
+      nv_qmd_desc_init_pass15_defaults(&qd, 0x1000ull, 0, 16);
+      qd.program_addr = 0x200000ull;
+      nv_qmd_encode(&qd, qmd);
+      /* F_ macros expand to hi,lo — pass once each (3-arg nv_qmd_get) */
+      if (nv_qmd_get(qmd, NV_QMD_F_REQUIRE_SCHEDULING_PCAS) != 1)
+         return -566;
+      if (nv_qmd_get(qmd, NV_QMD_F_INVALIDATE_TEXTURE_DATA_CACHE) == 1)
+         inv_tex = true;
+      if (nv_qmd_get(qmd, NV_QMD_F_INVALIDATE_INSTRUCTION_CACHE) == 1)
+         inv_ins = true;
+      if (nv_qmd_get(qmd, NV_QMD_F_INVALIDATE_SHADER_CONSTANT_CACHE) == 1)
+         inv_const = true;
+      if (!inv_tex || !inv_ins || !inv_const)
+         return -567;
+      if (nv_qmd_get(qmd, NV_QMD_F_CTA_THREAD_DIMENSION0) != 32)
+         return -568;
+   }
+
+   /* tick145 / pass16: MME 0x39e0 post-config; pass16 multi-SR SPH; QMD+sema */
+   {
+      struct nv_push p2;
+      uint32_t g2buf[320], n2, ii;
+      bool saw_39e0 = false, saw_sc42 = false;
+      struct nv_sph_blob p16_sph;
+      struct nv_qmd_desc qd16;
+      uint32_t qmd16[NV_QMD_DWORDS];
+      uint8_t sr_at_r4, sr_at_r5, sr_at_r6;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_mme_emit_channel_prime_upload_pass16(&p2);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 24)
+         return -569;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS16_POST_CONFIG_METHOD_OFF)
+            saw_39e0 = true;
+         if (method == NV_MME_PASS14_LIT_METHOD_OFF)
+            saw_sc42 = true;
+      }
+      if (!saw_sc42)
+         return -570;
+      if (!saw_39e0)
+         return -571;
+
+      nv_sph_build_compute_s2r_pass16_multi_sr_exit(&p16_sph, 0x56u, 16);
+      if (nv_sph_smoke_validate_blob(&p16_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -572;
+      /* 7 S2R + MOV + EXIT = 9 insns * 2 dwords = 18 */
+      if (p16_sph.sass_dwords < 18)
+         return -573;
+      /* R4 = SR 0x48, R5 = SR 0x49, R6 = SR 0x50 (insn indices 4,5,6) */
+      sr_at_r4 = (uint8_t)((p16_sph.sass[8] >> 20) & 0xffu);
+      sr_at_r5 = (uint8_t)((p16_sph.sass[10] >> 20) & 0xffu);
+      sr_at_r6 = (uint8_t)((p16_sph.sass[12] >> 20) & 0xffu);
+      if (sr_at_r4 != 0x48u || sr_at_r5 != 0x49u || sr_at_r6 != 0x50u)
+         return -574;
+      if (p16_sph.sass[1] != NV_SPH_SASS_S2R_HI_CS &&
+          p16_sph.sass[1] != 0x86400000u)
+         return -575;
+
+      nv_qmd_desc_init_pass16_defaults(&qd16, 0x200000ull, 0, 16,
+                                       0x300000ull, 0x42u);
+      /* encode_full applies sema_release0_* sideband (encode alone does not) */
+      nv_qmd_encode_full(&qd16, qmd16);
+      if (nv_qmd_get(qmd16, NV_QMD_F_REQUIRE_SCHEDULING_PCAS) != 1)
+         return -576;
+      if (nv_qmd_get(qmd16, NV_QMD_F_INVALIDATE_INSTRUCTION_CACHE) != 1)
+         return -577;
+      if (nv_qmd_get(qmd16, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0) != 1)
+         return -578;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

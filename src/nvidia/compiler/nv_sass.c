@@ -145,6 +145,22 @@ nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
 }
 
 bool
+nv_sass_emit_smoke_s2r_pass15_multi_sr_exit(struct nv_sass_buf *b, uint32_t imm)
+{
+   if (!b)
+      return false;
+   if (!nv_sass_emit_s2r(b, 0, NV_SASS_SR_PASS15_LANEID_OR_TID0))
+      return false;
+   if (!nv_sass_emit_s2r(b, 1, NV_SASS_SR_PASS15_LANEMASK_EQ))
+      return false;
+   if (!nv_sass_emit_s2r(b, 2, NV_SASS_SR_PASS15_SMID))
+      return false;
+   if (!nv_sass_emit_mov_ri(b, 3, imm ? imm : 0x55u))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
 nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                uint8_t ra_addr, uint32_t imm)
 {
@@ -726,6 +742,31 @@ nv_sass_emit_ipa(struct nv_sass_buf *b, uint8_t rd, uint8_t attr_idx,
         ((uint32_t)(mode & 0x3) << 0) |
         ((uint32_t)((mode == NV_SASS_IPA_MODE_CENTROID) ? 1 : 0) << 2);
    return nv_sass_emit_raw(b, lo, hi);
+}
+
+bool
+nv_sass_emit_smoke_s2r_pass16_multi_sr_exit(struct nv_sass_buf *b,
+                                            uint32_t imm)
+{
+   static const uint8_t srs[7] = {
+      NV_SASS_SR_PASS15_LANEID_OR_TID0,
+      NV_SASS_SR_PASS15_CLOCKLO_CAND,
+      NV_SASS_SR_PASS15_VIRTID_CAND,
+      NV_SASS_SR_PASS15_SHADER_TYPE,
+      NV_SASS_SR_PASS15_LANEMASK_EQ,
+      NV_SASS_SR_PASS15_LANEMASK_LT,
+      NV_SASS_SR_PASS15_SMID,
+   };
+   unsigned i;
+   if (!b)
+      return false;
+   for (i = 0; i < 7; i++) {
+      if (!nv_sass_emit_s2r(b, (uint8_t)i, srs[i]))
+         return false;
+   }
+   if (!nv_sass_emit_mov_ri(b, 7, imm ? imm : 0x56u))
+      return false;
+   return nv_sass_emit_exit(b);
 }
 
 bool

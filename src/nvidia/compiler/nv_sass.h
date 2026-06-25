@@ -215,6 +215,24 @@ extern "C" {
 #define NV_SASS_SR_VIEWPORT     19
 #define NV_SASS_SR_POINT_X      20
 #define NV_SASS_SR_POINT_Y      21
+/*
+ * pass15 gpucomp S2R SR index priorities (directional; multi-shift probe):
+ *   0 = lane/tid family (SR_LANEID / tid.x depending on arch encoding)
+ *   1, 3 = clock / virt id candidates
+ *   0x48 / 0x49 = lanemask EQ/LT candidates (high hit count in tightened scan)
+ *   0x50 = SMID (public Maxwell+ SR_SMID)
+ * Mesa smoke should exercise these before treating MEMBAR SASS counts as truth.
+ */
+#define NV_SASS_SR_PASS15_LANEID_OR_TID0  0
+#define NV_SASS_SR_PASS15_CLOCKLO_CAND    1
+#define NV_SASS_SR_PASS15_VIRTID_CAND     3
+#define NV_SASS_SR_PASS15_LANEMASK_EQ     0x48
+#define NV_SASS_SR_PASS15_LANEMASK_LT     0x49
+#define NV_SASS_SR_PASS15_SMID            0x50
+#define NV_SASS_SR_PASS15_SHADER_TYPE     0x25
+/* pass16 gpucomp refined: also exercise SR 0x02 (clockhi?), 0x4c (lanemask GE?) */
+#define NV_SASS_SR_PASS16_CLOCKHI_CAND    2
+#define NV_SASS_SR_PASS16_LANEMASK_GE     0x4c
 
 /* IPA — interpolate attribute (Maxwell/Pascal class; refined vs binary later).
  * Rd gets interpolated value for attribute index / component.
@@ -286,6 +304,15 @@ bool nv_sass_emit_smoke_s2r_mov_imm_exit(struct nv_sass_buf *b, uint8_t sr,
 bool nv_sass_emit_smoke_s2r_store_imm_at_gva(struct nv_sass_buf *b,
                                              uint64_t store_gpu_addr,
                                              uint32_t imm_value);
+/** tick144: S2R R0,SR0; S2R R1,SR0x48; S2R R2,SR0x50; MOV R3,imm; EXIT (impl in .c). */
+bool nv_sass_emit_smoke_s2r_pass15_multi_sr_exit(struct nv_sass_buf *b,
+                                                 uint32_t imm);
+/**
+ * tick145 / pass16: extended multi-SR — SR0, 0x01, 0x03, 0x25, 0x48, 0x49, 0x50
+ * into R0..R6 then MOV R7,imm + EXIT (impl in .c; SPH header has self-contained twin).
+ */
+bool nv_sass_emit_smoke_s2r_pass16_multi_sr_exit(struct nv_sass_buf *b,
+                                                 uint32_t imm);
 
 bool nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                     uint8_t ra_addr, uint32_t imm);
