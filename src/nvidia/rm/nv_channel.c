@@ -2700,6 +2700,35 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
             if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
                return r;
          }
+         /* tick173 / pass23: pass21 modes timed out — one pass23 entry (same formal sema) */
+         if (NV_PASS23_RE_SCAFFOLD && NV_PASS23_G1_CE_PASS21 &&
+             nv_pass23_g0_g4_symmetry_ok()) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need);
+            if (nv_g1_emit_copy_then_host_sema_pass23(
+                   &push, cl, src_gpu_addr, dst_gpu_addr, size_bytes, false,
+                   true, sema_gpu_addr, sema_payload,
+                   NV_PASS21_HOST_SEMA_DEFAULT_MODE) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (host_sema_mode_out)
+                  *host_sema_mode_out = (int)NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+               if (r == 0) {
+                  ch->host_sema_mode_pref = (int)NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+                  if (!ch->class_copy_bound)
+                     ch->class_copy_bound = cl;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
       }
    }
    return last;

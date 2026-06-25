@@ -4137,6 +4137,19 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       /* tick172: pass23 RE trace scaffold flags */
       if (!NV_PASS23_RE_TRACE_SCAFFOLD_TICK172 || !NV_PASS23_RE_FULL_DISASM_PENDING)
          return -834;
+      /* tick173: G1 pass23 copy+host sema emits */
+      {
+         struct nv_push p173;
+         uint32_t b173[128];
+         memset(b173, 0, sizeof(b173));
+         nv_push_init(&p173, b173, (uint32_t)(sizeof(b173) / 4));
+         if (nv_g1_emit_copy_then_host_sema_pass23(
+                &p173, 0xc5b5u, 0x1000ull, 0x2000ull, 64u, false, true,
+                0x580000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -835;
+         if (nv_push_dw_count(&p173) < 8u)
+            return -836;
+      }
    }
 
    if (trace_push && trace_dwords) {

@@ -1177,6 +1177,38 @@ nv_g1_emit_copy_then_host_sema_pass21(struct nv_push *p, uint32_t class_copy,
 }
 
 /**
+ * tick173 / pass23: G1 CE copy + pass23 host sema tail (alias pass21 formal).
+ * Used when pass23 symmetry audit wants explicit pass23 entry; same methods.
+ */
+static inline int
+nv_g1_emit_copy_then_host_sema_pass23(struct nv_push *p, uint32_t class_copy,
+                                      uint64_t src_gpu_addr,
+                                      uint64_t dst_gpu_addr,
+                                      uint32_t size_bytes,
+                                      bool pipelined,
+                                      bool pre_wfi_on_ce,
+                                      uint64_t host_sema_gpu,
+                                      uint32_t host_sema_payload,
+                                      enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !host_sema_gpu)
+      return -1;
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   if (pipelined)
+      nv_copy_emit_buffer_copy_with_sema_pipelined(p, src_gpu_addr, dst_gpu_addr,
+                                                   size_bytes, 0, 0);
+   else
+      nv_copy_emit_buffer_copy_with_sema(p, src_gpu_addr, dst_gpu_addr,
+                                         size_bytes, 0, 0);
+   return nv_push_g0_g4_host_sema_tail_pass23(
+      p, pre_wfi_on_ce, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/**
  * tick157: G1 CE copy with engine sema in LAUNCH_DMA, plus pass21 host sema tail
  * (dual fence: CE report + host GPFIFO sema).
  */
