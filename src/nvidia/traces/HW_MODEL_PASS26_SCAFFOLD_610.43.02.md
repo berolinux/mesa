@@ -10,6 +10,8 @@
 |------|-------------|
 | 184 | Pass26 RE constants; pass25 G4 NVDEC channel pass25 |
 | 185 | G0–G4 pass26 symmetry; pass26 G2 launch/dispatch; channel pass26-first |
+| 186 | G1/G3/G4 pass26 emitters; channel G1/G3 pass26 retry |
+| 187 | Implementation audit (`nv_pass26_implementation_audit_ok`); wire complete |
 
 ## G0–G4 (pass26)
 

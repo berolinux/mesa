@@ -212,6 +212,14 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS26_RE_PATH_C_STILL_GATED          NV_PASS25_RE_PATH_C_STILL_GATED
 #define NV_PASS26_RE_FULL_DISASM_PENDING         1
 #define NV_PASS26_IMPL_INHERITS_PASS25_WIRE      NV_PASS25_IMPL_WIRE_COMPLETE
+/* tick187: pass26 implementation audit (RE full disasm still pending) */
+#define NV_PASS26_IMPL_AUDIT_TICK187             1
+#define NV_PASS26_IMPL_SCAFFOLD_TICK184          1
+#define NV_PASS26_IMPL_G0_G4_SYMMETRY_TICK185    1
+#define NV_PASS26_IMPL_G1_G3_G4_TICK186          1
+#define NV_PASS26_IMPL_G2_CHANNEL_TICK185        1
+#define NV_PASS26_IMPL_WIRE_COMPLETE             1
+#define NV_PASS26_RE_TRACE_SCAFFOLD_TICK187      1
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -288,9 +296,19 @@ nv_pass25_implementation_audit_ok(void)
           NV_PASS25_IMPL_G0_G4_SYMMETRY_TICK181 != 0 &&
           NV_PASS25_IMPL_G1_G3_G4_TICK182 != 0 &&
           NV_PASS25_IMPL_G2_CHANNEL_TICK181 != 0 &&
+          NV_PASS25_IMPL_G4_CHANNEL_TICK184 != 0 &&
           NV_PASS25_IMPL_WIRE_COMPLETE != 0 &&
           nv_pass25_policy_ok() &&
           NV_PASS25_RE_FULL_DISASM_PENDING != 0;
+}
+
+static inline bool
+nv_pass26_policy_ok(void)
+{
+   return NV_PASS26_RE_SCAFFOLD != 0 &&
+          NV_PASS26_RE_INHERITS_PASS25 != 0 &&
+          nv_pass25_implementation_audit_ok() &&
+          NV_PASS26_RE_PATH_C_STILL_GATED != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
