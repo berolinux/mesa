@@ -122,6 +122,56 @@ struct nv_device_info {
    bool classes_from_rm;      /* class IDs refined via GET_ENGINE_CLASSLIST */
 };
 
+/* NV0080_CTRL_GPU_VIRTUALIZATION_MODE_* (ctrl0080gpu.h) — mirrored for policy */
+#define NV_VIRT_MODE_NONE       0x00000000u
+#define NV_VIRT_MODE_NMOS       0x00000001u
+#define NV_VIRT_MODE_VGX        0x00000002u  /* guest / passthrough-style */
+#define NV_VIRT_MODE_HOST_VGPU  0x00000003u  /* host vGPU (HOST alias) */
+#define NV_VIRT_MODE_HOST_VSGA  0x00000004u
+
+/** tick108: true when RM reports guest/vGPU/GRID virtualization (not baremetal). */
+static inline bool
+nv_device_info_is_virtualized(const struct nv_device_info *info)
+{
+   if (!info)
+      return false;
+   return info->virtualization_mode != NV_VIRT_MODE_NONE || info->is_grid_build != 0;
+}
+
+/**
+ * tick108: prefer conservative sysmem/CPU-access paths when virtualized.
+ * Guest/vGPU often has restricted BAR1 / limited GPU-direct allocs; host sema
+ * and notifier rings should still work in sysmem WC.
+ */
+static inline bool
+nv_device_info_prefer_sysmem_alloc(const struct nv_device_info *info)
+{
+   if (!info)
+      return false;
+   if (info->virtualization_mode == NV_VIRT_MODE_VGX)
+      return true;
+   if (info->virtualization_mode == NV_VIRT_MODE_HOST_VGPU ||
+       info->virtualization_mode == NV_VIRT_MODE_HOST_VSGA)
+      return info->is_grid_build != 0; /* GRID builds: favor sysmem for smoke/sema */
+   return false;
+}
+
+/**
+ * tick108: doorbell/token still required on Volta+; virtualization does not
+ * disable it but may need longer ring-full stalls (caller multiplies timeout).
+ */
+static inline uint64_t
+nv_device_info_gpfifo_stall_ns(const struct nv_device_info *info,
+                              uint64_t default_ns)
+{
+   uint64_t d = default_ns ? default_ns : 1000000000ull;
+   if (info && nv_device_info_is_virtualized(info)) {
+      if (d < 2000000000ull)
+         d = 2000000000ull; /* 2s minimum under virt */
+   }
+   return d;
+}
+
 enum nv_gpu_family nv_device_info_family_from_arch(uint32_t architecture);
 const char *nv_device_info_family_name(enum nv_gpu_family family);
 void nv_device_info_select_classes(struct nv_device_info *info);

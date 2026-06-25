@@ -1264,14 +1264,16 @@ nv_compute_push_smoke_dispatch_gr(struct nv_push *p, uint32_t class_compute,
    if (!p)
       return 0;
 
-   if (emit_init)
+   /* tick108: SPA/CWD from probe when available; else spa_version arg */
+   if (emit_init && info)
+      nv_compute_emit_lmem_and_init_from_info(p, class_compute, 0, 0, info, 0);
+   else if (emit_init)
       nv_compute_emit_init_state(p, class_compute, spa_version, 0);
 
    if (info) {
-      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
-                                spa_version, sema_gpu_addr, sema_payload,
-                                info->max_warps_per_sm,
-                                info->thread_stack_scaling);
+      nv_qmd_desc_init_smoke_device(&desc, program_gpu_addr, register_count,
+                                    spa_version, sema_gpu_addr, sema_payload,
+                                    0, info);
    } else {
       nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
                              spa_version, sema_gpu_addr, sema_payload);
@@ -1343,6 +1345,36 @@ nv_qmd_smoke_encode_check(uint64_t sema_gpu_addr, uint32_t sema_payload,
    /* SEMAPHORE_RELEASE_ENABLE0 is MW bit 138 => dword 4, bit 10 */
    if (!(q[4] & (1u << 10)))
       return -2;
+   return 0;
+}
+
+/**
+ * tick108: encode check via smoke_device (GR/LMEM/CRS when info set).
+ * Returns 0 ok; -1..-2 same as smoke_encode_check; -3 sema verify fail; -4 CRS policy.
+ */
+static inline int
+nv_qmd_smoke_encode_check_device(uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                 const struct nv_device_info *info,
+                                 uint32_t qmd_out[NV_QMD_DWORDS])
+{
+   struct nv_qmd_desc d;
+   uint32_t qmd_local[NV_QMD_DWORDS];
+   uint32_t *q = qmd_out ? qmd_out : qmd_local;
+
+   if (!sema_gpu_addr || !sema_payload)
+      return -1;
+   if (!info)
+      return nv_qmd_smoke_encode_check(sema_gpu_addr, sema_payload, qmd_out);
+
+   nv_qmd_desc_init_smoke_device(&d, 0x10000ull, 16, 0, sema_gpu_addr,
+                                 sema_payload, 0, info);
+   nv_qmd_encode_full(&d, q);
+   if (!(q[4] & (1u << 10)))
+      return -2;
+   if (!nv_qmd_verify_sema_release0(q, sema_gpu_addr, sema_payload))
+      return -3;
+   if (info->thread_stack_scaling && !d.local_mem_crs)
+      return -4;
    return 0;
 }
 

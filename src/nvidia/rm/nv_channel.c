@@ -1095,17 +1095,24 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->h_vaspace = nv_rm_device_vaspace_handle(rm);
    ch->usermode_map = nv_rm_device_usermode_map(rm);
 
-   /* USERD - prefer VRAM uncached; fall back to sysmem; map into VAS */
+   /* USERD - prefer VRAM uncached; fall back to sysmem; map into VAS.
+    * tick108: under VGX/GRID virt prefer sysmem first (restricted BAR1/FB). */
    memset(&req, 0, sizeof(req));
    req.size = NV_CHANNEL_USERD_SIZE;
    req.alignment = NV_CHANNEL_USERD_SIZE;
-   req.vram = info->vram_size_bytes > 0;
+   req.vram = info->vram_size_bytes > 0 &&
+              !nv_device_info_prefer_sysmem_alloc(info);
    req.cpu_access = true;
    req.no_scanout = true;
    req.map_gpu_va = true;
    ch->userd_bo = nv_rm_bo_alloc(rm, &req);
    if (!ch->userd_bo && req.vram) {
       req.vram = false;
+      ch->userd_bo = nv_rm_bo_alloc(rm, &req);
+   }
+   if (!ch->userd_bo && !req.vram && info->vram_size_bytes > 0) {
+      /* virt path tried sysmem first; fall back to VRAM if guest allows */
+      req.vram = true;
       ch->userd_bo = nv_rm_bo_alloc(rm, &req);
    }
    if (!ch->userd_bo)
@@ -1123,7 +1130,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    nvidia_userd_init_host(ch->userd, NV_CHANNEL_USERD_SIZE);
    ch->gpfifo_put = 0;
 
-   /* tick106: optional extra USERD BOs for multi-subdevice alloc (env-gated default 1) */
+   /* tick106/108: extra USERD from subdevice_count / env; virt guests often count=1 */
    (void)nv_channel_alloc_extra_userd_slots(ch, 1);
 
    /* Error notifier memory + CTXDMA (NV01_CONTEXT_ERROR_TO_MEMORY) */
@@ -2055,7 +2062,8 @@ nv_channel_kickoff(struct nv_channel *ch)
                                          ch->work_submit_token,
                                          ch->has_work_submit_token,
                                          ch->gpfifo_class,
-                                         1000000000ull /* 1s ring-full stall */);
+                                         nv_device_info_gpfifo_stall_ns(
+                                            ch->info, 1000000000ull));
    }
    if (r)
       return r;
@@ -2923,12 +2931,12 @@ nv_channel_g2_compute_smoke_sema_submit(struct nv_channel *ch,
    if (!sema_payload)
       sema_payload = 0x42u;
 
-   /* tick103: apply GR probe limits (max warps / thread stack scale) when known */
+   /* tick108: smoke_device applies GR + LMEM/CRS from full probe (tick107 helpers) */
    if (ch && ch->info) {
-      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
-                                sass_version, sema_gpu_addr, sema_payload,
-                                ch->info->max_warps_per_sm,
-                                ch->info->thread_stack_scaling);
+      nv_qmd_desc_init_smoke_device(&desc, program_gpu_addr, register_count,
+                                    sass_version, sema_gpu_addr, sema_payload,
+                                    0 /* smoke: no spill unless caller sets */,
+                                    ch->info);
    } else {
       nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
                              sass_version, sema_gpu_addr, sema_payload);
@@ -3119,12 +3127,10 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
       }
    }
 
-   /* tick104: host-sema G2 path also respects GR probe limits */
+   /* tick108: host-sema G2 — smoke_device for GR/LMEM; completion via host sema */
    if (ch && ch->info) {
-      nv_qmd_desc_init_smoke_gr(&desc, program_gpu_addr, register_count,
-                                sass_version, 0, 0,
-                                ch->info->max_warps_per_sm,
-                                ch->info->thread_stack_scaling);
+      nv_qmd_desc_init_smoke_device(&desc, program_gpu_addr, register_count,
+                                    sass_version, 0, 0, 0, ch->info);
    } else {
       nv_qmd_desc_init_smoke(&desc, program_gpu_addr, register_count,
                              sass_version, 0, 0); /* no QMD sema — host sema completes */
@@ -3159,7 +3165,9 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
             return -ENOMEM;
 
          nv_push_init(&push, map, need);
-         if (emit_init_state)
+         if (emit_init_state && ch->info)
+            nv_compute_emit_lmem_and_init_from_info(&push, cc, 0, 0, ch->info, 0);
+         else if (emit_init_state)
             nv_compute_emit_init_state(&push, cc, 0, 0);
          else
             nv_compute_set_object(&push, cc);
