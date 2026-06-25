@@ -3093,6 +3093,54 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -645;
    }
 
+   /* tick152 / pass20: constants + inline/PCAS span + path C gate */
+   {
+      struct nv_push lp;
+      uint32_t lb[256], ln;
+      uint32_t qmd_l[NV_QMD_DWORDS];
+      int ladder_rc;
+      uint32_t fake_ind[4] = { 3u, 1u, 0u, 0u }; /* vertexCount=3, instance=1 */
+
+      if (NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE != 428u)
+         return -646;
+      if (NV_PASS20_INLINE_TO_PCAS_MEDIAN_CUDA < NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE)
+         return -647;
+      if (nv_pass20_inline_qmd_launch_min_methods(false) != 2u + NV_QMD_DWORDS + 2u)
+         return -648;
+      if (!nv_pass20_inline_pcas_span_ok(nv_pass20_inline_qmd_launch_min_methods(true)))
+         return -649;
+      if (nv_pass20_inline_pcas_span_ok(NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE))
+         return -650; /* span_ok must reject median-as-method-count */
+
+      /* path C indirect not ready while stubs (pass20/tick152 gate) */
+      if (nv_mme_path_c_indirect_ready())
+         return -651;
+
+      memset(lb, 0, sizeof(lb));
+      nv_push_init(&lp, lb, (uint32_t)(sizeof(lb) / 4));
+      if (nv_mme_emit_path_c_indirect_if_ready(&lp, false, 1, 16))
+         return -652; /* must not CALL while stub */
+
+      ladder_rc = nv_3d_emit_draw_indirect_ladder_pass20(
+         &lp, 0x700000ull, NVC597_TOPOLOGY_TRIANGLES, false,
+         fake_ind, 4, 1, 16, true, 0, 0);
+      if (ladder_rc != 1)
+         return -653; /* expect path A/B (1), not C (2) or fail (0) */
+      ln = nv_push_dw_count(&lp);
+      if (ln < 4)
+         return -654;
+
+      /* pass20 launch with WFI tail shape */
+      memset(qmd_l, 0, sizeof(qmd_l));
+      memset(lb, 0, sizeof(lb));
+      nv_push_init(&lp, lb, (uint32_t)(sizeof(lb) / 4));
+      nv_compute_emit_inline_qmd_launch_pass20(&lp, 0x800000ull, qmd_l, true,
+                                               true);
+      ln = nv_push_dw_count(&lp);
+      if (ln < nv_pass20_inline_qmd_launch_min_methods(true) + 1u)
+         return -655;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

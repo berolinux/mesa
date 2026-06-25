@@ -1389,8 +1389,12 @@ nv_3d_mme_upload_extended_table_only(struct nv_push *p)
 }
 
 /**
- * Try path C: if MME macro is uploaded, kick it; else return false so caller
- * falls back to path A/B host/shadow indirect.
+ * Try path C: if MME macro is uploaded *and* non-stub, kick it; else return
+ * false so caller falls back to path A/B host/shadow indirect.
+ *
+ * tick152 / pass20: gate on nv_mme_path_c_indirect_ready() so we never CALL
+ * END-only stubs on silicon (would no-op or fault).  When ready becomes true
+ * after RE, mme_uploaded + kick enables full GPU indirect loop.
  */
 static inline bool
 nv_3d_try_draw_indirect_path_c(struct nv_push *p,
@@ -1402,7 +1406,10 @@ nv_3d_try_draw_indirect_path_c(struct nv_push *p,
 {
    uint32_t macro = indexed ? NV_MME_MACRO_DRAW_INDEXED_INDIRECT
                             : NV_MME_MACRO_DRAW_INDIRECT;
-   if (!mme_uploaded || !draw_count)
+   if (!mme_uploaded || !draw_count || !indirect_gpu_addr)
+      return false;
+   /* pass20/tick152: refuse stub ISA even if caller claims uploaded */
+   if (!nv_mme_path_c_indirect_ready())
       return false;
    if (indexed)
       return nv_3d_emit_draw_indexed_indirect_mme_kick(p, indirect_gpu_addr,
@@ -2012,6 +2019,46 @@ nv_3d_emit_draw_indirect_multi_with_sema(struct nv_push *p,
                                      draw_count, stride_bytes);
    if (sema_gpu_addr && sema_payload)
       nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/**
+ * tick152: indirect draw ladder — try path C (MME, non-stub only), else path
+ * A/B via shadow dwords.  Returns 2 if path C, 1 if path A/B, 0 if nothing.
+ */
+static inline int
+nv_3d_emit_draw_indirect_ladder_pass20(struct nv_push *p,
+                                       uint64_t indirect_gpu_addr,
+                                       uint32_t topology_nv,
+                                       bool indexed,
+                                       const uint32_t *shadow_dwords,
+                                       uint32_t shadow_dword_count,
+                                       uint32_t draw_count,
+                                       uint32_t stride_bytes,
+                                       bool mme_uploaded,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload)
+{
+   uint32_t stride = stride_bytes ? stride_bytes : (indexed ? 20u : 16u);
+
+   if (!p || !draw_count)
+      return 0;
+
+   if (nv_3d_try_draw_indirect_path_c(p, indirect_gpu_addr, draw_count, stride,
+                                      indexed, mme_uploaded))
+      return 2;
+
+   if (shadow_dwords && shadow_dword_count) {
+      if (sema_gpu_addr)
+         nv_3d_emit_draw_indirect_from_shadow_dwords_with_sema(
+            p, topology_nv, indexed, shadow_dwords, shadow_dword_count,
+            draw_count, stride, sema_gpu_addr, sema_payload);
+      else
+         nv_3d_emit_draw_indirect_from_shadow_dwords(
+            p, topology_nv, indexed, shadow_dwords, shadow_dword_count,
+            draw_count, stride);
+      return 1;
+   }
+   return 0;
 }
 
 /**

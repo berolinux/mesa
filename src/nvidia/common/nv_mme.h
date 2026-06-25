@@ -873,6 +873,43 @@ nv_mme_emit_call_macro_if_ready(struct nv_push *p,
 }
 
 /**
+ * tick152 / pass20: path C readiness probe — true only when indirect (or
+ * clear/init) programs are non-stub.  Always false until RE fills real ISA;
+ * documents gate for silicon try without enabling unsafe CALL on stubs.
+ */
+static inline bool
+nv_mme_path_c_indirect_ready(void)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_COUNT];
+   nv_mme_build_indirect_draw_programs(progs);
+   return !nv_mme_programs_are_stubs(progs);
+}
+
+/**
+ * tick152: path C indirect try — CALL indirect slot only if non-stub.
+ * data0 = draw_count | (stride << 16) (same as pass5 / mme_kick convention).
+ * Returns true if CALL emitted; false = caller must use host path A/B/C'.
+ */
+static inline bool
+nv_mme_emit_path_c_indirect_if_ready(struct nv_push *p, bool indexed,
+                                     uint32_t draw_count, uint32_t stride_bytes)
+{
+   struct nv_mme_program prog;
+   uint32_t data0;
+
+   if (!p || !draw_count)
+      return false;
+   if (indexed)
+      nv_mme_build_draw_indirect_loop_scaffold(
+         &prog, NV_MME_SLOT_DRAW_INDEXED_INDIRECT, 16, true);
+   else
+      nv_mme_build_draw_indirect_loop_scaffold(
+         &prog, NV_MME_SLOT_DRAW_INDIRECT, 0, false);
+   data0 = (draw_count & 0xffffu) | ((stride_bytes & 0xffffu) << 16);
+   return nv_mme_emit_call_macro_if_ready(p, &prog, data0);
+}
+
+/**
  * tick137: after RAM prime, optionally CALL clear/channel-init slots only if
  * non-stub.  Returns count of CALLs emitted (0 while stubs remain).
  * Host clear/draw remains authoritative when 0.
@@ -895,6 +932,23 @@ nv_mme_emit_path_c_calls_if_ready(struct nv_push *p)
 }
 
 /**
+ * tick152: path C full try — clear/init CALLs + indirect CALLs if ready.
+ * Returns total CALLs (0 while all stubs — normal production state).
+ */
+static inline unsigned
+nv_mme_emit_path_c_all_if_ready(struct nv_push *p, bool try_indirect,
+                                bool indexed, uint32_t draw_count,
+                                uint32_t stride_bytes)
+{
+   unsigned n = nv_mme_emit_path_c_calls_if_ready(p);
+   if (try_indirect &&
+       nv_mme_emit_path_c_indirect_if_ready(p, indexed, draw_count,
+                                            stride_bytes))
+      n++;
+   return n;
+}
+
+/**
  * tick137: upload full MME table then attempt path C CALLs (no-op while stubs).
  * Returns true if any CALL was emitted (path C active); false = host-only.
  */
@@ -905,6 +959,21 @@ nv_mme_emit_upload_and_path_c_try(struct nv_push *p)
       return false;
    nv_mme_emit_upload_full_table_only(p);
    return nv_mme_emit_path_c_calls_if_ready(p) > 0;
+}
+
+/**
+ * tick152: upload indirect stubs + try path C indirect (false until ISA ready).
+ */
+static inline bool
+nv_mme_emit_upload_and_path_c_indirect_try(struct nv_push *p, bool indexed,
+                                           uint32_t draw_count,
+                                           uint32_t stride_bytes)
+{
+   if (!p)
+      return false;
+   nv_mme_emit_upload_indirect_stubs_only(p);
+   return nv_mme_emit_path_c_indirect_if_ready(p, indexed, draw_count,
+                                               stride_bytes);
 }
 
 #ifdef __cplusplus

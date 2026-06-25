@@ -1266,9 +1266,13 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
             nv_3d_set_index_buffer(&push, ib_addr, ib_size, info->index_size);
          }
 
-         if (ind_base) {
+         if (ind_base || (ibuf && ibuf->gpu_offset)) {
             uint32_t sema_pay = 0;
             uint64_t sema_addr = 0;
+            uint64_t ind_gpu = 0;
+            uint32_t ind_dwords = 0;
+            int ladder_rc;
+
             if (!ctx->fence && ctx->screen && ctx->screen->rm)
                ctx->fence = nv_fence_create(ctx->screen->rm);
             if (ctx->fence && ctx->fence->sema_gpu_addr) {
@@ -1276,10 +1280,23 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                sema_addr = ctx->fence->sema_gpu_addr;
                ctx->last_fence_seq = sema_pay;
             }
-            nv_3d_emit_draw_indirect_multi_with_sema(&push, topo, ind_base,
-                                                     draw_count, ind_stride,
-                                                     info->index_size != 0,
-                                                     sema_addr, sema_pay);
+            if (ibuf)
+               ind_gpu = ibuf->gpu_offset + indirect->offset;
+            if (ind_base)
+               ind_dwords = (draw_count * ind_stride) / 4u;
+            /* tick152: path C (MME, gated off while stubs) then path A/B shadow */
+            ladder_rc = nv_3d_emit_draw_indirect_ladder_pass20(
+               &push, ind_gpu, topo, info->index_size != 0,
+               ind_base, ind_dwords, draw_count, ind_stride,
+               true /* mme table primed in ensure_3d_init */,
+               sema_addr, sema_pay);
+            if (ladder_rc == 0 && ind_base) {
+               /* Fallback if ladder skipped (no sema path variant) */
+               nv_3d_emit_draw_indirect_multi_with_sema(&push, topo, ind_base,
+                                                        draw_count, ind_stride,
+                                                        info->index_size != 0,
+                                                        sema_addr, sema_pay);
+            }
          }
          if (ind_map && ibuf && ind_map != ibuf->cpu_ptr)
             nv_rm_bo_unmap(ibuf->bo);

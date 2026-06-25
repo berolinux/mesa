@@ -48,6 +48,19 @@ extern "C" {
 #define NVC3C0_SET_INLINE_QMD_ADDRESS_A      0x0318
 #define NVC3C0_SET_INLINE_QMD_ADDRESS_B      0x031c
 #define NVC3C0_LOAD_INLINE_QMD_DATA(i)       (0x0320 + (i) * 4)
+
+/*
+ * pass20 x86 CFG (610.43.02, re_pass20/*_pass20.json): median imm distance
+ * INLINE_QMD_A (0x0318) → SEND_PCAS_A (0x02b4) within same scan region — not
+ * an ordered binary template (pass19 forward_ok=0); mesa hand-authors order.
+ */
+#define NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE   428u
+#define NV_PASS20_INLINE_TO_PCAS_MEDIAN_CUDA     2204u
+#define NV_PASS20_INLINE_TO_PCAS_MEDIAN_VKSC     2724u
+#define NV_PASS20_SEMA_IMM_FUNC_DIST_MIN         80u
+#define NV_PASS20_SEMA_IMM_FUNC_DIST_TYPICAL     848u
+#define NV_PASS20_MME_RAM_DATA_FUNC_DIST_GLCORE  2064u
+
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8
@@ -451,6 +464,30 @@ nv_compute_set_object(struct nv_push *p, uint32_t class_id)
 }
 
 /**
+ * pass20: expected minimum dword span from first SET_INLINE_QMD_A header to
+ * SEND_PCAS_A in a hand-authored launch (not static binary template).
+ * Full launch: 2 addr + 64 load + 2 PCAS (+ optional signaling) = 68+ methods.
+ */
+static inline uint32_t
+nv_pass20_inline_qmd_launch_min_methods(bool signaling)
+{
+   /* ADDR_A, ADDR_B, 64×LOAD, PCAS_A, PCAS_B, [SIG_PCAS_B] */
+   return 2u + NV_QMD_DWORDS + 2u + (signaling ? 1u : 0u);
+}
+
+/**
+ * pass20: sanity — push span from first method to PCAS should be well under
+ * cuda/vksc median imm distances (those include unrelated code between sites).
+ * Mesa contiguous emit is always << NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE dwords.
+ */
+static inline bool
+nv_pass20_inline_pcas_span_ok(uint32_t method_count_in_launch)
+{
+   return method_count_in_launch >= nv_pass20_inline_qmd_launch_min_methods(false) &&
+          method_count_in_launch < NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE;
+}
+
+/**
  * Emit inline QMD upload + SEND_PCAS schedule on the compute subchannel.
  *
  * @param p            push buffer (subchannel switched to COMPUTE)
@@ -458,6 +495,10 @@ nv_compute_set_object(struct nv_push *p, uint32_t class_id)
  *                     (used by SET_INLINE_QMD_ADDRESS and SEND_PCAS_A)
  * @param qmd          64 dwords of encoded QMD
  * @param signaling    if true, use SEND_SIGNALING_PCAS_B with invalidate+schedule
+ *
+ * pass20: order is mesa policy (SET_INLINE → LOAD×64 → SEND_PCAS_A/B [→ SIG]);
+ * static binaries do not embed this ordered template (pass19 forward_ok=0).
+ * Median imm distances (428 glcore / 2204 cuda) are x86 site spacing only.
  */
 static inline void
 nv_compute_emit_inline_qmd_launch(struct nv_push *p, uint64_t qmd_gpu_addr,
@@ -491,6 +532,25 @@ nv_compute_emit_inline_qmd_launch(struct nv_push *p, uint64_t qmd_gpu_addr,
       nv_push_method(p, NVC3C0_SEND_SIGNALING_PCAS_B,
                      NVC3C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
                      NVC3C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE);
+   }
+}
+
+/**
+ * tick152 / pass20: launch + optional post WFI (cuda/vksc sema~WFI cooc).
+ * When complete_with_wfi, emit compute WFI after PCAS (helps host sema observe
+ * completion without relying on QMD sema alone — pass20 sema_cooc_256).
+ */
+static inline void
+nv_compute_emit_inline_qmd_launch_pass20(struct nv_push *p,
+                                         uint64_t qmd_gpu_addr,
+                                         const uint32_t qmd[NV_QMD_DWORDS],
+                                         bool signaling,
+                                         bool complete_with_wfi)
+{
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, signaling);
+   if (complete_with_wfi && p) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+      nv_push_method(p, NVC3C0_WAIT_FOR_IDLE, 0);
    }
 }
 
