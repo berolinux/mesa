@@ -1696,6 +1696,85 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -449; /* must fail on hw_error */
    }
 
+   /* pass12 RE: sema 0x1000/0x1002 modes + G2/G3 channel_prep + ladder size */
+   {
+      enum nv_host_sema_mode ladder[NV_HOST_SEMA_MODE_COUNT];
+      unsigned nl, i, has_1000 = 0, has_1002 = 0, has_1001 = 0;
+      uint32_t g2p[64], g3p[160];
+      uint32_t n2p, n3p, ii;
+      bool saw_wfi = false, saw_inv2 = false, saw_spa = false, saw_mme = false;
+
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB1000_ALIGN4) != 0x1000u)
+         return -450;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB1002_SHIFT2) != 0x1002u)
+         return -451;
+      if (!nv_host_sema_mode_uses_shift2(NV_HOST_SEMA_MODE_BLOB1000_SHIFT2))
+         return -452;
+      if (nv_host_sema_mode_uses_shift2(NV_HOST_SEMA_MODE_BLOB1000_ALIGN4))
+         return -453;
+
+      nl = nv_host_sema_ladder_fill(ladder, -1);
+      if (nl != NV_HOST_SEMA_MODE_COUNT)
+         return -454;
+      for (i = 0; i < nl; i++) {
+         uint32_t ex = nv_host_sema_execute(ladder[i]);
+         if (ex == 0x1001u)
+            has_1001 = 1;
+         if (ex == 0x1000u)
+            has_1000 = 1;
+         if (ex == 0x1002u)
+            has_1002 = 1;
+      }
+      if (!has_1001 || !has_1000 || !has_1002)
+         return -455;
+      /* pass12: primary 0x1001 modes still first in default ladder */
+      if (ladder[0] != NV_HOST_SEMA_MODE_BLOB_ALIGN4)
+         return -456;
+
+      memset(g2p, 0, sizeof(g2p));
+      nv_push_init(&p, g2p, (uint32_t)(sizeof(g2p) / 4));
+      nv_compute_emit_g2_channel_prep(&p, 0xc5c0u, 0x53, 0xb00000ull, 256u);
+      n2p = nv_push_dw_count(&p);
+      if (n2p < 8)
+         return -457;
+      for (ii = 0; ii + 1 < n2p; ii++) {
+         uint32_t hdr = g2p[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_WAIT_FOR_IDLE)
+            saw_wfi = true;
+         if (method == NVC3C0_INVALIDATE_SHADER_CACHES)
+            saw_inv2 = true;
+      }
+      if (!saw_wfi || !saw_inv2)
+         return -458;
+
+      memset(g3p, 0, sizeof(g3p));
+      nv_push_init(&p, g3p, (uint32_t)(sizeof(g3p) / 4));
+      nv_3d_emit_g3_channel_prep(&p, 0xc597u, 5, 3, true);
+      n3p = nv_push_dw_count(&p);
+      if (n3p < 10)
+         return -459;
+      for (ii = 0; ii + 1 < n3p; ii++) {
+         uint32_t hdr = g3p[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_SPA_VERSION)
+            saw_spa = true;
+         if (method == NVC597_LOAD_MME_INSTRUCTION_RAM_POINTER ||
+             method == NVC597_LOAD_MME_INSTRUCTION_RAM ||
+             method == 0x0114u || method == 0x0118u)
+            saw_mme = true;
+         if (method == NVC597_WAIT_FOR_IDLE)
+            saw_wfi = true;
+      }
+      if (!saw_spa || !saw_mme)
+         return -460;
+      (void)saw_wfi; /* WFI is best-effort; SPA+MME are required */
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

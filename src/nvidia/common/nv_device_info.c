@@ -359,10 +359,14 @@ nv_device_info_fill_class_ladder(int engine_kind, uint32_t prefer_first,
                                  uint32_t *out, unsigned *inout_n)
 {
    /*
-    * Newest-first ladders.  pass11 (610.43.02 glcore rodata @ 0x11bb600 /
+    * Newest-first ladders.  pass11/12 (610.43.02 glcore rodata @ 0x11bb600 /
     * 0x1238b70) is authoritative for contiguous engine arrays; pass9 counts
     * and pass5–8 imm scans remain as secondary sources for intermediate IDs
     * not present in the primary glcore arrays (e.g. C4B5, C8C0, C66F).
+    *
+    * pass12: primary GPFIFO has no C86F/C76F/C66F/506F (alts only); NVENC
+    * rodata is oldest-first C5B7..D1B7 (mesa still prefers newest-first).
+    * NVDEC has no single clean contiguous ladder; side table C4B0..C9B0 + alts.
     */
    /* pass11 glcore @ 0x11bb600: CAB5..B0B5 (no C4B5 in primary; keep as alt) */
    static const uint32_t ladder_copy[] = {

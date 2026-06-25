@@ -77,7 +77,7 @@ extern "C" {
     NVC36F_SEMAPHORED_RELEASE_SIZE_4BYTE)
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_610       0x00001001u
 #define NVC36F_SEMAPHORED_RELEASE_VDPAU_610      0x00000002u
-/* pass11: additional sema execute / acquire modes observed as imm (rare) */
+/* pass11/12: additional sema execute modes observed as imm (rare; try after 0x1001) */
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_1000      0x00001000u
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_1002      0x00001002u
 
@@ -89,12 +89,18 @@ enum nv_host_sema_mode {
    NV_HOST_SEMA_MODE_BLOB_ALIGN4 = 3, /* execute=0x1001; addr&~3 (blob b6c959 lo) */
    NV_HOST_SEMA_MODE_VDPAU_SHIFT2 = 4, /* execute=0x2; addr>>2 (pass8 vdpau 28c9a) */
    NV_HOST_SEMA_MODE_VDPAU_ALIGN4 = 5, /* execute=0x2; addr&~3 */
-   NV_HOST_SEMA_MODE_COUNT        = 6,
+   /* pass12: glcore imm 0x1000/0x1002 sites; secondary blob execute variants */
+   NV_HOST_SEMA_MODE_BLOB1000_SHIFT2 = 6, /* execute=0x1000; addr>>2 */
+   NV_HOST_SEMA_MODE_BLOB1000_ALIGN4 = 7, /* execute=0x1000; addr&~3 */
+   NV_HOST_SEMA_MODE_BLOB1002_SHIFT2 = 8, /* execute=0x1002; addr>>2 */
+   NV_HOST_SEMA_MODE_BLOB1002_ALIGN4 = 9, /* execute=0x1002; addr&~3 */
+   NV_HOST_SEMA_MODE_COUNT        = 10,
 };
 
 /**
- * tick129 / pass8-10: default bring-up order for host sema modes.
- * Prefer blob 0x1001 (glcore/vksc) then vdpau 0x2, then open-header modes.
+ * tick129 / pass8-12: default bring-up order for host sema modes.
+ * Prefer blob 0x1001 (glcore/vksc), then pass12 0x1000/0x1002 alts, then
+ * vdpau 0x2, then open-header modes.
  * If preferred_mode is in range, it is tried first (cached channel win).
  * Writes up to NV_HOST_SEMA_MODE_COUNT modes into out[]; returns count.
  */
@@ -105,6 +111,10 @@ nv_host_sema_ladder_fill(enum nv_host_sema_mode out[NV_HOST_SEMA_MODE_COUNT],
    static const enum nv_host_sema_mode k_default[NV_HOST_SEMA_MODE_COUNT] = {
       NV_HOST_SEMA_MODE_BLOB_ALIGN4,
       NV_HOST_SEMA_MODE_BLOB_SHIFT2,
+      NV_HOST_SEMA_MODE_BLOB1000_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB1000_SHIFT2,
+      NV_HOST_SEMA_MODE_BLOB1002_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB1002_SHIFT2,
       NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
       NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
       NV_HOST_SEMA_MODE_OPEN_ALIGN4,
@@ -143,7 +153,27 @@ nv_host_sema_mode_name(enum nv_host_sema_mode mode)
    case NV_HOST_SEMA_MODE_BLOB_ALIGN4:  return "blob_align4_0x1001";
    case NV_HOST_SEMA_MODE_VDPAU_SHIFT2: return "vdpau_shift2_0x2";
    case NV_HOST_SEMA_MODE_VDPAU_ALIGN4: return "vdpau_align4_0x2";
+   case NV_HOST_SEMA_MODE_BLOB1000_SHIFT2: return "blob_shift2_0x1000";
+   case NV_HOST_SEMA_MODE_BLOB1000_ALIGN4: return "blob_align4_0x1000";
+   case NV_HOST_SEMA_MODE_BLOB1002_SHIFT2: return "blob_shift2_0x1002";
+   case NV_HOST_SEMA_MODE_BLOB1002_ALIGN4: return "blob_align4_0x1002";
    default: return "unknown";
+   }
+}
+
+/** pass12: true if mode uses addr>>2 for SEMAPHOREB (else addr&~3 align4). */
+static inline bool
+nv_host_sema_mode_uses_shift2(enum nv_host_sema_mode mode)
+{
+   switch (mode) {
+   case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
+   case NV_HOST_SEMA_MODE_VDPAU_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB1000_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB1002_SHIFT2:
+      return true;
+   default:
+      return false;
    }
 }
 
@@ -284,19 +314,12 @@ nv_push_nop(struct nv_push *p)
 static inline uint32_t
 nv_host_sema_addr_lo(uint64_t sema_gpu_addr, enum nv_host_sema_mode mode)
 {
-   switch (mode) {
-   case NV_HOST_SEMA_MODE_OPEN_SHIFT2:
-   case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
-   case NV_HOST_SEMA_MODE_VDPAU_SHIFT2:
+   if (nv_host_sema_mode_uses_shift2(mode))
       return (uint32_t)((sema_gpu_addr >> 2) & 0x3fffffffu);
-   case NV_HOST_SEMA_MODE_OPEN_ALIGN4:
-   case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
-   case NV_HOST_SEMA_MODE_VDPAU_ALIGN4:
-   default:
-      return (uint32_t)(sema_gpu_addr & ~0x3u);
-   }
+   return (uint32_t)(sema_gpu_addr & ~0x3u);
 }
 
+/* pass12: execute imm includes 0x1000/0x1002 alts from glcore imm sites. */
 static inline uint32_t
 nv_host_sema_execute(enum nv_host_sema_mode mode)
 {
@@ -304,6 +327,12 @@ nv_host_sema_execute(enum nv_host_sema_mode mode)
    case NV_HOST_SEMA_MODE_BLOB_SHIFT2:
    case NV_HOST_SEMA_MODE_BLOB_ALIGN4:
       return NVC36F_SEMAPHORED_RELEASE_BLOB_610;
+   case NV_HOST_SEMA_MODE_BLOB1000_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB1000_ALIGN4:
+      return NVC36F_SEMAPHORED_RELEASE_BLOB_1000;
+   case NV_HOST_SEMA_MODE_BLOB1002_SHIFT2:
+   case NV_HOST_SEMA_MODE_BLOB1002_ALIGN4:
+      return NVC36F_SEMAPHORED_RELEASE_BLOB_1002;
    case NV_HOST_SEMA_MODE_VDPAU_SHIFT2:
    case NV_HOST_SEMA_MODE_VDPAU_ALIGN4:
       return NVC36F_SEMAPHORED_RELEASE_VDPAU_610;
@@ -316,8 +345,7 @@ nv_host_sema_execute(enum nv_host_sema_mode mode)
 
 /**
  * Host semaphore release with explicit silicon A/B mode.
- * Smoke/host_sema_submit ladders try BLOB 0x1001 first (glcore b6c952), then
- * VDPAU 0x2 (pass8 28c9a), then open-header bitfields last (theoretical only).
+ * pass12 ladder: BLOB 0x1001 → 0x1000/0x1002 alts → VDPAU 0x2 → open-header.
  */
 static inline void
 nv_push_sema_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,

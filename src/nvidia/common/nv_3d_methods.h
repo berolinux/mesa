@@ -22,6 +22,8 @@ extern "C" {
 /* --- Method addresses (byte offsets) --- */
 #define NVC597_SET_OBJECT                       0x0000
 #define NVC597_NO_OPERATION                     0x0100
+/* pass12: engine WFI (clc597 / pass12 method map 0x2c0 was mis-tagged; real is 0x0110) */
+#define NVC597_WAIT_FOR_IDLE                    0x0110
 #define NVC597_DRAW_INDEX_BUFFER_BEGIN_END_A    0x0268
 #define NVC597_DRAW_INDEX_BUFFER_BEGIN_END_B    0x026c
 #define NVC597_DRAW_VERTEX_ARRAY_BEGIN_END_A    0x0270
@@ -3923,10 +3925,53 @@ nv_3d_emit_g3_shader_draw_sema(struct nv_push *p, uint32_t class_3d,
 }
 
 /**
- * tick133: G3 fixed-func + optional shader pipeline + clear/draw/sema one-shot.
+ * pass12: G3 channel prep — SET_OBJECT + SPA + optional MME stub upload +
+ * shader/texture/const cache invalidates.  Call once per fresh 3D channel
+ * before first clear/draw.  MME upload uses end-only stubs (real macros TBD).
+ *
+ * spa_maj/min: 0,0 uses 5.3 (Ampere-era default, same as pipeline_bind_smoke).
+ * upload_mme: when true, emits nv_mme_emit_upload_indirect_stubs_only.
+ */
+static inline void
+nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
+                           uint8_t spa_maj, uint8_t spa_min, bool upload_mme)
+{
+   uint8_t maj = spa_maj ? spa_maj : (uint8_t)5u;
+   uint8_t min = spa_min ? spa_min : (uint8_t)3u;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   nv_push_method(p, NVC597_SET_SPA_VERSION,
+                  ((uint32_t)maj << 8) | (uint32_t)min);
+
+   if (upload_mme)
+      (void)nv_mme_emit_upload_indirect_stubs_only(p);
+
+   /* pass12/glcore: invalidate after MME/program setup, before first draw */
+   {
+      uint32_t inv = NVC597_INVALIDATE_SHADER_CACHES_INSTRUCTION_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_DATA_TRUE |
+                     NVC597_INVALIDATE_SHADER_CACHES_CONSTANT_TRUE;
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+      nv_push_method(p, NVC597_INVALIDATE_SHADER_CACHES, inv);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_DATA_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_SAMPLER_CACHE, 0);
+      nv_push_method(p, NVC597_INVALIDATE_TEXTURE_HEADER_CACHE, 0);
+      nv_push_method(p, NVC597_WAIT_FOR_IDLE, 0);
+   }
+}
+
+/**
+ * tick133 / pass12: G3 fixed-func + optional shader pipeline + clear/draw/sema.
+ * pass12 adds channel_prep (SPA/MME/inv/WFI) before viewport/fixed-func.
  * Prefer fixed-func (vs/fs = 0) for first silicon bring-up; pass real SPH VAs
  * when upload_graphics_smoke has completed on the channel.
- * Placed at end of header so blit/fixed_func helpers are already defined.
+ * Placed at end of header so blit/fixed_func/mme helpers are already defined.
  */
 static inline void
 nv_3d_emit_g3_bringup_slice(struct nv_push *p, uint32_t class_3d,
@@ -3943,8 +3988,9 @@ nv_3d_emit_g3_bringup_slice(struct nv_push *p, uint32_t class_3d,
 
    if (!p)
       return;
-   if (class_3d)
-      nv_3d_set_object(p, class_3d);
+
+   /* pass12: SPA + optional MME stubs + cache inv + WFI before first draw */
+   nv_3d_emit_g3_channel_prep(p, class_3d, 5, 3, true);
 
    if (ct_gpu_addr)
       nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format, false, 0);

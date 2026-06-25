@@ -37,6 +37,8 @@ extern "C" {
 /* NVC3C0 method offsets (class/clc3c0.h) — used on NV_PUSH_SUBCH_COMPUTE */
 #define NVC3C0_SET_OBJECT                    0x0000
 #define NVC3C0_NO_OPERATION                  0x0100
+/* pass12: clc3c0 WAIT_FOR_IDLE (same 0x0110 band as NVC597; engine drain) */
+#define NVC3C0_WAIT_FOR_IDLE                 0x0110
 #define NVC3C0_SET_SPA_VERSION               0x0310
 #define NVC3C0_SET_CWD_CONTROL               0x0258
 #define NVC3C0_SET_CWD_SLOT_COUNT            0x02b0
@@ -1171,9 +1173,39 @@ nv_qmd_desc_init_smoke_grid(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
 }
 
 /**
- * tick133: full G2 smoke slice — bringup init + QMD encode (G2 defaults) +
- * materialize + PCAS launch.  program_gpu_addr may be 0 for encode-only tests.
- * Must follow nv_qmd_desc_init_smoke_grid / apply_g2_bringup_defaults in this header.
+ * pass12: engine WFI on compute subch before first QMD/PCAS (glcore uses
+ * WAIT_FOR_IDLE heavily on compute path).  Optional — call after bringup_init.
+ */
+static inline void
+nv_compute_emit_wait_for_idle(struct nv_push *p)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_push_method(p, NVC3C0_WAIT_FOR_IDLE, 0);
+}
+
+/**
+ * pass12: full G2 channel prep — bringup init + WFI + second invalidate pass.
+ * Mirrors glcore order: SPA/CWD/LMEM → inv → WFI → (QMD later).
+ */
+static inline void
+nv_compute_emit_g2_channel_prep(struct nv_push *p, uint32_t class_compute,
+                                uint8_t spa_version, uint64_t lmem_gpu_addr,
+                                uint32_t local_mem_low_bytes)
+{
+   if (!p)
+      return;
+   nv_compute_emit_g2_bringup_init(p, class_compute, spa_version, 0,
+                                   lmem_gpu_addr, local_mem_low_bytes);
+   nv_compute_emit_wait_for_idle(p);
+   nv_compute_emit_invalidate_caches(p);
+}
+
+/**
+ * tick133 / pass12: full G2 smoke slice — channel prep + QMD encode (G2
+ * defaults) + materialize + inline QMD / PCAS launch.
+ * program_gpu_addr may be 0 for encode-only tests.
  * Returns 0 on success, -1 on bad args.
  */
 static inline int
@@ -1191,7 +1223,8 @@ nv_compute_emit_g2_smoke_slice(struct nv_push *p, uint32_t class_compute,
    if (!p)
       return -1;
 
-   nv_compute_emit_g2_bringup_init(p, class_compute, 0, 0, lmem_gpu_addr, 256u);
+   /* pass12: channel_prep includes WFI + double invalidate vs bringup_init only */
+   nv_compute_emit_g2_channel_prep(p, class_compute, 0, lmem_gpu_addr, 256u);
 
    nv_qmd_desc_init_smoke_grid(&d, program_gpu_addr, register_count,
                                sass_version,
