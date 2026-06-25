@@ -4294,6 +4294,20 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -871; /* must stay pending until re_pass24/ multi-hour done */
       if (!nv_pass24_g0_g4_symmetry_ok() || !nv_pass23_24_emit_policy_gate())
          return -872;
+      /* tick180: pass24 gpucomp interim RE + pass25 scaffold */
+      if (!NV_PASS24_RE_GPUCOMP_FOCUS_TICK180 || !nv_pass24_gpucomp_focus_ok())
+         return -873;
+      if (NV_PASS24_GPUCOMP_MME_CALL0_IMM_CAPPED != 1035u ||
+          NV_PASS24_GPUCOMP_CHAIN_INLINE_PCAS_OK != 0u)
+         return -874;
+      if (NV_PASS24_GPUCOMP_CHAIN_QMD_PCAS_OK < 1u)
+         return -875;
+      if (!NV_PASS25_RE_SCAFFOLD || !NV_PASS25_RE_INHERITS_PASS24)
+         return -876;
+      if (!nv_pass25_policy_ok() || NV_PASS25_RE_FULL_DISASM_PENDING == 0)
+         return -877;
+      if (NV_PASS25_IMPL_INHERITS_PASS24_WIRE != NV_PASS24_IMPL_WIRE_COMPLETE)
+         return -878;
    }
 
    if (trace_push && trace_dwords) {

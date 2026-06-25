@@ -177,6 +177,24 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS24_IMPL_GALLIUM_VK_TAIL_TICK177   1
 #define NV_PASS24_IMPL_WIRE_COMPLETE             1  /* G0–G4 pass24 helpers+channel wired */
 #define NV_PASS24_RE_TRACE_SCAFFOLD_TICK179      1
+/* tick180 / pass24 gpucomp-only interim RE (re_pass24/tables/gpucomp_pass24_focus.json) */
+#define NV_PASS24_RE_GPUCOMP_FOCUS_TICK180       1
+#define NV_PASS24_GPUCOMP_WFI_IMM_CAPPED         5000u
+#define NV_PASS24_GPUCOMP_MME_CALL0_IMM_CAPPED   1035u
+#define NV_PASS24_GPUCOMP_PCAS_B_IMM_CAPPED      4912u
+#define NV_PASS24_GPUCOMP_INLINE_A_IMM_CAPPED    729u
+#define NV_PASS24_GPUCOMP_CHAIN_MME_RAM_OK       2u   /* 64KB window; not template proof */
+#define NV_PASS24_GPUCOMP_CHAIN_INLINE_PCAS_OK   0u
+#define NV_PASS24_GPUCOMP_CHAIN_QMD_PCAS_OK      42u  /* short pair only */
+#define NV_PASS24_GPUCOMP_RAM_DATA_PROX_512_N    3u   /* few sites with MME peers in 512B */
+
+/* tick180 / pass25 scaffold — inherits pass24 impl wire; RE TBD */
+#define NV_PASS25_RE_SCAFFOLD                    1
+#define NV_PASS25_RE_INHERITS_PASS24             1
+#define NV_PASS25_RE_EXPLICIT_EMIT_POLICY        NV_PASS24_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS25_RE_PATH_C_STILL_GATED          NV_PASS24_RE_PATH_C_STILL_GATED
+#define NV_PASS25_RE_FULL_DISASM_PENDING         1
+#define NV_PASS25_IMPL_INHERITS_PASS24_WIRE      NV_PASS24_IMPL_WIRE_COMPLETE
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -222,6 +240,26 @@ nv_pass24_implementation_audit_ok(void)
           NV_PASS24_IMPL_WIRE_COMPLETE != 0 &&
           nv_pass24_policy_ok() &&
           NV_PASS24_RE_FULL_DISASM_PENDING != 0;
+}
+
+/** tick180: gpucomp interim RE reconfirms pass23/24 explicit-emit (no 5-step templates). */
+static inline bool
+nv_pass24_gpucomp_focus_ok(void)
+{
+   return NV_PASS24_RE_GPUCOMP_FOCUS_TICK180 != 0 &&
+          NV_PASS24_RE_GPUCOMP_MME_FOCUS != 0 &&
+          NV_PASS24_GPUCOMP_RAM_DATA_IMM_CAPPED == 127u &&
+          NV_PASS24_GPUCOMP_CHAIN_INLINE_PCAS_OK == 0u &&
+          NV_PASS24_GPUCOMP_HOST_SEM_C_IMM_CAPPED == 1738u;
+}
+
+static inline bool
+nv_pass25_policy_ok(void)
+{
+   return NV_PASS25_RE_SCAFFOLD != 0 &&
+          NV_PASS25_RE_INHERITS_PASS24 != 0 &&
+          nv_pass24_implementation_audit_ok() &&
+          NV_PASS25_RE_PATH_C_STILL_GATED != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
