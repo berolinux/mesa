@@ -203,6 +203,15 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS25_IMPL_G2_CHANNEL_TICK181        1
 #define NV_PASS25_IMPL_WIRE_COMPLETE             1
 #define NV_PASS25_RE_TRACE_SCAFFOLD_TICK183      1
+#define NV_PASS25_IMPL_G4_CHANNEL_TICK184        1
+
+/* tick184 / pass26 scaffold — inherits pass25 impl wire; RE TBD */
+#define NV_PASS26_RE_SCAFFOLD                    1
+#define NV_PASS26_RE_INHERITS_PASS25             1
+#define NV_PASS26_RE_EXPLICIT_EMIT_POLICY        NV_PASS25_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS26_RE_PATH_C_STILL_GATED          NV_PASS25_RE_PATH_C_STILL_GATED
+#define NV_PASS26_RE_FULL_DISASM_PENDING         1
+#define NV_PASS26_IMPL_INHERITS_PASS25_WIRE      NV_PASS25_IMPL_WIRE_COMPLETE
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -268,6 +277,20 @@ nv_pass25_policy_ok(void)
           NV_PASS25_RE_INHERITS_PASS24 != 0 &&
           nv_pass24_implementation_audit_ok() &&
           NV_PASS25_RE_PATH_C_STILL_GATED != 0;
+}
+
+/** tick183: pass25 mesa G0–G4 wire complete; pass25 RE still pending. */
+static inline bool
+nv_pass25_implementation_audit_ok(void)
+{
+   return NV_PASS25_IMPL_AUDIT_TICK183 != 0 &&
+          NV_PASS25_IMPL_SCAFFOLD_TICK180 != 0 &&
+          NV_PASS25_IMPL_G0_G4_SYMMETRY_TICK181 != 0 &&
+          NV_PASS25_IMPL_G1_G3_G4_TICK182 != 0 &&
+          NV_PASS25_IMPL_G2_CHANNEL_TICK181 != 0 &&
+          NV_PASS25_IMPL_WIRE_COMPLETE != 0 &&
+          nv_pass25_policy_ok() &&
+          NV_PASS25_RE_FULL_DISASM_PENDING != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
