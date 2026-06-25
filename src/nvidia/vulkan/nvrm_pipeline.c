@@ -2922,21 +2922,26 @@ nvrm_emit_compute_dispatch(struct nvrm_cmd_buffer *cmd,
       qmd_addr = nv_rm_bo_gpu_offset(cmd->push_bo);
    }
 
-   /* First compute in cmd buffer: SPA/CWD + method invalidates */
+   /* tick136 / pass12: first compute in cmd buffer uses full G2 channel_prep */
    if (!cmd->compute_init_done) {
       uint8_t spa = desc.sass_version ? desc.sass_version : 0x50;
       const struct nv_device_info *info = cmd->device ? cmd->device->info : NULL;
+      uint64_t lmem_addr = 0;
+      uint32_t lmem_low = desc.local_mem_low ? desc.local_mem_low : 256u;
       if (info && info->sm_version)
          spa = (uint8_t)(info->sm_version & 0xff);
-      nv_compute_emit_init_state(&cmd->push, class_compute, spa, 0);
+      if (cmd->lmem_bo)
+         lmem_addr = nv_rm_bo_gpu_offset(cmd->lmem_bo);
+      nv_compute_emit_g2_channel_prep(&cmd->push, class_compute, spa,
+                                      lmem_addr, lmem_low);
    }
 
-   /* Materialize QMD (+ sema sideband from desc) + optional method inv + PCAS */
+   /* Materialize QMD (+ sema sideband from desc) + PCAS (inv done in channel_prep) */
    nv_compute_emit_dispatch_with_sema(&cmd->push, &desc, qmd_addr, qmd_host,
                                       class_compute,
                                       desc.sema_release0_addr,
                                       desc.sema_release0_value,
-                                      !cmd->compute_init_done);
+                                      false /* inv in channel_prep or prior */);
    if (qmd_host && cmd->qmd_bo)
       nv_rm_bo_unmap(cmd->qmd_bo);
 

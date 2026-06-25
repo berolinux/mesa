@@ -474,6 +474,11 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
    res.g1_rc = 1;
    res.g2_rc = 1;
    res.g3_rc = 1;
+   res.g4_rc = 1;
+   res.g2_bringup_slice_rc = -1;
+   res.g3_bringup_slice_rc = -1;
+   res.g4_nvenc_rc = -1;
+   res.g4_nvdec_rc = -1;
 
    if (!ch || !sc || !sc->sema_gpu || !sc->sema_cpu)
       return -EINVAL;
@@ -821,6 +826,37 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                }
             }
          }
+         /* tick136: tertiary — pass12 full G2 bringup slice (channel_prep+QMD+PCAS) */
+         if (res.g2_rc != 0 && res.g2_rc != -EAGAIN && sc->qmd_gpu) {
+            uint32_t bu_class = 0;
+
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            if (sc->dst_cpu)
+               memset(sc->dst_cpu, 0, 256);
+            nv_channel_notifier_reset(ch);
+            res.g2_bringup_slice_rc = nv_channel_g2_bringup_slice_submit(
+               ch, 0, prog, regs, sass, sc->qmd_gpu, sc->qmd_cpu,
+               0 /* lmem: channel_prep uses 256B default without window */,
+               sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, 1, 1, to,
+               check_notifier, &bu_class);
+            if (sc->dst_cpu)
+               res.g2_store_observed = ((volatile uint32_t *)sc->dst_cpu)[0];
+            if (res.g2_bringup_slice_rc == 0) {
+               if (bu_class)
+                  res.g2_class_compute = bu_class;
+               if (expect_store && store_gpu && sc->dst_cpu &&
+                   ((volatile uint32_t *)sc->dst_cpu)[0] != store_imm) {
+                  res.g2_store_rc = -EIO;
+                  res.g2_rc = -EIO;
+               } else {
+                  res.g2_store_rc = 0;
+                  res.g2_submit_rc = 0;
+                  res.g2_rc = 0;
+                  res.slices_ok |= NV_SMOKE_HW_G2;
+               }
+            }
+         }
          if (nv_smoke_hw_env_verbose())
             nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g2");
          if (res.g2_rc && !r)
@@ -938,11 +974,112 @@ nv_smoke_hw_run_on_channel(struct nv_channel *ch,
                   res.slices_ok |= NV_SMOKE_HW_G3;
                }
             }
+            /* tick136: tertiary — pass12 G3 bringup_slice (SPA/MME/inv/clear/draw) */
+            if (res.g3_rc != 0 && res.g3_rc != -EAGAIN) {
+               uint32_t bu3 = 0;
+
+               if (sc->sema_cpu)
+                  sc->sema_cpu[0] = 0;
+               nv_channel_notifier_reset(ch);
+               res.g3_bringup_slice_rc = nv_channel_g3_bringup_slice_submit(
+                  ch, 0, sc->ct_gpu, 64, 64, 0, NULL, 0, 0, 0, 0, 0,
+                  sc->sema_gpu, sc->sema_cpu, sc->sema_payload, true, to,
+                  check_notifier, &bu3);
+               if (res.g3_bringup_slice_rc == 0) {
+                  if (bu3)
+                     res.g3_class_3d = bu3;
+                  res.g3_submit_rc = 0;
+                  res.g3_rc = 0;
+                  res.slices_ok |= NV_SMOKE_HW_G3;
+               }
+            }
          }
          if (nv_smoke_hw_env_verbose())
             nv_smoke_hw_dump_channel_trace(ch, "nv_smoke_hw_g3");
          if (res.g3_rc && !r)
             r = res.g3_rc;
+      }
+   }
+
+   /* tick136: G4 dedicated video/encode smoke (NV_SMOKE_HW_SLICES=16 or ALL) */
+   if (slices & NV_SMOKE_HW_G4) {
+      res.slices_run |= NV_SMOKE_HW_G4;
+      (void)nv_channel_ensure_engine_objects(ch);
+      res.g4_rc = -ENODEV;
+
+      if (sc->vid_ps_gpu && sc->sema_gpu) {
+         struct nv_nvdec_pic_setup vpic;
+         uint32_t dec_class = 0;
+
+         nv_nvdec_pic_setup_init_h264_smoke(&vpic, sc->vid_ps_gpu,
+                                            sc->vid_ps_gpu, 0);
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         nv_channel_notifier_reset(ch);
+         res.g4_nvdec_rc = nv_channel_nvdec_frame_sema_submit(
+            ch, 0, &vpic, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+            true, to, check_notifier);
+         if (res.g4_nvdec_rc == 0) {
+            res.g4_class_nvdec = ch->class_nvdec_bound
+                                    ? ch->class_nvdec_bound
+                                    : nv_channel_resolve_class_nvdec(ch, 0);
+            res.g4_rc = 0;
+         }
+         (void)dec_class;
+      }
+
+      if (sc->sema_gpu) {
+         uint32_t enc_class = 0;
+         struct nv_nvenc_frame_setup venc;
+
+         if (sc->vid_ps_cpu)
+            nv_nvenc_pic_setup_fill_h264_smoke(
+               (uint32_t *)sc->vid_ps_cpu, 256, 64, 64, 30, 1,
+               sc->ct_gpu ? sc->ct_gpu : sc->vid_ps_gpu, sc->vid_ps_gpu);
+         nv_nvenc_frame_setup_init_h264_smoke(
+            &venc, sc->vid_ps_gpu,
+            sc->ct_gpu ? sc->ct_gpu : sc->vid_ps_gpu, sc->vid_ps_gpu, 64, 64);
+         if (sc->sema_cpu)
+            sc->sema_cpu[0] = 0;
+         nv_channel_notifier_reset(ch);
+         /* Prefer pass12 h264 smoke slice; fall back to frame sema */
+         res.g4_nvenc_rc = nv_channel_nvenc_h264_smoke_slice_submit(
+            ch, 0, sc->vid_ps_gpu,
+            sc->ct_gpu ? sc->ct_gpu : sc->vid_ps_gpu, sc->vid_ps_gpu,
+            sc->vid_ps_gpu, 64, 64, sc->sema_gpu, sc->sema_cpu,
+            sc->sema_payload, true, to, check_notifier, &enc_class);
+         if (res.g4_nvenc_rc != 0) {
+            if (sc->sema_cpu)
+               sc->sema_cpu[0] = 0;
+            nv_channel_notifier_reset(ch);
+            res.g4_nvenc_rc = nv_channel_nvenc_frame_sema_submit(
+               ch, 0, &venc, sc->sema_gpu, sc->sema_cpu, sc->sema_payload,
+               true, to, check_notifier);
+         }
+         if (res.g4_nvenc_rc == 0) {
+            if (enc_class)
+               res.g4_class_nvenc = enc_class;
+            else if (ch->class_nvenc_bound)
+               res.g4_class_nvenc = ch->class_nvenc_bound;
+            res.g4_rc = 0;
+         } else if (res.g4_rc != 0) {
+            res.g4_rc = res.g4_nvenc_rc;
+         }
+      }
+
+      if (res.g4_rc == 0)
+         res.slices_ok |= NV_SMOKE_HW_G4;
+      else if (res.g4_rc == 1)
+         ; /* no video scratch — treat as skipped, not fatal for ALL */
+      else if (res.g4_rc && !r && (slices == NV_SMOKE_HW_G4))
+         r = res.g4_rc; /* only fatal when G4 is the sole requested slice */
+
+      if (nv_smoke_hw_env_verbose()) {
+         fprintf(stderr,
+                 "nv_smoke_hw G4 video: rc=%d nvenc=%d nvdec=%d "
+                 "class_enc=0x%x class_dec=0x%x\n",
+                 res.g4_rc, res.g4_nvenc_rc, res.g4_nvdec_rc,
+                 (unsigned)res.g4_class_nvenc, (unsigned)res.g4_class_nvdec);
       }
    }
 

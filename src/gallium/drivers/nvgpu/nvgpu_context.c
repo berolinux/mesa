@@ -621,6 +621,7 @@ static void
 nvgpu_ensure_3d_init(struct nvgpu_context *ctx, struct nv_push *push)
 {
    const struct nv_device_info *di = ctx->screen->info;
+   uint32_t class_3d = di ? di->class_3d : 0;
 
    if (!ctx->channel_init_emitted) {
       uint32_t spa_maj = 5, spa_min = 3; /* Ampere-class default; refined by arch later */
@@ -632,6 +633,9 @@ nvgpu_ensure_3d_init(struct nvgpu_context *ctx, struct nv_push *push)
       /* tick120: prime MME RAM (upload_only); indirect draws still host path A/B */
       mme_ok = nv_3d_emit_channel_init_with_mme(push, spa_maj, spa_min, 5, 3);
       ctx->mme_ram_primed = mme_ok;
+      /* tick136 / pass12: SPA + inv + WFI after MME prime (complements channel_init) */
+      nv_3d_emit_g3_channel_prep(push, class_3d, (uint8_t)spa_maj,
+                                 (uint8_t)spa_min, false /* MME already above */);
       ctx->channel_init_emitted = true;
    }
 
@@ -1749,10 +1753,17 @@ nvgpu_launch_grid(struct pipe_context *pctx,
       }
    }
 
-   /* SPA/CWD once per context compute init */
-   if (!ctx->lmem_programmed || !ctx->compute_init_done) {
-      nv_compute_emit_init_state(&push, class_compute, sass_ver, 0);
+   /* tick136 / pass12: full G2 channel_prep once (SPA/CWD/LMEM/WFI/inv) */
+   if (!ctx->compute_init_done) {
+      uint64_t lmem_addr = ctx->lmem_bo ? nv_rm_bo_gpu_offset(ctx->lmem_bo) : 0;
+      uint32_t lmem_low = desc.local_mem_low ? desc.local_mem_low : 256u;
+      nv_compute_emit_g2_channel_prep(&push, class_compute, sass_ver,
+                                      lmem_addr, lmem_low);
+      if (lmem_addr)
+         ctx->lmem_programmed = true;
       ctx->compute_init_done = true;
+   } else if (!ctx->lmem_programmed) {
+      nv_compute_emit_init_state(&push, class_compute, sass_ver, 0);
    }
 
    if (indirect_gpu_only && indirect_gpu) {

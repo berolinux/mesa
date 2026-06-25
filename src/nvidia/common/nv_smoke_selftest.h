@@ -24,6 +24,8 @@
 #include "nv_video_methods.h"
 /* tick135: SASS smoke helpers (compiler/nv_sass.h — path relative to src/nvidia) */
 #include "../compiler/nv_sass.h"
+/* tick136: smoke_hw slice bit constants (header-only; no HW) */
+#include "../rm/nv_smoke_hw.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -1838,6 +1840,20 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
       if (!saw_prep_spa || n3 < 20)
          return -468;
+   }
+
+   /* tick136: smoke_hw slice bits + NV_SMOKE_HW_G4 / ALL include video */
+   {
+      if (NV_SMOKE_HW_G4 != (1u << 4))
+         return -469;
+      if ((NV_SMOKE_HW_ALL & NV_SMOKE_HW_G4) == 0)
+         return -470;
+      if ((NV_SMOKE_HW_ALL & NV_SMOKE_HW_G0) == 0 ||
+          (NV_SMOKE_HW_ALL & NV_SMOKE_HW_G1) == 0)
+         return -471;
+      /* Bringup slice helpers must be declared (link via channel.c on full build) */
+      if (sizeof(struct nv_smoke_hw_result) < 64)
+         return -472;
    }
 
    if (trace_push && trace_dwords) {

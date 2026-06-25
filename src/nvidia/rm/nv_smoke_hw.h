@@ -85,7 +85,10 @@ struct nv_shader;
 #define NV_SMOKE_HW_G3   (1u << 2)
 /* tick98: G0 = aux probe (eventfd/share/export/timer); included in ALL */
 #define NV_SMOKE_HW_G0   (1u << 3)
-#define NV_SMOKE_HW_ALL  (NV_SMOKE_HW_G0 | NV_SMOKE_HW_G1 | NV_SMOKE_HW_G2 | NV_SMOKE_HW_G3)
+/* tick136: G4 = dedicated NVENC/NVDEC smoke (separate from G3 video fallback) */
+#define NV_SMOKE_HW_G4   (1u << 4)
+#define NV_SMOKE_HW_ALL  (NV_SMOKE_HW_G0 | NV_SMOKE_HW_G1 | NV_SMOKE_HW_G2 | \
+                          NV_SMOKE_HW_G3 | NV_SMOKE_HW_G4)
 
 struct nv_smoke_hw_result {
    int g1_rc;   /* 0 ok, negative errno/fail; 1 = skipped */
@@ -155,6 +158,8 @@ struct nv_smoke_hw_result {
    uint32_t g2_class_compute;
    uint64_t g2_prog_gpu;
    bool g2_had_prog;    /* true if program_gpu non-zero at dispatch */
+   /* tick136: pass12 bringup_slice tertiary path (-1 n/a) */
+   int g2_bringup_slice_rc;
    /* G3 phase detail */
    int g3_submit_rc;
    int g3_sema_only_rc; /* secondary: 3D sema-only if clear path fails */
@@ -164,6 +169,13 @@ struct nv_smoke_hw_result {
    int g3_host_sema_mode; /* winning/last nv_host_sema_mode; -1 n/a */
    uint32_t g3_class_3d;
    uint32_t g3_h_obj_3d;
+   int g3_bringup_slice_rc; /* tick136: pass12 g3 bringup_slice tertiary */
+   /* tick136: G4 video/encode dedicated slice */
+   int g4_rc;           /* 0 ok, 1 skipped, neg fail */
+   int g4_nvenc_rc;
+   int g4_nvdec_rc;
+   uint32_t g4_class_nvenc;
+   uint32_t g4_class_nvdec;
 };
 
 /** True if NV_SMOKE_HW_VERBOSE is set (non-empty, not "0"). */
