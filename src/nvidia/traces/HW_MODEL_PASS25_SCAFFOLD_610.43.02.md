@@ -21,10 +21,18 @@
 | G2 compute | `nv_pass25_compute_object_emit_launch` → pass24 → pass22 |
 | Dispatch tail | `nv_pass25_emit_compute_dispatch_host_sema_tail` |
 
+## Pass25 RE vs implementation
+
+| Layer | State |
+|-------|-------|
+| Mesa G0–G4 helpers + channel | **WIRE_COMPLETE** (`NV_PASS25_IMPL_WIRE_COMPLETE`) |
+| `re_pass25/` multi-hour disasm | **PENDING** |
+| Pass24 full multi-lib RE | **PENDING** (`NV_PASS24_RE_FULL_DISASM_PENDING`) |
+
 ## Still pending
 
 1. Full pass25 multi-hour RE (`re_pass25/`)
-2. Pass24 full multi-lib RE complete (`NV_PASS24_RE_FULL_DISASM_PENDING`)
+2. Pass24 full multi-lib RE complete
 3. NIR/MME/silicon blocks unchanged
 
 *Pass23 deep model + pass24 gpucomp interim remain primary RE measurements.*

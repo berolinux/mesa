@@ -329,9 +329,19 @@ nv_pass26_implementation_audit_ok(void)
           NV_PASS26_IMPL_G0_G4_SYMMETRY_TICK185 != 0 &&
           NV_PASS26_IMPL_G1_G3_G4_TICK186 != 0 &&
           NV_PASS26_IMPL_G2_CHANNEL_TICK185 != 0 &&
+          NV_PASS26_IMPL_G4_CHANNEL_TICK188 != 0 &&
           NV_PASS26_IMPL_WIRE_COMPLETE != 0 &&
           nv_pass26_policy_ok() &&
           NV_PASS26_RE_FULL_DISASM_PENDING != 0;
+}
+
+static inline bool
+nv_pass27_policy_ok(void)
+{
+   return NV_PASS27_RE_SCAFFOLD != 0 &&
+          NV_PASS27_RE_INHERITS_PASS26 != 0 &&
+          nv_pass26_implementation_audit_ok() &&
+          NV_PASS27_RE_PATH_C_STILL_GATED != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */

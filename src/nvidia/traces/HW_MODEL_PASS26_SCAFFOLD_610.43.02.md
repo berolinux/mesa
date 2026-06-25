@@ -20,6 +20,13 @@
 | G0–G4 sema | `nv_push_g0_g4_host_sema_tail_pass26` → pass25/21 |
 | G2 compute | `nv_pass26_compute_object_emit_launch` → pass25 → pass24 → pass22 |
 
+## Pass26 RE vs implementation
+
+| Layer | State |
+|-------|-------|
+| Mesa G0–G4 helpers + channel | **WIRE_COMPLETE** (`NV_PASS26_IMPL_WIRE_COMPLETE`) |
+| `re_pass26/` multi-hour disasm | **PENDING** |
+
 ## Still pending
 
 1. Full pass26 multi-hour RE (`re_pass26/`)
