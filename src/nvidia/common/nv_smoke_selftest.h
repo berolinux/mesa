@@ -3572,6 +3572,63 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -719;
    }
 
+   /* tick158: pass21 barrier (Gallium memory_barrier wire) + channel ladder shapes */
+   {
+      struct nv_push bp;
+      uint32_t bb[128], bi, li;
+      bool saw_inv = false, saw_wfi = false;
+      uint32_t qmd_scratch[NV_QMD_DWORDS];
+      struct nv_push cp;
+      uint32_t cb[512];
+
+      memset(bb, 0, sizeof(bb));
+      nv_push_init(&bp, bb, (uint32_t)(sizeof(bb) / 4));
+      nv_3d_emit_g3_barrier_all_pass21(&bp);
+      bi = nv_push_dw_count(&bp);
+      if (bi < 4)
+         return -720;
+      for (li = 0; li + 1 < bi; li++) {
+         uint32_t hdr = bb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == 0x021cu || method == 0x1330u)
+            saw_inv = true;
+         if (method == NVC36F_WFI || method == 0x0110u)
+            saw_wfi = true;
+      }
+      if (!saw_inv)
+         return -721;
+
+      memset(bb, 0, sizeof(bb));
+      nv_push_init(&bp, bb, (uint32_t)(sizeof(bb) / 4));
+      nv_3d_emit_g3_barrier_pass21(&bp, true, true, false, true, false, false,
+                                   true);
+      if (nv_push_dw_count(&bp) < 2)
+         return -722;
+
+      /* G2 program launch pass21 shape (channel bringup step 4) */
+      memset(cb, 0, sizeof(cb));
+      nv_push_init(&cp, cb, (uint32_t)(sizeof(cb) / 4));
+      if (nv_compute_emit_g2_program_launch_pass21(
+             &cp, 0xc5c0u, qmd_scratch, 0x210000ull, 0x800000ull, 0, 0x53, 16,
+             0x310000ull, 0x55u, 1, 32, true, 0x610000ull, 0x66u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -723;
+      if (nv_push_dw_count(&cp) <
+          nv_pass20_inline_qmd_launch_min_methods(true) + 2u)
+         return -724;
+
+      /* G3 inv+host sema pass21 shape (channel bringup step 2) */
+      memset(bb, 0, sizeof(bb));
+      nv_push_init(&bp, bb, (uint32_t)(sizeof(bb) / 4));
+      if (nv_3d_emit_g3_inv_wfi_host_sema_pass21(
+             &bp, 0x700000ull, 0x77u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+             true) != 0)
+         return -725;
+      (void)saw_wfi;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

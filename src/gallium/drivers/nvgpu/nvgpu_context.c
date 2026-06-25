@@ -2092,8 +2092,8 @@ nvgpu_memory_barrier(struct pipe_context *pctx, unsigned flags)
    bool sh_d = false, sh_c = false, sh_i = false;
    bool tx_s = false, tx_h = false, tx_d = false;
 
-   /* tick149: pass18 inv ladder needs a few more dwords + optional WFI */
-   if (!nvgpu_push_start(ctx, &push, 48))
+   /* tick149/158: pass18/21 inv ladder needs room for NVC597 methods + WFI */
+   if (!nvgpu_push_start(ctx, &push, 64))
       return;
    if (flags & (PIPE_BARRIER_SHADER_BUFFER | PIPE_BARRIER_CONSTANT_BUFFER |
                 PIPE_BARRIER_INDIRECT_BUFFER | PIPE_BARRIER_VERTEX_BUFFER |
@@ -2108,11 +2108,14 @@ nvgpu_memory_barrier(struct pipe_context *pctx, unsigned flags)
    }
    if (flags & PIPE_BARRIER_MAPPED_BUFFER)
       sh_d = true;
-   /* pass18/19: full barrier uses pass19 NVC597 inv ladder (0x021c/0x133x)+WFI */
+   /* tick158 / pass21: BARRIER_ALL → pass21 barrier (NVC597 inv ladder + WFI);
+    * selective flags use pass21 partial ladder or legacy memory_barrier helper */
    if (flags & PIPE_BARRIER_ALL) {
-      sh_i = sh_d = sh_c = tx_s = tx_h = tx_d = true;
-      nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(&push, sh_i, sh_d, sh_c,
-                                                  tx_s, tx_h, tx_d, true);
+      nv_3d_emit_g3_barrier_all_pass21(&push);
+   } else if (sh_d || sh_c || tx_s || tx_h || tx_d) {
+      sh_i = sh_d || sh_c;
+      nv_3d_emit_g3_barrier_pass21(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d,
+                                   true);
    } else {
       nv_3d_emit_memory_barrier(&push, sh_i, sh_d, sh_c, tx_s, tx_h, tx_d);
    }

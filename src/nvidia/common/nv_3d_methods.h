@@ -4267,6 +4267,30 @@ nv_3d_emit_g3_inv_wfi_host_sema_pass17(struct nv_push *p,
 }
 
 /**
+ * tick158 / pass21: G3 barrier-only (no host sema) — full NVC597 inv ladder +
+ * WFI.  Gallium memory_barrier(PIPE_BARRIER_ALL) / texture_barrier path.
+ */
+static inline void
+nv_3d_emit_g3_barrier_pass21(struct nv_push *p, bool inv_shader,
+                             bool inv_shader_data, bool inv_shader_const,
+                             bool inv_tex_sampler, bool inv_tex_hdr,
+                             bool inv_tex_data, bool do_wfi)
+{
+   if (!p)
+      return;
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(
+      p, inv_shader, inv_shader_data, inv_shader_const, inv_tex_sampler,
+      inv_tex_hdr, inv_tex_data, do_wfi);
+}
+
+/** tick158: all caches + WFI (PIPE_BARRIER_ALL shape). */
+static inline void
+nv_3d_emit_g3_barrier_all_pass21(struct nv_push *p)
+{
+   nv_3d_emit_g3_barrier_pass21(p, true, true, true, true, true, true, true);
+}
+
+/**
  * tick157 / pass21: G3 inv ladder + WFI on 3D, then unified pass21 host sema
  * tail (formal pass17 policy via nv_push_g0_g4_host_sema_tail_pass21).
  * Prefer this over pass17 for new Gallium/Vulkan barrier paths; pass17 kept

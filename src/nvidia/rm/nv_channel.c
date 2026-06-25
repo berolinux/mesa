@@ -1329,7 +1329,9 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->schedule_path = 0;
    ch->schedule_bind_rc = -1;
    ch->host_sema_mode_pref = -1;
-   ch->host_sema_emit_pref = 0; /* tick147: pass17 formal sema (default) */
+   /* tick147/158: pass17 formal sema default; pass21 mode ladder uses same
+    * BLOB1004-first policy when sticky is unset (see nv_pass21_g0_g4_sema_mode_ladder_fill). */
+   ch->host_sema_emit_pref = 0;
    ch->fault_method_rc = -1;
    (void)nv_channel_try_schedule(ch);
 
@@ -4254,6 +4256,44 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+
+      /* tick158 / pass21: program launch path (pass17 QMD + pass21 host sema
+       * tail via nv_compute_emit_g2_program_launch_pass21).  Uses program VA
+       * when provided; same qmd_gpu_addr for inline upload target. */
+      if (program_gpu_addr && sema_gpu_addr) {
+         uint32_t qmd_scratch[NV_QMD_DWORDS];
+         enum nv_host_sema_mode hs_mode =
+            (ch->host_sema_mode_pref >= 0 &&
+             ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+               ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+               : NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+
+         if (sema_reset && sema_cpu)
+            sema_cpu[0] = 0;
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+         nv_push_init(&push, map, need);
+         if (nv_compute_emit_g2_program_launch_pass21(
+                &push, cc_try, qmd_scratch, program_gpu_addr, qmd_gpu_addr,
+                lmem_gpu_addr, sass_version, register_count, sema_gpu_addr,
+                sema_payload, grid_x, cta_x, true, sema_gpu_addr, sema_payload,
+                hs_mode) == 0) {
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (r == 0) {
+               if (!ch->class_compute_bound)
+                  ch->class_compute_bound = cc_try;
+               if (class_used_out)
+                  *class_used_out = cc_try;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+         }
+      }
    }
    return last;
 }
@@ -4350,6 +4390,41 @@ nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+
+      /* tick158 / pass21: report timed out — inv ladder + pass21 host sema tail
+       * on same sema slot (host may complete when 3D report sema not observed) */
+      if (sema_gpu_addr && sema_cpu) {
+         enum nv_host_sema_mode hs_mode =
+            (ch->host_sema_mode_pref >= 0 &&
+             ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+               ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+               : NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+
+         if (sema_reset)
+            sema_cpu[0] = 0;
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+         nv_push_init(&push, map, need);
+         if (c3)
+            nv_3d_set_object(&push, c3);
+         if (nv_3d_emit_g3_inv_wfi_host_sema_pass21(
+                &push, sema_gpu_addr, sema_payload, hs_mode, true) == 0) {
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (r == 0) {
+               if (!ch->class_3d_bound)
+                  ch->class_3d_bound = c3;
+               if (class_used_out)
+                  *class_used_out = c3;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+         }
+      }
    }
    return last;
 }
