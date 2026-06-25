@@ -4127,6 +4127,51 @@ nv_g4_emit_nvenc_bringup_pass21(struct nv_push *p, uint32_t class_nvenc,
 #define NV_PASS22_RE_WIRED                   1
 #define NV_PASS22_RE_SEMA_BASES_REFINED      1
 #define NV_PASS22_RE_PASS21_POLICY_VALID     1
+/* tick168 / pass23: next RE pass scaffold — inherits pass22 explicit-emit + gates */
+#define NV_PASS23_RE_SCAFFOLD                1
+#define NV_PASS23_RE_INHERITS_PASS22         1
+#define NV_PASS23_RE_PATH_C_STILL_GATED      NV_PASS22_RE_PATH_C_STILL_GATED
+#define NV_PASS23_RE_G0_G4_UNIFIED_TAIL      NV_PASS21_RE_G0_G4_UNIFIED_TAIL
+
+/**
+ * tick168 / pass23: G4 NVDEC bringup with pass22 explicit-emit policy check.
+ * Same as pass21 when policy on; refuses if pass22 requires explicit emit and
+ * caller would skip host sema without policy alignment (always emits pass21 tail
+ * when add_host_sema_tail).
+ */
+static inline int
+nv_g4_emit_nvdec_bringup_pass23(struct nv_push *p, uint32_t class_nvdec,
+                                const struct nv_nvdec_pic_setup *pic,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass22_explicit_emit_required() && NV_PASS23_RE_INHERITS_PASS22)
+      return -1; /* pass23 requires pass22 policy symbols wired */
+   return nv_g4_emit_nvdec_bringup_pass21(p, class_nvdec, pic, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
+
+static inline int
+nv_g4_emit_nvenc_bringup_pass23(struct nv_push *p, uint32_t class_nvenc,
+                                uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                                uint64_t bitstream_gpu, uint64_t status_gpu,
+                                uint32_t width, uint32_t height,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass22_explicit_emit_required() && NV_PASS23_RE_INHERITS_PASS22)
+      return -1;
+   return nv_g4_emit_nvenc_bringup_pass21(p, class_nvenc, pic_setup_gpu,
+                                          input_yuv_gpu, bitstream_gpu,
+                                          status_gpu, width, height, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
 
 #ifdef __cplusplus
 }

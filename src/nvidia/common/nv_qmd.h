@@ -104,6 +104,18 @@ extern "C" {
 #define NV_PASS22_CHAIN_INLINE_PCAS_FORWARD_OK   0
 #define NV_PASS22_CHAIN_MME_RAM_UPLOAD_FORWARD_OK 0
 
+/* tick168 / pass23 RE scaffold (multi-hour disasm pass TBD under re_pass23/) */
+#define NV_PASS23_RE_SCAFFOLD                    1
+#define NV_PASS23_RE_EXPLICIT_EMIT_POLICY        NV_PASS22_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS23_RE_ORDERED_TEMPLATES_ABSENT    NV_PASS22_RE_ORDERED_TEMPLATES_ABSENT
+#define NV_PASS23_INLINE_TO_PCAS_MEDIAN_GLCORE   NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE
+
+static inline bool
+nv_pass23_explicit_emit_required(void)
+{
+   return NV_PASS23_RE_SCAFFOLD != 0 && nv_pass22_explicit_emit_required();
+}
+
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8

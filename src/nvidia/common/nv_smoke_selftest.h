@@ -4095,6 +4095,20 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       }
    }
 
+   /* tick168: pass23 RE scaffold inherits pass22 policy */
+   {
+      if (!NV_PASS23_RE_SCAFFOLD || !NV_PASS23_RE_INHERITS_PASS22)
+         return -822;
+      if (!nv_pass23_explicit_emit_required())
+         return -823;
+      if (NV_PASS23_RE_PATH_C_STILL_GATED != NV_PASS22_RE_PATH_C_STILL_GATED)
+         return -824;
+      if (NV_PASS23_INLINE_TO_PCAS_MEDIAN_GLCORE != 428u)
+         return -825;
+      if (!NV_PASS23_RE_G0_G4_UNIFIED_TAIL)
+         return -826;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
