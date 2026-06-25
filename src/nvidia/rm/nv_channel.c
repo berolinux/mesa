@@ -1329,7 +1329,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->schedule_path = 0;
    ch->schedule_bind_rc = -1;
    ch->host_sema_mode_pref = -1;
-   ch->host_sema_emit_pref = 0; /* tick141: auto sema emit (slot for pass14 modes) */
+   ch->host_sema_emit_pref = 0; /* tick147: pass17 formal sema (default) */
    ch->fault_method_rc = -1;
    (void)nv_channel_try_schedule(ch);
 
@@ -2580,16 +2580,12 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
             if (sema_reset && sema_cpu)
                sema_cpu[0] = 0;
 
-            /* tick141: try auto sema emit, then classic D fallback for pass14 modes */
+            /* tick147: pass17 formal sema first, then classic/slot ladder */
             {
                int emit_try[3];
-               unsigned ei, n_emit = 0;
-               int emit_pref = ch->host_sema_emit_pref;
-               emit_try[n_emit++] = (emit_pref >= 0 && emit_pref <= 2) ? emit_pref : 0;
-               if (nv_host_sema_execute_method(sm) != NVC36F_SEMAPHORED) {
-                  if (emit_try[0] != 1)
-                     emit_try[n_emit++] = 1; /* classic execute-in-D fallback */
-               }
+               unsigned ei, n_emit;
+               n_emit = nv_host_sema_emit_ladder_fill(emit_try,
+                                                      ch->host_sema_emit_pref, sm);
                for (ei = 0; ei < n_emit; ei++) {
                   map = nv_channel_push_begin(ch, need);
                   if (!map)
@@ -2809,35 +2805,37 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
 
    for (i = 0; i < n_order; i++) {
       enum nv_host_sema_mode mode = order[i];
+      int emit_try[3];
+      unsigned ei, n_emit;
 
-      if (sema_reset && sema_cpu)
-         sema_cpu[0] = 0;
+      /* tick147: try pass17/classic/slot emit ladder per execute mode */
+      n_emit = nv_host_sema_emit_ladder_fill(emit_try,
+                                             ch->host_sema_emit_pref, mode);
+      for (ei = 0; ei < n_emit; ei++) {
+         if (sema_reset && sema_cpu)
+            sema_cpu[0] = 0;
+         map = nv_channel_push_begin(ch, need);
+         if (!map)
+            return -ENOMEM;
+         /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
+         nv_push_init(&push, map, need);
+         nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+         nv_push_host_semaphore_release_wfi_mode_ex(
+            &push, sema_gpu_addr, sema_payload, true, mode, emit_try[ei]);
+         nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
-      map = nv_channel_push_begin(ch, need);
-      if (!map)
-         return -ENOMEM;
-
-      /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
-      nv_push_init(&push, map, need);
-      nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-      /* tick141: WFI+sema with pass14 slot/classic policy from channel sticky pref */
-      nv_push_host_semaphore_release_wfi_mode_ex(
-         &push, sema_gpu_addr, sema_payload, true, mode,
-         (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
-            ? ch->host_sema_emit_pref : 0);
-      nv_channel_push_advance(ch, nv_push_dw_count(&push));
-
-      last_rc = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
-                                            wait_timeout_ns, check_notifier);
-      if (mode_used_out)
-         *mode_used_out = (int)mode;
-      if (last_rc == 0) {
-         ch->host_sema_mode_pref = (int)mode;
-         return 0;
+         last_rc = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+         if (mode_used_out)
+            *mode_used_out = (int)mode;
+         if (last_rc == 0) {
+            ch->host_sema_mode_pref = (int)mode;
+            ch->host_sema_emit_pref = emit_try[ei];
+            return 0;
+         }
+         if (last_rc != -ETIMEDOUT && last_rc != -EIO && last_rc != -EAGAIN)
+            return last_rc;
       }
-      /* -ETIMEDOUT / -EIO: sema did not complete — try next encoding */
-      if (last_rc != -ETIMEDOUT && last_rc != -EIO && last_rc != -EAGAIN)
-         return last_rc;
    }
 
    return last_rc;
@@ -3192,28 +3190,54 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
          nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr,
                                             qmd_host, 0, 0, 0,
                                             method_invalidate);
-         nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-         nv_push_host_semaphore_release_wfi_mode_ex(
-            &push, sema_gpu_addr, sema_payload, true, sm,
-            (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
-               ? ch->host_sema_emit_pref : 0);
-         nv_channel_push_advance(ch, nv_push_dw_count(&push));
+         /* tick147: pass17 sema emit ladder after compute dispatch */
+         {
+            int emit_try[3];
+            unsigned ei, n_emit;
+            n_emit = nv_host_sema_emit_ladder_fill(emit_try,
+                                                   ch->host_sema_emit_pref, sm);
+            for (ei = 0; ei < n_emit; ei++) {
+               if (ei > 0) {
+                  if (sema_reset && sema_cpu)
+                     sema_cpu[0] = 0;
+                  map = nv_channel_push_begin(ch, need);
+                  if (!map)
+                     return -ENOMEM;
+                  nv_push_init(&push, map, need);
+                  if (emit_init_state && ch->info)
+                     nv_compute_emit_lmem_and_init_from_info(&push, cc, 0, 0,
+                                                            ch->info, 0);
+                  else if (emit_init_state)
+                     nv_compute_emit_init_state(&push, cc, 0, 0);
+                  else
+                     nv_compute_set_object(&push, cc);
+                  nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr,
+                                                     qmd_host, 0, 0, 0,
+                                                     method_invalidate);
+               }
+               nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+               nv_push_host_semaphore_release_wfi_mode_ex(
+                  &push, sema_gpu_addr, sema_payload, true, sm, emit_try[ei]);
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
-         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
-                                         wait_timeout_ns, check_notifier);
-         if (host_sema_mode_out)
-            *host_sema_mode_out = (int)sm;
-         if (r == 0) {
-            ch->host_sema_mode_pref = (int)sm;
-            if (!ch->class_compute_bound)
-               ch->class_compute_bound = cc;
-            if (class_used_out)
-               *class_used_out = cc;
-            return 0;
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (host_sema_mode_out)
+                  *host_sema_mode_out = (int)sm;
+               if (r == 0) {
+                  ch->host_sema_mode_pref = (int)sm;
+                  ch->host_sema_emit_pref = emit_try[ei];
+                  if (!ch->class_compute_bound)
+                     ch->class_compute_bound = cc;
+                  if (class_used_out)
+                     *class_used_out = cc;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
          }
-         last = r;
-         if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
-            return r;
       }
 
       /* Phase 2: two kicks — compute then host sema ladder */

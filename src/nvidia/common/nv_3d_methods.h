@@ -2012,17 +2012,16 @@ nv_3d_emit_draw_indirect_multi_with_sema(struct nv_push *p,
 
 /**
  * Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object).
- * tick141: pass14 non-D execute modes (0x1004/1002/0804/0802) use slot-aware
- * emit; classic 0x1001/0x1000/vdpau/open keep execute in D.
+ * tick141/147: pass14/17 non-D execute modes (0x1004/1002/0804/0802) use
+ * pass17 formal sema policy (slot-aware A/B/C); classic 0x1001/0x1000/vdpau/open
+ * keep execute in D.  tick147 default channel/Vulkan paths use pass17.
  */
 static inline void
 nv_push_host_semaphore_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
                                     uint32_t payload, enum nv_host_sema_mode mode)
 {
-   if (nv_host_sema_execute_method(mode) != NVC36F_SEMAPHORED)
-      nv_push_sema_release_mode_slot(p, sema_gpu_addr, payload, mode);
-   else
-      nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
+   /* tick147: pass17 formal table is authoritative for known execute imms */
+   nv_push_sema_release_mode_pass17(p, sema_gpu_addr, payload, mode);
 }
 
 /** tick141: force classic execute-in-D even for 1004/1002/080x modes (fallback). */
@@ -2044,6 +2043,28 @@ nv_push_host_semaphore_release_mode_slot(struct nv_push *p,
 {
    nv_push_sema_release_mode_slot(p, sema_gpu_addr, payload, mode);
 }
+
+/** tick147: explicit pass17 formal policy (alias of default release_mode). */
+static inline void
+nv_push_host_semaphore_release_mode_pass17(struct nv_push *p,
+                                           uint64_t sema_gpu_addr,
+                                           uint32_t payload,
+                                           enum nv_host_sema_mode mode)
+{
+   nv_push_sema_release_mode_pass17(p, sema_gpu_addr, payload, mode);
+}
+
+/*
+ * tick147 sema_emit policy values (ch->host_sema_emit_pref):
+ *   0 = pass17 formal (default; slot for A/B/C exec, classic D for 0x1001/nonstd)
+ *   1 = classic execute-in-D always
+ *   2 = force pass14 slot-aware always
+ *   3 = explicit pass17 (same as 0; retained for sticky-pref clarity / ladders)
+ */
+#define NV_HOST_SEMA_EMIT_PASS17   0
+#define NV_HOST_SEMA_EMIT_CLASSIC  1
+#define NV_HOST_SEMA_EMIT_SLOT     2
+#define NV_HOST_SEMA_EMIT_PASS17_EXPLICIT 3
 
 static inline void
 nv_push_host_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
@@ -2070,8 +2091,8 @@ nv_push_host_semaphore_release_wfi_mode(struct nv_push *p,
 }
 
 /**
- * tick141: WFI + sema with explicit slot/classic policy for silicon ladder.
- * sema_emit: 0 = auto (non-D modes use slot), 1 = classic D, 2 = force slot.
+ * tick141/147: WFI + sema with emit policy for silicon ladder.
+ * sema_emit: 0/3 = pass17 formal, 1 = classic D, 2 = force slot.
  */
 static inline void
 nv_push_host_semaphore_release_wfi_mode_ex(struct nv_push *p,
@@ -2082,14 +2103,55 @@ nv_push_host_semaphore_release_wfi_mode_ex(struct nv_push *p,
 {
    if (with_wfi)
       nv_push_method(p, NVC36F_WFI, 0);
-   if (sema_emit == 1)
+   if (sema_emit == NV_HOST_SEMA_EMIT_CLASSIC /* 1 */)
       nv_push_host_semaphore_release_mode_classic(p, sema_gpu_addr, payload,
                                                   mode);
-   else if (sema_emit == 2)
+   else if (sema_emit == NV_HOST_SEMA_EMIT_SLOT /* 2 */)
       nv_push_host_semaphore_release_mode_slot(p, sema_gpu_addr, payload,
                                                mode);
-   else
-      nv_push_host_semaphore_release_mode(p, sema_gpu_addr, payload, mode);
+   else /* 0, 3, or unknown: pass17 formal (tick147 default) */
+      nv_push_host_semaphore_release_mode_pass17(p, sema_gpu_addr, payload,
+                                                 mode);
+}
+
+/** tick147: clamp/normalize channel emit pref to pass17/classic/slot. */
+static inline int
+nv_host_sema_emit_pref_normalize(int emit_pref)
+{
+   if (emit_pref == NV_HOST_SEMA_EMIT_CLASSIC ||
+       emit_pref == NV_HOST_SEMA_EMIT_SLOT ||
+       emit_pref == NV_HOST_SEMA_EMIT_PASS17_EXPLICIT)
+      return emit_pref;
+   return NV_HOST_SEMA_EMIT_PASS17; /* 0 or invalid → pass17 */
+}
+
+/**
+ * tick147: build emit ladder for silicon try — pass17 first, then classic D
+ * fallback for non-D execute modes, then force-slot as last resort.
+ * Writes up to 3 values into out_emit[]; returns count.
+ */
+static inline unsigned
+nv_host_sema_emit_ladder_fill(int out_emit[3], int preferred_emit,
+                              enum nv_host_sema_mode mode)
+{
+   unsigned n = 0;
+   int pref = nv_host_sema_emit_pref_normalize(preferred_emit);
+   bool non_d = (nv_host_sema_execute_method(mode) != NVC36F_SEMAPHORED);
+
+   out_emit[n++] = pref;
+   if (pref != NV_HOST_SEMA_EMIT_CLASSIC && non_d)
+      out_emit[n++] = NV_HOST_SEMA_EMIT_CLASSIC;
+   if (pref != NV_HOST_SEMA_EMIT_SLOT && non_d) {
+      unsigned i;
+      bool have_slot = false;
+      for (i = 0; i < n; i++) {
+         if (out_emit[i] == NV_HOST_SEMA_EMIT_SLOT)
+            have_slot = true;
+      }
+      if (!have_slot && n < 3)
+         out_emit[n++] = NV_HOST_SEMA_EMIT_SLOT;
+   }
+   return n;
 }
 
 static inline void

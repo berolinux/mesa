@@ -631,8 +631,8 @@ nvrm_cmd_emit_host_sema_release_ex(struct nvrm_cmd_buffer *cmd,
       if (ch->host_sema_mode_pref >= 0 &&
           ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
          mode = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
-      if (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
-         emit_pref = ch->host_sema_emit_pref;
+      /* tick147: pass17 formal is default; allow classic/slot sticky prefs */
+      emit_pref = nv_host_sema_emit_pref_normalize(ch->host_sema_emit_pref);
    }
    nv_push_host_semaphore_release_wfi_mode_ex(&cmd->push, sema_gpu_addr, payload,
                                               false, mode, emit_pref);

@@ -2625,6 +2625,90 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -597;
    }
 
+   /* tick147: channel pass17 sema emit ladder + WFI_mode_ex pass17 default */
+   {
+      int elad[3];
+      unsigned nel;
+      struct nv_push pw;
+      uint32_t wbuf[48], wn, wj;
+      bool saw_c = false, saw_d_classic = false;
+
+      if (nv_host_sema_emit_pref_normalize(-1) != NV_HOST_SEMA_EMIT_PASS17)
+         return -598;
+      if (nv_host_sema_emit_pref_normalize(1) != NV_HOST_SEMA_EMIT_CLASSIC)
+         return -599;
+      if (nv_host_sema_emit_pref_normalize(3) != NV_HOST_SEMA_EMIT_PASS17_EXPLICIT)
+         return -600;
+
+      nel = nv_host_sema_emit_ladder_fill(elad, 0,
+                                          NV_HOST_SEMA_MODE_BLOB1004_ALIGN4);
+      if (nel < 2)
+         return -601;
+      if (elad[0] != NV_HOST_SEMA_EMIT_PASS17)
+         return -602;
+      if (elad[1] != NV_HOST_SEMA_EMIT_CLASSIC)
+         return -603;
+
+      /* pass17 emit (0): 0x1004 → execute on C */
+      memset(wbuf, 0, sizeof(wbuf));
+      nv_push_init(&pw, wbuf, (uint32_t)(sizeof(wbuf) / 4));
+      nv_push_set_subch(&pw, NV_PUSH_SUBCH_3D);
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         &pw, 0x600000ull, 5u, true, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+         NV_HOST_SEMA_EMIT_PASS17);
+      wn = nv_push_dw_count(&pw);
+      if (wn < 6)
+         return -604;
+      for (wj = 0; wj + 1 < wn; wj++) {
+         uint32_t hdr = wbuf[wj];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && wbuf[wj + 1] == 0x1004u)
+            saw_c = true;
+      }
+      if (!saw_c)
+         return -605;
+
+      /* classic emit (1): 0x1004 → execute on D */
+      memset(wbuf, 0, sizeof(wbuf));
+      nv_push_init(&pw, wbuf, (uint32_t)(sizeof(wbuf) / 4));
+      nv_push_set_subch(&pw, NV_PUSH_SUBCH_3D);
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         &pw, 0x600000ull, 5u, false, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+         NV_HOST_SEMA_EMIT_CLASSIC);
+      wn = nv_push_dw_count(&pw);
+      for (wj = 0; wj + 1 < wn; wj++) {
+         uint32_t hdr = wbuf[wj];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHORED && wbuf[wj + 1] == 0x1004u)
+            saw_d_classic = true;
+      }
+      if (!saw_d_classic)
+         return -606;
+
+      /* host_semaphore_release_mode default is pass17 (1002 → B) */
+      memset(wbuf, 0, sizeof(wbuf));
+      nv_push_init(&pw, wbuf, (uint32_t)(sizeof(wbuf) / 4));
+      nv_push_set_subch(&pw, NV_PUSH_SUBCH_3D);
+      nv_push_host_semaphore_release_mode(&pw, 0x700000ull, 9u,
+                                          NV_HOST_SEMA_MODE_BLOB1002_ALIGN4);
+      wn = nv_push_dw_count(&pw);
+      saw_c = false;
+      for (wj = 0; wj + 1 < wn; wj++) {
+         uint32_t hdr = wbuf[wj];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREB && wbuf[wj + 1] == 0x1002u)
+            saw_c = true;
+      }
+      if (!saw_c)
+         return -607;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
