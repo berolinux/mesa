@@ -830,6 +830,25 @@ nv_lmem_total_bo_bytes_from_info(const struct nv_device_info *info,
 }
 
 /**
+ * tick107: CRS (call/return stack) local mem size from thread_stack_scaling.
+ * Proprietary paths often reserve a small CRS window separate from spill (low).
+ * Heuristic: scale * 32B, min 64, max 4096; refine on silicon traces.
+ */
+static inline uint32_t
+nv_qmd_default_crs_bytes(uint32_t thread_stack_scaling)
+{
+   uint32_t crs;
+   if (!thread_stack_scaling)
+      return 64u;
+   crs = thread_stack_scaling * 32u;
+   if (crs < 64u)
+      crs = 64u;
+   if (crs > 4096u)
+      crs = 4096u;
+   return crs;
+}
+
+/**
  * Program compute-class global LMEM backing store (address + size window).
  * lmem_gpu_addr should be a device BO sized via nv_lmem_total_bo_bytes().
  * size_bytes is the per-SM non-throttled window (not the full BO size).
@@ -900,6 +919,24 @@ nv_compute_set_shader_local_memory_from_info(struct nv_push *p,
    per_sm = nv_lmem_per_sm_bytes_ex(eff, info->max_warps_per_sm,
                                     info->max_threads_per_warp);
    nv_compute_set_shader_local_memory(p, lmem_gpu_addr, per_sm, sm);
+}
+
+/**
+ * tick107: recommended global LMEM BO size (spill + fractional CRS in pool).
+ * CRS is primarily per-thread in QMD; still inflate eff slightly for BO window.
+ */
+static inline uint64_t
+nv_compute_lmem_bo_bytes_from_info(uint32_t local_mem_low_bytes,
+                                   const struct nv_device_info *info)
+{
+   uint32_t scale = info ? info->thread_stack_scaling : 0;
+   uint32_t eff = nv_lmem_effective_local_bytes(local_mem_low_bytes, scale);
+   uint32_t crs = nv_qmd_default_crs_bytes(scale);
+   if (crs > 0 && eff < local_mem_low_bytes + crs)
+      eff = local_mem_low_bytes + (crs / 4u);
+   if (info)
+      return nv_lmem_total_bo_bytes_from_info(info, eff);
+   return nv_lmem_total_bo_bytes(eff, NV_LMEM_SM_COUNT_FALLBACK);
 }
 
 /**
@@ -1054,6 +1091,117 @@ nv_qmd_desc_apply_device_gr_limits(struct nv_qmd_desc *d,
       return;
    nv_qmd_desc_apply_gr_limits(d, info->max_warps_per_sm,
                                info->thread_stack_scaling);
+}
+
+/**
+ * tick107: apply LMEM low/high/crs from shader spill + GR probe into QMD desc.
+ * local_mem_low_bytes is shader spill; high partition usually 0 for simple kernels.
+ */
+static inline void
+nv_qmd_desc_apply_lmem_from_info(struct nv_qmd_desc *d,
+                                 uint32_t local_mem_low_bytes,
+                                 const struct nv_device_info *info)
+{
+   uint32_t scale = info ? info->thread_stack_scaling : 0;
+   if (!d)
+      return;
+   d->local_mem_low = nv_lmem_effective_local_bytes(local_mem_low_bytes, scale);
+   if (!d->local_mem_high)
+      d->local_mem_high = 0;
+   if (!d->local_mem_crs)
+      d->local_mem_crs = nv_qmd_default_crs_bytes(scale);
+}
+
+/** tick107: set dependent QMD chain on desc (schedule enable applied at encode_full). */
+static inline void
+nv_qmd_desc_set_dependent(struct nv_qmd_desc *d, uint64_t next_qmd_gpu_addr,
+                          bool field_copy)
+{
+   if (!d)
+      return;
+   d->dependent_qmd_addr = next_qmd_gpu_addr;
+   d->dependent_qmd_copy = field_copy;
+}
+
+/**
+ * tick107: smoke QMD fully parameterized from nv_device_info (GR + optional LMEM).
+ * sass_version_override 0 => derive coarse default from sm_version.
+ */
+static inline void
+nv_qmd_desc_init_smoke_device(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
+                             uint32_t register_count, uint8_t sass_version_override,
+                             uint64_t sema_gpu_addr, uint32_t sema_payload,
+                             uint32_t local_mem_low_bytes,
+                             const struct nv_device_info *info)
+{
+   uint8_t sass = sass_version_override;
+   if (!d)
+      return;
+   if (!sass && info && info->sm_version) {
+      uint32_t sm = info->sm_version;
+      if (sm >= 0x50 && sm <= 0xff)
+         sass = (uint8_t)sm;
+      else if ((sm >> 8) && (sm >> 8) <= 0xff)
+         sass = (uint8_t)((sm >> 8) & 0xffu);
+   }
+   nv_qmd_desc_init_smoke(d, program_gpu_addr, register_count, sass,
+                          sema_gpu_addr, sema_payload);
+   if (info)
+      nv_qmd_desc_apply_device_gr_limits(d, info);
+   nv_qmd_desc_apply_lmem_from_info(d, local_mem_low_bytes, info);
+}
+
+/**
+ * tick107: two-QMD chain — primary completes sema; optional dependent QMD addr.
+ * Useful for smoke G2 extensions (prep + main) without second SEND_PCAS.
+ */
+static inline void
+nv_qmd_desc_init_smoke_chain(struct nv_qmd_desc *primary,
+                             struct nv_qmd_desc *dependent_opt,
+                             uint64_t program_gpu_addr,
+                             uint32_t register_count, uint8_t sass_version,
+                             uint64_t sema_gpu_addr, uint32_t sema_payload,
+                             uint64_t dependent_qmd_gpu_addr,
+                             const struct nv_device_info *info)
+{
+   nv_qmd_desc_init_smoke_device(primary, program_gpu_addr, register_count,
+                                sass_version, sema_gpu_addr, sema_payload,
+                                0, info);
+   if (dependent_qmd_gpu_addr)
+      nv_qmd_desc_set_dependent(primary, dependent_qmd_gpu_addr, false);
+   if (dependent_opt) {
+      nv_qmd_desc_init_smoke_device(dependent_opt, program_gpu_addr,
+                                    register_count, sass_version,
+                                    0, 0, 0, info);
+   }
+}
+
+/**
+ * tick107: program LMEM methods + SPA/CWD init in one vertical helper.
+ * class_compute 0 keeps current subchannel object; spa from info sm_version heuristic.
+ */
+static inline void
+nv_compute_emit_lmem_and_init_from_info(struct nv_push *p,
+                                        uint32_t class_compute,
+                                        uint64_t lmem_gpu_addr,
+                                        uint32_t local_mem_low_bytes,
+                                        const struct nv_device_info *info,
+                                        uint32_t cwd_slot_count)
+{
+   uint8_t spa = 0x50;
+   if (!p)
+      return;
+   if (info && info->sm_version) {
+      uint32_t sm = info->sm_version;
+      if (sm >= 0x50 && sm <= 0xff)
+         spa = (uint8_t)sm;
+      else if ((sm >> 8) && (sm >> 8) <= 0xff)
+         spa = (uint8_t)((sm >> 8) & 0xffu);
+   }
+   nv_compute_emit_init_state(p, class_compute, spa, cwd_slot_count);
+   if (lmem_gpu_addr)
+      nv_compute_set_shader_local_memory_from_info(p, lmem_gpu_addr,
+                                                   local_mem_low_bytes, info);
 }
 
 /**

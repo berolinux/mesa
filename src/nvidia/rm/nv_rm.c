@@ -156,6 +156,9 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.gpu_core_count = gi.gpu_core_count;
       dev->info.subdevice_instance = gi.subdevice_instance;
       dev->info.subdevice_count = gi.subdevice_count ? gi.subdevice_count : 1;
+      /* tick107: virtualization / GRID policy (affects alloc + doorbell assumptions) */
+      dev->info.virtualization_mode = gi.virtualization_mode;
+      dev->info.is_grid_build = gi.is_grid_build;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
       /* tick101: BAR1/heap/ECC for mapping policy */

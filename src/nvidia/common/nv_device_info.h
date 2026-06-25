@@ -66,6 +66,9 @@ struct nv_device_info {
    /* tick106: NV2080 subdevice instance / count (MIG multi-USERD planning) */
    uint32_t subdevice_instance;
    uint32_t subdevice_count;
+   /* tick107: NV0080 virtualization mode (NONE/NMOS/VGX/HOST_VGPU/HOST_VSGA) */
+   uint32_t virtualization_mode;
+   uint32_t is_grid_build;
 
    uint64_t vram_size_bytes;
    uint64_t vram_usable_bytes;
