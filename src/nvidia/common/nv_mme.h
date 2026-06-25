@@ -69,6 +69,19 @@ extern "C" {
 /* Method offsets for CALL_MME_DATA / SET_MME_SHADOW (NVC597 family subset) */
 #define NV_MME_METHOD_CALL_DATA_BASE         0x3880u  /* CALL_MME_DATA(0) approx */
 #define NV_MME_METHOD_SET_MME_SHADOW_SCRATCH 0x3400u  /* SET_MME_SHADOW_SCRATCH(i) base */
+/* SET_MME_SHADOW_SCRATCH(i) at 0x3400 + i*4 (open-gpu-doc compute/3d classes) */
+#define NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(i) \
+   (NV_MME_METHOD_SET_MME_SHADOW_SCRATCH + (((uint32_t)(i) & 0xffu) * 4u))
+
+/*
+ * pass14 glcore literal 0x2001xxxx census hotspot: method idx 0xd2a → moff 0x34a8.
+ * 0x34a8 - 0x3400 = 0xa8; 0xa8/4 = 42 → SET_MME_SHADOW_SCRATCH(42).
+ * tick140: treat as MME scratch init (zero/clear) during channel prime, not a
+ * mystery 3D method.  Call_MME_MACRO base 0x3800 is separate (i*8 stride).
+ */
+#define NV_MME_PASS14_LIT_METHOD_OFF         0x34a8u
+#define NV_MME_PASS14_LIT_SCRATCH_INDEX      42u
+#define NV_MME_PASS14_LIT_METHOD_IDX         0x0d2au /* 0x34a8 >> 2 */
 
 /*
  * Pass5 glcore method-off frequency (inc1 s0 CALL_MME-ish headers):
@@ -723,12 +736,54 @@ nv_mme_emit_upload_indirect_stubs_only(struct nv_push *p)
    return nv_mme_programs_are_stubs(progs);
 }
 
+/**
+ * tick140 / pass14: SET_MME_SHADOW_SCRATCH(i) = value.
+ * open-gpu-doc: (0x3400 + i*4).  Used to clear/init MME shadow state before
+ * RAM upload; pass14 lit 0x34a8 is scratch index 42.
+ */
+static inline void
+nv_mme_emit_set_shadow_scratch(struct nv_push *p, unsigned scratch_i,
+                               uint32_t value)
+{
+   if (!p)
+      return;
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_push_method(p, NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(scratch_i), value);
+}
+
+/** tick140: zero pass14 hotspot scratch (index 42 / method 0x34a8). */
+static inline void
+nv_mme_emit_pass14_hot_scratch_zero(struct nv_push *p)
+{
+   nv_mme_emit_set_shadow_scratch(p, NV_MME_PASS14_LIT_SCRATCH_INDEX, 0);
+}
+
+/**
+ * tick140: zero first N scratch slots (default 8) + pass14 hot index 42.
+ * Cheap channel-init hygiene before MME RAM upload.
+ */
+static inline void
+nv_mme_emit_shadow_scratch_init_range(struct nv_push *p, unsigned count)
+{
+   unsigned i, n = count ? count : 8u;
+   if (!p)
+      return;
+   if (n > 64u)
+      n = 64u;
+   for (i = 0; i < n; i++)
+      nv_mme_emit_set_shadow_scratch(p, i, 0);
+   if (NV_MME_PASS14_LIT_SCRATCH_INDEX >= n)
+      nv_mme_emit_pass14_hot_scratch_zero(p);
+}
+
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
 static inline bool
 nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
+   /* tick140: clear MME shadow scratch incl. pass14 0x34a8 hotspot before RAM */
+   nv_mme_emit_shadow_scratch_init_range(p, 8);
    nv_mme_emit_upload_full_table_only(p);
    return true;
 }

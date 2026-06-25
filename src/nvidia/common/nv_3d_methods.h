@@ -1605,6 +1605,9 @@ nv_3d_load_constant_buffer_dwords(struct nv_push *p, uint32_t offset_bytes,
 /**
  * Select CB at gpu_addr, upload dwords, bind to VS+FS push-const slots.
  * size_bytes is the CB allocation size (must be >= offset + count*4, 256-aligned preferred).
+ *
+ * pass14 RE: binary order is SEL_A → SEL_B → SEL_C → (LOAD_OFF → LOAD)* → BIND×N.
+ * Selector triple is always emitted first; loads are optional; binds last.
  */
 static inline void
 nv_3d_upload_and_bind_push_constants(struct nv_push *p, uint64_t cb_gpu_addr,
@@ -1623,6 +1626,41 @@ nv_3d_upload_and_bind_push_constants(struct nv_push *p, uint64_t cb_gpu_addr,
       nv_3d_load_constant_buffer_dwords(p, offset_bytes, dwords, count);
    nv_3d_bind_group_constant_buffer(p, NV_3D_PUSH_CONST_BIND_GROUP_VS,
                                     NV_3D_PUSH_CONST_SHADER_SLOT, true);
+   nv_3d_bind_group_constant_buffer(p, NV_3D_PUSH_CONST_BIND_GROUP_FS,
+                                    NV_3D_PUSH_CONST_SHADER_SLOT, true);
+}
+
+/**
+ * tick140 / pass14: select + bind only (no inline LOAD) — matches selector→bind
+ * n-grams without LOAD_CONSTANT_BUFFER when CB is already filled via memcpy/BO.
+ */
+static inline void
+nv_3d_select_and_bind_constant_buffer(struct nv_push *p, uint64_t cb_gpu_addr,
+                                      uint32_t cb_size_bytes,
+                                      unsigned bind_group, unsigned shader_slot)
+{
+   uint32_t sel_size = cb_size_bytes ? cb_size_bytes : 256u;
+   if (!p || !cb_gpu_addr)
+      return;
+   if (sel_size < 256u)
+      sel_size = 256u;
+   sel_size = (sel_size + 255u) & ~255u;
+   nv_3d_set_constant_buffer_selector(p, sel_size, cb_gpu_addr);
+   nv_3d_bind_group_constant_buffer(p, bind_group, shader_slot, true);
+}
+
+/**
+ * tick140: select one CB, bind to both VS+FS push-const slots (no load).
+ */
+static inline void
+nv_3d_select_and_bind_push_constants(struct nv_push *p, uint64_t cb_gpu_addr,
+                                     uint32_t cb_size_bytes)
+{
+   if (!p || !cb_gpu_addr)
+      return;
+   nv_3d_select_and_bind_constant_buffer(p, cb_gpu_addr, cb_size_bytes,
+                                         NV_3D_PUSH_CONST_BIND_GROUP_VS,
+                                         NV_3D_PUSH_CONST_SHADER_SLOT);
    nv_3d_bind_group_constant_buffer(p, NV_3D_PUSH_CONST_BIND_GROUP_FS,
                                     NV_3D_PUSH_CONST_SHADER_SLOT, true);
 }
@@ -3951,6 +3989,8 @@ nv_3d_emit_g3_channel_prep(struct nv_push *p, uint32_t class_3d,
                   ((uint32_t)maj << 8) | (uint32_t)min);
 
    if (upload_mme) {
+      /* tick140: MME shadow scratch init (incl. pass14 0x34a8 / scratch 42) */
+      nv_mme_emit_shadow_scratch_init_range(p, 8);
       (void)nv_mme_emit_upload_indirect_stubs_only(p);
       /* tick139: path C CALL only when real MME exists (no-op while stubs) */
       (void)nv_mme_emit_path_c_calls_if_ready(p);

@@ -2109,6 +2109,110 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -525;
    }
 
+   /* tick140: pass14 MME 0x34a8=scratch(42); sema slot methods; CB select+bind */
+   {
+      struct nv_push p2;
+      uint32_t g2buf[128], n2, ii;
+      bool saw_scratch0 = false, saw_scratch42 = false;
+      bool saw_sel_a = false, saw_bind = false;
+      uint32_t consts[4] = { 1, 2, 3, 4 };
+      enum nv_host_sema_mode m1004 = NV_HOST_SEMA_MODE_BLOB1004_ALIGN4;
+      enum nv_host_sema_mode m1002 = NV_HOST_SEMA_MODE_BLOB1002_ALIGN4;
+      enum nv_host_sema_mode m0802 = NV_HOST_SEMA_MODE_BLOB0802_ALIGN4;
+      enum nv_host_sema_mode m1001 = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
+
+      if (NV_MME_PASS14_LIT_METHOD_OFF != 0x34a8u)
+         return -526;
+      if (NV_MME_PASS14_LIT_SCRATCH_INDEX != 42u)
+         return -527;
+      if (NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(42) != 0x34a8u)
+         return -528;
+      if (NV_MME_PASS14_LIT_METHOD_IDX != 0x0d2au)
+         return -529;
+
+      if (nv_host_sema_execute_method(m1004) != NVC36F_SEMAPHOREC)
+         return -530;
+      if (nv_host_sema_execute_method(m1002) != NVC36F_SEMAPHOREB)
+         return -531;
+      if (nv_host_sema_execute_method(m0802) != NVC36F_SEMAPHOREA)
+         return -532;
+      if (nv_host_sema_execute_method(m1001) != NVC36F_SEMAPHORED)
+         return -533;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_sema_release_mode_slot(&p2, 0x500000ull, 7u, m1004);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 8) /* A/B/C + exec on C + D pad */
+         return -534;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_set_subch(&p2, NV_PUSH_SUBCH_3D);
+      nv_mme_emit_shadow_scratch_init_range(&p2, 8);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 4)
+         return -535;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_METHOD_SET_MME_SHADOW_SCRATCH_I(0))
+            saw_scratch0 = true;
+         if (method == NV_MME_PASS14_LIT_METHOD_OFF)
+            saw_scratch42 = true;
+      }
+      if (!saw_scratch0 || !saw_scratch42)
+         return -536;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_set_subch(&p2, NV_PUSH_SUBCH_3D);
+      nv_3d_upload_and_bind_push_constants(&p2, 0x600000ull, 256u, 0,
+                                           consts, 4);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 8)
+         return -537;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_CONSTANT_BUFFER_SELECTOR_A)
+            saw_sel_a = true;
+         if (method == NVC597_BIND_GROUP_CONSTANT_BUFFER(NV_3D_PUSH_CONST_BIND_GROUP_VS) ||
+             method == NVC597_BIND_GROUP_CONSTANT_BUFFER(NV_3D_PUSH_CONST_BIND_GROUP_FS))
+            saw_bind = true;
+      }
+      if (!saw_sel_a || !saw_bind)
+         return -538;
+
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_set_subch(&p2, NV_PUSH_SUBCH_3D);
+      nv_3d_select_and_bind_push_constants(&p2, 0x700000ull, 256u);
+      if (nv_push_dw_count(&p2) < 6)
+         return -539;
+
+      /* G3 channel_prep should emit scratch 0x34a8 when upload_mme */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_3d_emit_g3_channel_prep_spa_u8(&p2, 0xc597u, 0x53u, true);
+      n2 = nv_push_dw_count(&p2);
+      saw_scratch42 = false;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_MME_PASS14_LIT_METHOD_OFF)
+            saw_scratch42 = true;
+      }
+      if (n2 < 8 || !saw_scratch42)
+         return -540;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

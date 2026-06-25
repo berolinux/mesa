@@ -385,8 +385,47 @@ nv_host_sema_execute(enum nv_host_sema_mode mode)
 }
 
 /**
+ * pass14 sema config table (glcore @ 0x11e30c0): which SEMAPHORE* method
+ * receives the execute dword for a given execute imm / mode family.
+ * Returns method offset (0x10=A, 0x14=B, 0x18=C, 0x1c=D).
+ *
+ * Table evidence (primary family tag_a=4/5):
+ *   0x1004 → C (0x12 idx / 0x48 off — use SEMAPHOREC as execute? no: sema_idx
+ *             is method index in table = A/B/C slot that gets execute as D-class
+ *             op in non-standard layouts; for GPFIFO ABCD block we still write
+ *             A/B/C address+payload and put execute only in the preferred slot.
+ *   0x1002 → B
+ *   0x0802 → A
+ *   0x1001 / 0x1000 / vdpau / open → D (classic full block, execute in D)
+ *
+ * tick140: implement slot-aware path; default release_mode keeps execute in D.
+ */
+static inline uint32_t
+nv_host_sema_execute_method(enum nv_host_sema_mode mode)
+{
+   uint32_t exec = nv_host_sema_execute(mode);
+   switch (exec) {
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_1004:
+      return NVC36F_SEMAPHOREC; /* pass14 sema_idx 0x12 → C */
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_1002:
+      return NVC36F_SEMAPHOREB; /* sema_idx 0x11 → B */
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_0804:
+      return NVC36F_SEMAPHOREB; /* sema_idx 0x11 → B */
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_0802:
+      return NVC36F_SEMAPHOREA; /* sema_idx 0x10 → A */
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_610:
+   case NVC36F_SEMAPHORED_RELEASE_BLOB_1000:
+   case NVC36F_SEMAPHORED_RELEASE_VDPAU_610:
+   case NVC36F_SEMAPHORED_RELEASE_OPEN_HDRS:
+   default:
+      return NVC36F_SEMAPHORED; /* classic execute in D */
+   }
+}
+
+/**
  * Host semaphore release with explicit silicon A/B mode.
  * pass12 ladder: BLOB 0x1001 → 0x1000/0x1002 alts → VDPAU 0x2 → open-header.
+ * Always programs A/B/C/D in order; execute dword goes to D (historic).
  */
 static inline void
 nv_push_sema_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
@@ -398,6 +437,47 @@ nv_push_sema_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
                   nv_host_sema_addr_lo(sema_gpu_addr, mode));
    nv_push_method(p, NVC36F_SEMAPHOREC, payload);
    nv_push_method(p, NVC36F_SEMAPHORED, nv_host_sema_execute(mode));
+}
+
+/**
+ * tick140 / pass14: slot-aware sema release.
+ * Writes SEMAPHOREA (hi), SEMAPHOREB (lo), SEMAPHOREC (payload) always, then
+ * writes execute to the pass14-preferred method (A/B/C/D).  When execute is
+ * not D, also writes 0 to SEMAPHORED as a harmless trailing NOP-ish (some
+ * silicon may require D last; optional zero keeps method stream length stable
+ * for bring-up ladders that expect 4 sema methods).
+ *
+ * Use for experimental bring-up of 0x1004/0x1002/0x0802 modes; primary path
+ * remains nv_push_sema_release_mode (execute always in D).
+ */
+static inline void
+nv_push_sema_release_mode_slot(struct nv_push *p, uint64_t sema_gpu_addr,
+                               uint32_t payload, enum nv_host_sema_mode mode)
+{
+   uint32_t exec = nv_host_sema_execute(mode);
+   uint32_t exec_mthd = nv_host_sema_execute_method(mode);
+   uint32_t addr_hi = (uint32_t)(sema_gpu_addr >> 32) & 0xff;
+   uint32_t addr_lo = nv_host_sema_addr_lo(sema_gpu_addr, mode);
+
+   /* Always establish address + payload in A/B/C first (GPFIFO order). */
+   nv_push_method(p, NVC36F_SEMAPHOREA, addr_hi);
+   nv_push_method(p, NVC36F_SEMAPHOREB, addr_lo);
+   nv_push_method(p, NVC36F_SEMAPHOREC, payload);
+
+   if (exec_mthd == NVC36F_SEMAPHORED) {
+      nv_push_method(p, NVC36F_SEMAPHORED, exec);
+      return;
+   }
+
+   /*
+    * Non-D execute: re-issue the chosen slot method with execute imm.
+    * Classic blob still programs A=hi, B=lo, C=payload, D=exec; pass14 table
+    * suggests some modes put exec in A/B/C instead.  Emit execute on target
+    * slot, then D=0 to pad (conservative; silicon may ignore zero D).
+    */
+   nv_push_method(p, exec_mthd, exec);
+   if (exec_mthd != NVC36F_SEMAPHORED)
+      nv_push_method(p, NVC36F_SEMAPHORED, 0);
 }
 
 /* Host semaphore release (4-byte payload) at GPU sema address */
