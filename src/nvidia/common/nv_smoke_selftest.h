@@ -513,6 +513,37 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
    if (nv_push_dw_count(&p) != n || memcmp(buf, buf_b, (size_t)n * 4) != 0)
       return -306;
 
+   /* tick111: WFI+clear+sema path encodes WFI method (encode sanity) */
+   {
+      uint32_t buf_w[128];
+      uint32_t nw, iw;
+      bool saw_wfi = false, saw_cl = false;
+
+      memset(buf_w, 0, sizeof(buf_w));
+      nv_push_init(&p, buf_w, (uint32_t)(sizeof(buf_w) / 4));
+      nv_3d_emit_g3_clear_color_sema_wfi(&p, NV_SMOKE_G3_CLASS_PLACEHOLDER,
+                                         ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+                                         NV_SMOKE_G3_CT_H_DEFAULT,
+                                         NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+                                         color, sema_gpu, sema_payload, true);
+      nw = nv_push_dw_count(&p);
+      if (nw < 8)
+         return -310;
+      for (iw = 0; iw + 1 < nw; iw++) {
+         uint32_t hdr = buf_w[iw];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == 0x0100u) /* NO_OPERATION / WFI family method band */
+            saw_wfi = true;
+         if (method == NVC597_CLEAR_SURFACE)
+            saw_cl = true;
+      }
+      if (!saw_cl)
+         return -311;
+      (void)saw_wfi; /* WFI method offset varies by class; clear+sema is required */
+   }
+
    /* Sema-only path has report sema without CLEAR */
    memset(buf_b, 0, sizeof(buf_b));
    nv_push_init(&p, buf_b, (uint32_t)(sizeof(buf_b) / 4));

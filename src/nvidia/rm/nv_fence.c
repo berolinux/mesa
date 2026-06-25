@@ -39,15 +39,18 @@ nv_fence_create(struct nv_rm_device *rm)
 
    f->rm = rm;
 
-   memset(&req, 0, sizeof(req));
-   req.size = 4096;
-   req.alignment = 4096;
-   req.vram = false;
-   req.cpu_access = true;
-   req.no_scanout = true;
-   req.map_gpu_va = true;
-
-   f->sema_bo = nv_rm_bo_alloc(rm, &req);
+   /* tick111: notifier-typed sema ring (sysmem WC); fall back to generic alloc */
+   f->sema_bo = nv_rm_bo_alloc_notifier(rm, 4096);
+   if (!f->sema_bo) {
+      memset(&req, 0, sizeof(req));
+      req.size = 4096;
+      req.alignment = 4096;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      f->sema_bo = nv_rm_bo_alloc(rm, &req);
+   }
    if (!f->sema_bo) {
       free(f);
       return NULL;

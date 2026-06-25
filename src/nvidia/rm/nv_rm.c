@@ -1155,8 +1155,9 @@ nv_rm_bo_alloc_shader(struct nv_rm_device *dev, uint64_t size_bytes,
    struct nv_rm_bo *bo;
    if (!size_bytes)
       return NULL;
-   bo = nv_rm_bo_alloc_typed(dev, size_bytes, NVOS32_TYPE_SHADER_PROGRAM,
-                             true, false, map_gpu_va);
+   /* tick111: virt-aware domain order via alloc_typed_auto (prefer vidmem) */
+   bo = nv_rm_bo_alloc_typed_auto(dev, size_bytes, NVOS32_TYPE_SHADER_PROGRAM,
+                                  true, map_gpu_va);
    if (!bo)
       bo = nv_rm_bo_alloc_typed(dev, size_bytes, NVOS32_TYPE_SHADER_PROGRAM,
                                 false, true, map_gpu_va);

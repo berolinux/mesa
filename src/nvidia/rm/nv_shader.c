@@ -228,15 +228,18 @@ nv_shader_alloc_upload_bo(struct nv_rm_device *rm, const void *data,
       alloc_size = min_size;
    alloc_size = (alloc_size + NV_SHADER_CODE_ALIGN - 1) & ~(NV_SHADER_CODE_ALIGN - 1);
 
-   memset(&req, 0, sizeof(req));
-   req.size = alloc_size;
-   req.alignment = 4096;
-   req.vram = false;
-   req.cpu_access = true;
-   req.no_scanout = true;
-   req.map_gpu_va = true;
-
-   bo = nv_rm_bo_alloc(rm, &req);
+   /* tick111: shader/microcode — typed shader alloc (vidmem then sysmem), else generic */
+   bo = nv_rm_bo_alloc_shader(rm, alloc_size, true);
+   if (!bo) {
+      memset(&req, 0, sizeof(req));
+      req.size = alloc_size;
+      req.alignment = 4096;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      bo = nv_rm_bo_alloc(rm, &req);
+   }
    if (!bo)
       return NULL;
 

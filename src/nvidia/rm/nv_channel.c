@@ -3389,32 +3389,47 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      if (sema_reset && sema_cpu)
-         sema_cpu[0] = 0;
+      /* tick111: try clear+sema, then clear+WFI+sema (drain before report) */
+      {
+         unsigned wfi_pass;
+         for (wfi_pass = 0; wfi_pass < 2; wfi_pass++) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
 
-      map = nv_channel_push_begin(ch, need);
-      if (!map)
-         return -ENOMEM;
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
 
-      nv_push_init(&push, map, need);
-      if (emit_draw)
-         nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
-                                       ct_format, c, false,
-                                       sema_gpu_addr, sema_payload);
-      else
-         nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
-                                        ct_format, c, sema_gpu_addr,
-                                        sema_payload);
-      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+            nv_push_init(&push, map, need);
+            if (emit_draw)
+               nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                             ct_format, c, false,
+                                             sema_gpu_addr, sema_payload);
+            else if (wfi_pass == 0)
+               nv_3d_emit_g3_clear_color_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                              ct_format, c, sema_gpu_addr,
+                                              sema_payload);
+            else
+               nv_3d_emit_g3_clear_color_sema_wfi(&push, c3, ct_gpu_addr, ct_w,
+                                                  ct_h, ct_format, c,
+                                                  sema_gpu_addr, sema_payload,
+                                                  true);
+            nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
-      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
-                                      wait_timeout_ns, check_notifier);
-      if (r == 0) {
-         if (!ch->class_3d_bound)
-            ch->class_3d_bound = c3;
-         return 0;
+            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                            wait_timeout_ns, check_notifier);
+            if (r == 0) {
+               if (!ch->class_3d_bound)
+                  ch->class_3d_bound = c3;
+               return 0;
+            }
+            last = r;
+            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+               return r;
+            if (emit_draw)
+               break; /* draw path only one pass */
+         }
       }
-      last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
    }

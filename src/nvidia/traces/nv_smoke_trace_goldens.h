@@ -81,7 +81,11 @@ static const uint32_t nv_smoke_golden_g3_push[] = {
 #define nv_smoke_golden_g3_push_DWORDS  34u
 #define nv_smoke_golden_g3_push_BYTES   (34u * 4u)
 
-/** Compare live encode against embedded goldens (host only). Returns 0 ok. */
+/**
+ * Compare live encode against embedded goldens (host only). Returns 0 ok.
+ * Error codes: -400+g1_err, -410+g2_err, -420+g3_err (legacy -732 was -400-332
+ * or similar when trace bytes diverged; tick111 host live+golden passes on agent).
+ */
 static inline int
 nv_smoke_selftest_against_embedded_goldens(void)
 {

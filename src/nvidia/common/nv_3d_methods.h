@@ -2989,6 +2989,62 @@ nv_3d_emit_g3_clear_draw_sema(struct nv_push *p, uint32_t class_3d,
                                              sema_payload);
 }
 
+/**
+ * tick111: G3 clear + sema with optional WFI before report sema (drain 3D before
+ * sema write). wfi_before_sema helps when host sema completes but 3D sema does not.
+ */
+static inline void
+nv_3d_emit_g3_clear_color_sema_wfi(struct nv_push *p, uint32_t class_3d,
+                                   uint64_t ct_gpu_addr, uint32_t ct_w,
+                                   uint32_t ct_h, uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                   bool wfi_before_sema)
+{
+   uint32_t c[4];
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr,
+                                       ct_w ? ct_w : 1, ct_h ? ct_h : 1,
+                                       ct_format, false /* pitch */, 0);
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10 /* PIPE_CLEAR_COLOR0 */, c, 0.0f, 0);
+
+   if (wfi_before_sema)
+      nv_push_wfi(p);
+
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
+/** tick111: sema-only with optional WFI first (idle prior segment before report). */
+static inline void
+nv_3d_emit_g3_sema_only_wfi(struct nv_push *p, uint32_t class_3d,
+                            uint64_t sema_gpu_addr, uint32_t sema_payload,
+                            bool wfi_first)
+{
+   if (!p || !sema_gpu_addr || !sema_payload)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   if (wfi_first)
+      nv_push_wfi(p);
+   nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
+}
+
 /** G3 sema-only 3D fence (report sema release, no clear/draw). */
 static inline void
 nv_3d_emit_g3_sema_only(struct nv_push *p, uint32_t class_3d,
