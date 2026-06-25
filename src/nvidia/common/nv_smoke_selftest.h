@@ -3777,6 +3777,78 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -745;
    }
 
+   /* tick161: pass22 RE constants + explicit-emit policy (no HW) */
+   {
+      struct nv_push cp22;
+      uint32_t cb22[256];
+      uint32_t qmd22[NV_QMD_DWORDS];
+      uint32_t off0, off10;
+      unsigned li;
+
+      if (!NV_PASS22_RE_EXPLICIT_EMIT_POLICY || !NV_PASS22_RE_ORDERED_TEMPLATES_ABSENT)
+         return -746;
+      if (!NV_PASS22_RE_PB_HDR_RUNTIME_ONLY || !NV_PASS22_RE_SEMA_FORMAL_11_11)
+         return -747;
+      if (!NV_PASS22_RE_PATH_C_STILL_GATED || !NV_PASS22_RE_WIRED)
+         return -748;
+      if (!nv_pass22_explicit_emit_required())
+         return -749;
+      if (NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE != 428u ||
+          NV_PASS22_INLINE_TO_PCAS_MEDIAN_CUDA != 2204u ||
+          NV_PASS22_INLINE_TO_PCAS_MEDIAN_VKSC != 2724u)
+         return -750;
+      if (NV_PASS22_INLINE_TO_PCAS_MEDIAN_EGLCORE < NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE)
+         return -751;
+      if (NV_PASS22_SEMA_FORMAL_BASE_EGLCORE != 0x114f2e0u ||
+          NV_PASS22_SEMA_FORMAL_BASE_VKSC != 0x877380u ||
+          NV_PASS22_SEMA_FORMAL_BASE_GLCORE != 0x11e30c0u)
+         return -752;
+      if (NV_PASS22_SEMA_FORMAL_ROW_COUNT != 11u)
+         return -753;
+      off0 = nv_pass22_sema_formal_row_file_off(0, 0);
+      off10 = nv_pass22_sema_formal_row_file_off(0, 10);
+      if (off0 != NV_PASS22_SEMA_FORMAL_BASE_GLCORE + 0x10u)
+         return -754;
+      if (off10 != NV_PASS22_SEMA_FORMAL_BASE_GLCORE + 0x10u + 10u * 0x20u)
+         return -755;
+      for (li = 0; li < 3u; li++) {
+         if (!nv_pass22_sema_formal_row_file_off(li, 0))
+            return -756;
+      }
+      if (nv_pass22_sema_formal_row_file_off(3, 0) != 0)
+         return -757;
+      if (NV_PASS22_CHAIN_INLINE_PCAS_FORWARD_OK != 0 ||
+          NV_PASS22_CHAIN_MME_RAM_UPLOAD_FORWARD_OK != 0)
+         return -758;
+      if (NV_PASS22_GPUCOMP_RAM_DATA_IMM_CAPPED < NV_PASS20_GPUCOMP_RAM_DATA_IMM_CAPPED)
+         return -759;
+      if (NV_PASS22_MME_RAM_DATA_FUNC_DIST_GLCORE != 2064u)
+         return -760;
+      if (!NV_PASS22_RE_SEMA_BASES_REFINED || !NV_PASS22_RE_PASS21_POLICY_VALID)
+         return -761;
+      if (!nv_pass22_inline_pcas_span_ok(nv_pass20_inline_qmd_launch_min_methods(false)))
+         return -762;
+      if (nv_pass22_inline_pcas_span_ok(NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE))
+         return -763; /* must be strictly under glcore median */
+
+      /* pass22: explicit INLINE+PCAS still required (emit helper works) */
+      memset(qmd22, 0, sizeof(qmd22));
+      qmd22[0] = 0x1u;
+      memset(cb22, 0, sizeof(cb22));
+      nv_push_init(&cp22, cb22, (uint32_t)(sizeof(cb22) / 4));
+      nv_compute_emit_inline_qmd_launch(&cp22, 0x900000ull, qmd22, false);
+      if (nv_push_dw_count(&cp22) < nv_pass20_inline_qmd_launch_min_methods(false))
+         return -764;
+      if (!nv_pass22_inline_pcas_span_ok(nv_push_dw_count(&cp22)))
+         return -765;
+      /* pass21 host sema default still authoritative after pass22 */
+      if (NV_PASS21_HOST_SEMA_DEFAULT_EXEC != 0x1004u ||
+          NV_PASS21_HOST_SEMA_DEFAULT_SLOT != NV_HOST_SEMA_SLOT_C)
+         return -766;
+      if (NV_PASS21_RE_PATH_C_STILL_GATED != NV_PASS22_RE_PATH_C_STILL_GATED)
+         return -767;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

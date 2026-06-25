@@ -4123,6 +4123,10 @@ nv_g4_emit_nvenc_bringup_pass21(struct nv_push *p, uint32_t class_nvenc,
 #define NV_PASS21_RE_G0_G4_UNIFIED_TAIL      1
 #define NV_PASS21_RE_MME_RAM_DATA_SCAFFOLD   1
 #define NV_PASS21_RE_PATH_C_STILL_GATED      1
+/* tick161 / pass22: RE synthesis flags (see nv_qmd.h pass22 block) */
+#define NV_PASS22_RE_WIRED                   1
+#define NV_PASS22_RE_SEMA_BASES_REFINED      1
+#define NV_PASS22_RE_PASS21_POLICY_VALID     1
 
 #ifdef __cplusplus
 }

@@ -66,6 +66,44 @@ extern "C" {
 #define NV_PASS20_SEMA_IMM_FUNC_DIST_TYPICAL     848u
 #define NV_PASS20_MME_RAM_DATA_FUNC_DIST_GLCORE  2064u
 
+/*
+ * tick161 / pass22 multi-hour RE (re_pass22/, HW_MODEL_PASS22_DEEP_DISASM):
+ * reconfirms pass20/21; strengthens explicit-emit policy (ordered chain
+ * forward_ok ~0 for INLINE/PCAS/MME/inv+WFI+sema templates). Pushbuffer
+ * headers 0x2000/0x2001|midx almost absent statically — runtime nv_push only.
+ * Host sema formal 11/11; egl/vksc file-offset bases refined (off-by-0x10 vs
+ * pass17 labels). cuda has no embedded formal table.
+ */
+#define NV_PASS22_RE_EXPLICIT_EMIT_POLICY        1
+#define NV_PASS22_RE_ORDERED_TEMPLATES_ABSENT    1
+#define NV_PASS22_RE_PB_HDR_RUNTIME_ONLY         1
+#define NV_PASS22_RE_SEMA_FORMAL_11_11           1
+#define NV_PASS22_RE_PATH_C_STILL_GATED          1
+/* pass22 reconfirm: same medians as pass20 for glcore/cuda/vksc */
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE   NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_CUDA     NV_PASS20_INLINE_TO_PCAS_MEDIAN_CUDA
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_VKSC     NV_PASS20_INLINE_TO_PCAS_MEDIAN_VKSC
+/* pass22 extra medians (RE context; not mesa span gates unless wired later) */
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_EGLCORE  6108u
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_OPENCL   1348u
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_CUVID    1084u
+#define NV_PASS22_INLINE_TO_PCAS_MEDIAN_RTCORE   100u
+/* Host sema formal table file-offset bases (row0 at base+0x10; pass22 hunt) */
+#define NV_PASS22_SEMA_FORMAL_BASE_GLCORE        0x11e30c0u
+#define NV_PASS22_SEMA_FORMAL_BASE_EGLCORE       0x114f2e0u  /* was 0x114f2f0 in pass17 label */
+#define NV_PASS22_SEMA_FORMAL_BASE_VKSC          0x877380u   /* was 0x877390 in pass17 label */
+#define NV_PASS22_SEMA_FORMAL_ROW_STRIDE         0x20u
+#define NV_PASS22_SEMA_FORMAL_ROW_COUNT          11u
+#define NV_PASS22_SEMA_FORMAL_ROW0_OFF           0x10u
+/* pass22 method imm abundance (capped scan; RE only) */
+#define NV_PASS22_GLCORE_HOST_SEM_C_IMM_CAPPED   284u
+#define NV_PASS22_GPUCOMP_RAM_DATA_IMM_CAPPED    127u  /* pass20 had 100; pass22 full index */
+#define NV_PASS22_GPUCOMP_MME_CALL0_IMM_CAPPED   1035u
+#define NV_PASS22_MME_RAM_DATA_FUNC_DIST_GLCORE  NV_PASS20_MME_RAM_DATA_FUNC_DIST_GLCORE
+/* pass22: chain forward_ok policy — only short pairs sometimes hit; require explicit emit */
+#define NV_PASS22_CHAIN_INLINE_PCAS_FORWARD_OK   0
+#define NV_PASS22_CHAIN_MME_RAM_UPLOAD_FORWARD_OK 0
+
 /* Non-throttled local mem size (legacy method block used by some paths) */
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_A  0x02e4
 #define NVC3C0_SET_SHADER_LOCAL_MEMORY_NON_THROTTLED_B  0x02e8
@@ -490,6 +528,49 @@ nv_pass20_inline_pcas_span_ok(uint32_t method_count_in_launch)
 {
    return method_count_in_launch >= nv_pass20_inline_qmd_launch_min_methods(false) &&
           method_count_in_launch < NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE;
+}
+
+/**
+ * tick161 / pass22: true if mesa should never rely on static ordered templates
+ * (pass19/22 thesis). Always 1 when pass22 RE wired.
+ */
+static inline bool
+nv_pass22_explicit_emit_required(void)
+{
+   return NV_PASS22_RE_EXPLICIT_EMIT_POLICY != 0 &&
+          NV_PASS22_RE_ORDERED_TEMPLATES_ABSENT != 0;
+}
+
+/**
+ * tick161: pass22 span gate — same as pass20 for glcore median; extra libs
+ * documented but not used as upper bound (mesa emit always << glcore median).
+ */
+static inline bool
+nv_pass22_inline_pcas_span_ok(uint32_t method_count_in_launch)
+{
+   return nv_pass20_inline_pcas_span_ok(method_count_in_launch) &&
+          NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE ==
+             NV_PASS20_INLINE_TO_PCAS_MEDIAN_GLCORE;
+}
+
+/**
+ * tick161: formal sema row file offset for pass22 RE dumps (not used at runtime).
+ * lib: 0=glcore, 1=eglcore, 2=vksc; row 0..10.
+ */
+static inline uint32_t
+nv_pass22_sema_formal_row_file_off(unsigned lib_id, unsigned row)
+{
+   uint32_t base;
+   if (row >= NV_PASS22_SEMA_FORMAL_ROW_COUNT)
+      return 0;
+   switch (lib_id) {
+   case 0: base = NV_PASS22_SEMA_FORMAL_BASE_GLCORE; break;
+   case 1: base = NV_PASS22_SEMA_FORMAL_BASE_EGLCORE; break;
+   case 2: base = NV_PASS22_SEMA_FORMAL_BASE_VKSC; break;
+   default: return 0;
+   }
+   return base + NV_PASS22_SEMA_FORMAL_ROW0_OFF +
+          row * NV_PASS22_SEMA_FORMAL_ROW_STRIDE;
 }
 
 /**
