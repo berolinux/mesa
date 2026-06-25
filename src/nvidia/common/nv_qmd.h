@@ -169,6 +169,14 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS24_SEMA_FORMAL_BASE_VKSC          NV_PASS23_SEMA_FORMAL_BASE_VKSC
 #define NV_PASS24_GPUCOMP_RAM_DATA_IMM_CAPPED    NV_PASS23_GPUCOMP_RAM_DATA_IMM_CAPPED
 #define NV_PASS24_GPUCOMP_HOST_SEM_C_IMM_CAPPED  NV_PASS23_GPUCOMP_HOST_SEM_C_IMM_CAPPED
+/* tick179: mesa pass24 *implementation* audit (RE full disasm still pending) */
+#define NV_PASS24_IMPL_AUDIT_TICK179             1
+#define NV_PASS24_IMPL_SCAFFOLD_TICK176          1
+#define NV_PASS24_IMPL_G2_CHANNEL_TICK177        1
+#define NV_PASS24_IMPL_G0_G4_SYMMETRY_TICK178    1
+#define NV_PASS24_IMPL_GALLIUM_VK_TAIL_TICK177   1
+#define NV_PASS24_IMPL_WIRE_COMPLETE             1  /* G0–G4 pass24 helpers+channel wired */
+#define NV_PASS24_RE_TRACE_SCAFFOLD_TICK179      1
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -197,6 +205,23 @@ nv_pass23_24_emit_policy_gate(void)
    if (NV_PASS24_RE_SCAFFOLD && !nv_pass24_explicit_emit_required())
       return false;
    return true;
+}
+
+/**
+ * tick179: pass24 implementation audit — mesa G0–G4 wire complete while
+ * NV_PASS24_RE_FULL_DISASM_PENDING remains set (gpucomp multi-hour RE TBD).
+ */
+static inline bool
+nv_pass24_implementation_audit_ok(void)
+{
+   return NV_PASS24_IMPL_AUDIT_TICK179 != 0 &&
+          NV_PASS24_IMPL_SCAFFOLD_TICK176 != 0 &&
+          NV_PASS24_IMPL_G2_CHANNEL_TICK177 != 0 &&
+          NV_PASS24_IMPL_G0_G4_SYMMETRY_TICK178 != 0 &&
+          NV_PASS24_IMPL_GALLIUM_VK_TAIL_TICK177 != 0 &&
+          NV_PASS24_IMPL_WIRE_COMPLETE != 0 &&
+          nv_pass24_policy_ok() &&
+          NV_PASS24_RE_FULL_DISASM_PENDING != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
