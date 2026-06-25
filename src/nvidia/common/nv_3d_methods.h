@@ -703,6 +703,59 @@ nv_3d_set_scissor0(struct nv_push *p, bool enable,
 }
 
 /**
+ * tick128: viewport 0 clip window in pixels + Z range (pass10 SET_VIEWPORT_CLIP_*).
+ * x,y,w,h are integer pixel extents; min_z/max_z are float bits (caller packs).
+ */
+static inline void
+nv_3d_set_viewport0_clip_rect(struct nv_push *p,
+                              uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              uint32_t min_z_bits, uint32_t max_z_bits)
+{
+   if (!p)
+      return;
+   if (!w)
+      w = 1;
+   if (!h)
+      h = 1;
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_HORIZONTAL(0),
+                  (x & 0xffff) | ((w & 0xffff) << 16));
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_VERTICAL(0),
+                  (y & 0xffff) | ((h & 0xffff) << 16));
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MIN_Z(0), min_z_bits);
+   nv_push_method(p, NVC597_SET_VIEWPORT_CLIP_MAX_Z(0), max_z_bits);
+}
+
+/** tick128: full viewport0 + clip + scissor for RT w×h (GL-style half-extents). */
+static inline void
+nv_3d_emit_g3_viewport_scissor_full(struct nv_push *p, uint32_t rt_w,
+                                    uint32_t rt_h, bool enable_scissor)
+{
+   float hw, hh;
+   union { float f; uint32_t u; } z0, z1;
+
+   if (!p)
+      return;
+   if (!rt_w)
+      rt_w = 1;
+   if (!rt_h)
+      rt_h = 1;
+   hw = (float)rt_w * 0.5f;
+   hh = (float)rt_h * 0.5f;
+   z0.f = 0.0f;
+   z1.f = 1.0f;
+
+   nv_3d_set_surface_clip(p, 0, 0, rt_w, rt_h);
+   nv_3d_set_viewport0(p, hw, hh, 0.5f, hw, hh, 0.5f);
+   nv_3d_set_viewport0_clip_rect(p, 0, 0, rt_w, rt_h, z0.u, z1.u);
+   /* Z clip range method is emitted by nv_3d_emit_g3_fixed_func_smoke / callers
+    * that include nv_3d_emit_viewport_z_clip_range (defined later in this header). */
+   if (enable_scissor)
+      nv_3d_set_scissor0(p, true, 0, 0, rt_w, rt_h);
+   else
+      nv_3d_set_scissor0(p, false, 0, 0, 0, 0);
+}
+
+/**
  * Program vertex stream j: format (stride|enable), location, frequency=0,
  * plus stream size (limit) for bounds.
  */
@@ -3753,6 +3806,72 @@ nv_3d_emit_g3_clear_draw_fixed_sema(struct nv_push *p, uint32_t class_3d,
    nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
    if (zt_gpu_addr)
       nv_3d_emit_clear_surface(p, zs, NULL, 1.0f, 0);
+
+   if (vb_gpu_addr)
+      nv_3d_emit_g3_smoke_vertex_setup(p, vb_gpu_addr, vb_size);
+
+   if (wfi_before_draw)
+      nv_push_wfi(p);
+
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   if (sema_gpu_addr && sema_payload)
+      nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                             sema_payload);
+   else
+      nv_3d_emit_draw_vertex_array(p, 0, 3);
+}
+
+/**
+ * tick128: G3 shader-path smoke — CT bind, full viewport/scissor/clip, optional
+ * program region + VS/PS bind (MOV-imm smoke addresses from caller), optional VB,
+ * clear, draw tri with sema.  Prefer fixed_sema when shaders unavailable on HW.
+ *
+ * vs_gpu/ps_gpu: absolute GPU VAs of SPH objects (typically == program_region for
+ * single-blob smoke).  regs default 16/8 when 0.
+ */
+static inline void
+nv_3d_emit_g3_shader_draw_sema(struct nv_push *p, uint32_t class_3d,
+                               uint64_t ct_gpu_addr, uint32_t ct_w,
+                               uint32_t ct_h, uint32_t ct_format,
+                               const uint32_t color_ui[4],
+                               uint64_t program_region_gpu,
+                               uint64_t vs_gpu, uint32_t vs_regs,
+                               uint64_t ps_gpu, uint32_t ps_regs,
+                               uint64_t vb_gpu_addr, uint32_t vb_size,
+                               uint64_t sema_gpu_addr, uint32_t sema_payload,
+                               bool wfi_before_draw)
+{
+   uint32_t c[4];
+   uint32_t w = ct_w ? ct_w : 1;
+   uint32_t h = ct_h ? ct_h : 1;
+
+   if (!p)
+      return;
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format, false, 0);
+
+   nv_3d_emit_g3_viewport_scissor_full(p, w, h, true);
+   nv_3d_emit_viewport_z_clip_range(p, true /* zero_to_one */);
+   nv_push_method(p, NVC597_SET_DEPTH_TEST, 0);
+   nv_3d_emit_color_write_mask(p, 0, 0xf);
+
+   if (program_region_gpu || vs_gpu || ps_gpu) {
+      nv_3d_emit_g3_smoke_shader_setup(p, program_region_gpu,
+                                       vs_gpu, vs_regs ? vs_regs : 16,
+                                       ps_gpu, ps_regs ? ps_regs : 8);
+   }
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
 
    if (vb_gpu_addr)
       nv_3d_emit_g3_smoke_vertex_setup(p, vb_gpu_addr, vb_size);

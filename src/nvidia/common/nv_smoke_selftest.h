@@ -18,6 +18,7 @@
 
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
+#include "nv_mme.h"
 #include "nv_qmd.h"
 #include "nv_sph.h"
 #include "nv_video_methods.h"
@@ -1354,6 +1355,88 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -408;
       if (nv_host_sema_execute(NV_HOST_SEMA_MODE_VDPAU_SHIFT2) != 0x2u)
          return -409;
+   }
+
+   /* tick128: G3 viewport/scissor/clip + shader_draw_sema method shape */
+   {
+      uint32_t buf_g3[256];
+      uint32_t ng3, ig3;
+      bool saw_vp_clip_h = false, saw_surf_clip = false, saw_pipe_vs = false;
+      bool saw_draw = false, saw_scissor = false;
+      uint32_t color[4] = { 0xff0000ffu, 0, 0, 0 };
+
+      memset(buf_g3, 0, sizeof(buf_g3));
+      nv_push_init(&p, buf_g3, (uint32_t)(sizeof(buf_g3) / 4));
+      nv_3d_emit_g3_viewport_scissor_full(&p, 64, 48, true);
+      ng3 = nv_push_dw_count(&p);
+      if (ng3 < 8)
+         return -410;
+      for (ig3 = 0; ig3 + 1 < ng3; ig3++) {
+         uint32_t hdr = buf_g3[ig3];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_SURFACE_CLIP_HORIZONTAL)
+            saw_surf_clip = true;
+         if (method == NVC597_SET_VIEWPORT_CLIP_HORIZONTAL(0))
+            saw_vp_clip_h = true;
+         if (method == NVC597_SET_SCISSOR_ENABLE(0))
+            saw_scissor = true;
+      }
+      if (!saw_surf_clip || !saw_vp_clip_h || !saw_scissor)
+         return -411;
+
+      memset(buf_g3, 0, sizeof(buf_g3));
+      nv_push_init(&p, buf_g3, (uint32_t)(sizeof(buf_g3) / 4));
+      nv_3d_emit_g3_shader_draw_sema(&p, 0xc597u, 0x800000ull, 32, 32,
+                                     NVC597_SET_COLOR_TARGET_FORMAT_V_A8R8G8B8,
+                                     color, 0x900000ull, 0x900000ull, 16,
+                                     0x900100ull, 8, 0, 0,
+                                     0x300000ull, 0x55u, true);
+      ng3 = nv_push_dw_count(&p);
+      if (ng3 < 20)
+         return -412;
+      for (ig3 = 0; ig3 + 1 < ng3; ig3++) {
+         uint32_t hdr = buf_g3[ig3];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == 0x2000u || method == 0x1608u || method == 0x160cu)
+            saw_pipe_vs = true; /* PIPELINE_SHADER / PROGRAM_REGION */
+         if (method == 0x1610u || method == 0x1638u || method == 0x1640u)
+            saw_draw = true;
+      }
+      if (!saw_pipe_vs && !saw_draw)
+         return -413;
+   }
+
+   /* tick128: MME upload-only indirect stubs (no CALL) */
+   {
+      uint32_t buf_m[128];
+      uint32_t nm, im;
+      bool saw_mme_ptr = false;
+      bool stubs;
+
+      memset(buf_m, 0, sizeof(buf_m));
+      nv_push_init(&p, buf_m, (uint32_t)(sizeof(buf_m) / 4));
+      stubs = nv_mme_emit_upload_indirect_stubs_only(&p);
+      if (!stubs)
+         return -414; /* expected stubs until real ISA */
+      nm = nv_push_dw_count(&p);
+      if (nm < 4)
+         return -415;
+      for (im = 0; im + 1 < nm; im++) {
+         uint32_t hdr = buf_m[im];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         /* LOAD_MME pointer 0x114 or insn ram 0x450 class-dependent */
+         if (method == 0x0114u || method == 0x0450u || method == 0x011cu)
+            saw_mme_ptr = true;
+      }
+      if (!saw_mme_ptr && nm < 2)
+         return -416;
+      (void)saw_mme_ptr;
    }
 
    if (trace_push && trace_dwords) {

@@ -697,6 +697,34 @@ nv_mme_build_draw_indirect_with_clear_scaffold(struct nv_mme_program *prog,
    (void)indexed;
 }
 
+/**
+ * tick128: upload indirect-draw loop scaffolds only (no CALL_MME).
+ * Returns true if programs are still stubs (always until real MME ISA).
+ */
+static inline bool
+nv_mme_emit_upload_indirect_stubs_only(struct nv_push *p)
+{
+   struct nv_mme_program progs[NV_MME_SLOT_COUNT];
+   unsigned i;
+
+   if (!p)
+      return true;
+   nv_mme_build_indirect_draw_programs(progs);
+   for (i = 0; i < NV_MME_SLOT_COUNT; i++)
+      nv_mme_emit_upload_only(p, &progs[i]);
+   return nv_mme_programs_are_stubs(progs);
+}
+
+/** tick128: channel prime — full MME table upload without CALL (stubs only). */
+static inline bool
+nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
+{
+   if (!p)
+      return true;
+   nv_mme_emit_upload_full_table_only(p);
+   return true;
+}
+
 #ifdef __cplusplus
 }
 #endif
