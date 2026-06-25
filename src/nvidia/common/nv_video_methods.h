@@ -989,6 +989,15 @@ nv_nvdec_emit_frame_setup(struct nv_push *p, const struct nv_nvdec_frame_setup *
 #define NV_NVENC_SET_BITSTREAM_BUF_OFFSET    0x040c
 #define NV_NVENC_SET_RC_OFFSET               0x0410
 #define NV_NVENC_SET_STATUS_OFFSET           0x0414
+/*
+ * pass10 RE (610.43.02 glcore/gpucomp/open-gpu-doc C9B7): newer NVENC classes
+ * also program upper-40bit buffer offsets via SetOutEncStatus / SetOutBitstream
+ * at 0x0718 / 0x071c (INC1 method headers mined in gpucomp/glcore).
+ * Older cl*b7 paths use only 0x040c/0x0414 (>>8 offset units).
+ */
+#define NV_NVENC_SET_OUT_ENC_STATUS          0x0718
+#define NV_NVENC_SET_OUT_BITSTREAM           0x071c
+#define NV_NVENC_SET_IO_EXTRA_700            0x0700  /* mined; refine on silicon */
 
 struct nv_nvenc_frame_setup {
    uint32_t app_id;
@@ -1014,6 +1023,8 @@ struct nv_nvenc_frame_setup {
    uint8_t  bit_depth_luma_minus8;
    uint32_t nvenc_sps_flags;     /* direct override for pic_setup dword 2 */
    uint32_t nvenc_pps_rc_flags;  /* direct override for pic_setup dword 3 */
+   /* pass10: emit 0x0718/0x071c upper-40bit outs (C9B7+ style); default on */
+   bool     emit_set_out_methods;
 };
 
 /* NVENC pic_setup BO (host-written, GPU-read); conservative size */
@@ -1331,13 +1342,27 @@ nv_nvenc_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
          (uint32_t)(fs->status_gpu_addr >> 8);
 }
 
+/**
+ * pass10: upper 32 bits of 40-bit buffer offset (C9B7 SetOut* docs).
+ * Lower bits are programmed via 0x040c/0x0414 (>>8) on cl*b7 families.
+ */
+static inline uint32_t
+nv_nvenc_gpu_addr_hi32(uint64_t gpu_addr)
+{
+   return (uint32_t)(gpu_addr >> 32);
+}
+
 static inline void
 nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *fs)
 {
    uint32_t app;
+   bool emit_out;
    if (!p || !fs)
       return;
    app = fs->app_id ? fs->app_id : NV_NVENC_APP_ID_H264;
+   /* Default: emit SetOut* when either buffer present (pass10 gpucomp/glcore) */
+   emit_out = fs->emit_set_out_methods ||
+              fs->bitstream_out_gpu_addr || fs->status_gpu_addr;
    nv_push_method(p, NV_NVENC_SET_APPLICATION_ID, app);
    if (fs->control_params)
       nv_push_method(p, NV_NVENC_SET_CONTROL_PARAMS, fs->control_params);
@@ -1356,6 +1381,13 @@ nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *
    if (fs->status_gpu_addr)
       nv_push_method(p, NV_NVENC_SET_STATUS_OFFSET,
                      (uint32_t)(fs->status_gpu_addr >> 8));
+   /* pass10: C9B7-style upper outs (harmless no-op payload on older if ignored) */
+   if (emit_out && fs->status_gpu_addr)
+      nv_push_method(p, NV_NVENC_SET_OUT_ENC_STATUS,
+                     nv_nvenc_gpu_addr_hi32(fs->status_gpu_addr));
+   if (emit_out && fs->bitstream_out_gpu_addr)
+      nv_push_method(p, NV_NVENC_SET_OUT_BITSTREAM,
+                     nv_nvenc_gpu_addr_hi32(fs->bitstream_out_gpu_addr));
    nv_push_method(p, NV_NVENC_EXECUTE,
                   fs->execute_flags ? fs->execute_flags : 1u);
    nv_push_wfi(p);

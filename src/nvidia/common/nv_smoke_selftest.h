@@ -1183,6 +1183,46 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -382;
    }
 
+   /* pass10 RE: NVENC emit includes SetOutEncStatus/SetOutBitstream (0x718/0x71c) */
+   {
+      struct nv_nvenc_frame_setup efs2;
+      uint32_t buf10[160];
+      uint32_t n10, i10;
+      bool saw_out_st = false, saw_out_bs = false, saw_st = false, saw_bs = false;
+
+      nv_nvenc_frame_setup_init_h264_smoke(&efs2, 0x710000ull, 0x800000ull,
+                                           0x810000ull, 64, 64);
+      efs2.status_gpu_addr = 0x900000000ull | 0x300000ull; /* hi non-zero */
+      efs2.bitstream_out_gpu_addr = 0xA00000000ull | 0x810000ull;
+      efs2.emit_set_out_methods = true;
+      memset(buf10, 0, sizeof(buf10));
+      nv_push_init(&p, buf10, (uint32_t)(sizeof(buf10) / 4));
+      if (nv_nvenc_emit_encode_frame(&p, 0xc8b7u, &efs2, 0, 0, NULL) != 0)
+         return -383;
+      n10 = nv_push_dw_count(&p);
+      for (i10 = 0; i10 + 1 < n10; i10++) {
+         uint32_t hdr = buf10[i10];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVENC_SET_STATUS_OFFSET)
+            saw_st = true;
+         if (method == NV_NVENC_SET_BITSTREAM_BUF_OFFSET)
+            saw_bs = true;
+         if (method == NV_NVENC_SET_OUT_ENC_STATUS)
+            saw_out_st = true;
+         if (method == NV_NVENC_SET_OUT_BITSTREAM)
+            saw_out_bs = true;
+      }
+      if (!saw_st || !saw_bs)
+         return -384;
+      if (!saw_out_st || !saw_out_bs)
+         return -385;
+      if (NV_NVENC_SET_OUT_ENC_STATUS != 0x0718u ||
+          NV_NVENC_SET_OUT_BITSTREAM != 0x071cu)
+         return -386;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
