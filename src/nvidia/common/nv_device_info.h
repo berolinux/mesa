@@ -63,6 +63,9 @@ struct nv_device_info {
    uint32_t max_threads_per_warp; /* GR probe; usually 32 */
    uint32_t max_sp_per_sm;
    uint32_t gpu_core_count;       /* total SM/core count when reported */
+   /* tick106: NV2080 subdevice instance / count (MIG multi-USERD planning) */
+   uint32_t subdevice_instance;
+   uint32_t subdevice_count;
 
    uint64_t vram_size_bytes;
    uint64_t vram_usable_bytes;

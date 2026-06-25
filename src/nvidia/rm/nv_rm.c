@@ -154,6 +154,8 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.max_threads_per_warp = gi.max_threads_per_warp;
       dev->info.max_sp_per_sm = gi.max_sp_per_sm;
       dev->info.gpu_core_count = gi.gpu_core_count;
+      dev->info.subdevice_instance = gi.subdevice_instance;
+      dev->info.subdevice_count = gi.subdevice_count ? gi.subdevice_count : 1;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
       /* tick101: BAR1/heap/ECC for mapping policy */
@@ -1086,6 +1088,60 @@ nv_rm_bo_alloc_bl(struct nv_rm_device *dev, uint32_t width, uint32_t height,
       bo = nv_rm_bo_alloc(dev, &req);
    }
    return bo;
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_typed(struct nv_rm_device *dev, uint64_t size_bytes,
+                     uint32_t rm_type, bool vram, bool cpu_access,
+                     bool map_gpu_va)
+{
+   struct nv_rm_bo_req req;
+
+   if (!dev || !size_bytes)
+      return NULL;
+   memset(&req, 0, sizeof(req));
+   req.size = size_bytes;
+   req.alignment = 4096;
+   req.vram = vram;
+   req.cpu_access = cpu_access;
+   req.map_gpu_va = map_gpu_va;
+   req.no_scanout = true;
+   req.rm_type = rm_type ? rm_type : NVOS32_TYPE_DMA;
+   return nv_rm_bo_alloc(dev, &req);
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_notifier(struct nv_rm_device *dev, uint64_t size_bytes)
+{
+   if (!size_bytes)
+      size_bytes = 4096;
+   return nv_rm_bo_alloc_typed(dev, size_bytes, NVOS32_TYPE_NOTIFIER,
+                               false, true, true);
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_shader(struct nv_rm_device *dev, uint64_t size_bytes,
+                      bool map_gpu_va)
+{
+   struct nv_rm_bo *bo;
+   if (!size_bytes)
+      return NULL;
+   bo = nv_rm_bo_alloc_typed(dev, size_bytes, NVOS32_TYPE_SHADER_PROGRAM,
+                             true, false, map_gpu_va);
+   if (!bo)
+      bo = nv_rm_bo_alloc_typed(dev, size_bytes, NVOS32_TYPE_SHADER_PROGRAM,
+                                false, true, map_gpu_va);
+   return bo;
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_video_2d(struct nv_rm_device *dev, uint32_t width,
+                        uint32_t height, int32_t *pitch_inout, bool vram,
+                        bool map_gpu_va)
+{
+   return nv_rm_bo_alloc_2d(dev, width, height, pitch_inout, vram,
+                            !vram /* cpu_access for sysmem */, map_gpu_va,
+                            NVOS32_TYPE_VIDEO, 0);
 }
 
 int32_t

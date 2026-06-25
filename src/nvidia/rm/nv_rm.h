@@ -212,6 +212,30 @@ nv_rm_bo_alloc_bl(struct nv_rm_device *dev, uint32_t width, uint32_t height,
                   uint64_t size_bytes, uint8_t gobs_h, bool vram,
                   bool map_gpu_va, uint32_t rm_type, uint32_t format);
 
+/**
+ * tick106: allocate BO with explicit NVOS32_TYPE_* (notifier, shader, dma, video).
+ * size_bytes must be non-zero; prefers memory_alloc_ex when type is surface-ish.
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_typed(struct nv_rm_device *dev, uint64_t size_bytes,
+                     uint32_t rm_type, bool vram, bool cpu_access,
+                     bool map_gpu_va);
+
+/** Convenience: notifier / sema ring (NVOS32_TYPE_NOTIFIER, sysmem WC). */
+struct nv_rm_bo *
+nv_rm_bo_alloc_notifier(struct nv_rm_device *dev, uint64_t size_bytes);
+
+/** Convenience: shader/microcode buffer (NVOS32_TYPE_SHADER_PROGRAM, vidmem). */
+struct nv_rm_bo *
+nv_rm_bo_alloc_shader(struct nv_rm_device *dev, uint64_t size_bytes,
+                      bool map_gpu_va);
+
+/** Convenience: video surface linear pitch (NVOS32_TYPE_VIDEO). */
+struct nv_rm_bo *
+nv_rm_bo_alloc_video_2d(struct nv_rm_device *dev, uint32_t width,
+                        uint32_t height, int32_t *pitch_inout, bool vram,
+                        bool map_gpu_va);
+
 void
 nv_rm_bo_free(struct nv_rm_bo *bo);
 

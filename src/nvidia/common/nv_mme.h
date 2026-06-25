@@ -264,6 +264,96 @@ nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
 }
 
 /**
+ * tick106: pseudo-instruction for "branch if reg_src != 0, imm16 = target insn idx".
+ * Documents intended control flow for indirect draw_count loops; not silicon-valid.
+ */
+static inline uint32_t
+nv_mme_insn_branch_nz(uint16_t target_insn_idx, uint8_t reg_src)
+{
+   return NV_MME_INSN_OP(NV_MME_OP_BRANCH) |
+          NV_MME_INSN_IMM16(target_insn_idx) |
+          NV_MME_INSN_REG(reg_src, 0) |
+          NV_MME_INSN_BRANCH_CLASS;
+}
+
+/**
+ * tick106: pseudo-instruction for ALU inc/dec on reg_dst (imm16 = ±delta).
+ * Loop counters in indirect macros would use this once ISA is proven.
+ */
+static inline uint32_t
+nv_mme_insn_alu_add_imm(uint8_t reg_dst, int16_t imm)
+{
+   return NV_MME_INSN_OP(NV_MME_OP_ALU) |
+          NV_MME_INSN_IMM16((uint16_t)imm) |
+          NV_MME_INSN_REG(reg_dst, reg_dst) |
+          NV_MME_INSN_ALU_CLASS;
+}
+
+/**
+ * tick106: richer indirect-draw scaffold — documents intended loop shape:
+ *   R0 = draw_count from CALL_MME_DATA; loop: load indirect cmd, emit methods, dec, branch.
+ * Still is_stub_end_only; host path A/B/C' remains authoritative.
+ */
+static inline void
+nv_mme_build_draw_indirect_loop_scaffold(struct nv_mme_program *prog,
+                                         uint32_t slot, uint32_t ram_offset,
+                                         bool indexed)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+   /* 0: state load (indirect buffer / CALL_MME_DATA draw_count into R0) */
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   /* 1: loop body — method emit band (draw vs indexed draw) */
+   prog->insns[1] = nv_mme_insn_emit_method(indexed ? 0x1620u : 0x1610u, 0);
+   /* 2: merge/call helper for secondary method burst */
+   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(indexed ? 0x1630u : 0x1618u) |
+                    NV_MME_INSN_MERGE_CLASS;
+   /* 3: decrement loop counter R0 */
+   prog->insns[3] = nv_mme_insn_alu_add_imm(0, -1);
+   /* 4: branch back to insn 1 while R0 != 0 */
+   prog->insns[4] = nv_mme_insn_branch_nz(1, 0);
+   /* 5: END */
+   prog->insns[5] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 6;
+   prog->is_stub_end_only = true;
+   (void)indexed;
+}
+
+/**
+ * tick106: fill EXTENDED_COUNT macro table (indirect + channel-init + clear + pass5 hot).
+ * ram regions stride by NV_MME_RAM_SLOT_STRIDE; pass5 hot uses slot 28 / separate region.
+ * Returns number of programs written into progs[] (caller provides >= EXTENDED_COUNT+1
+ * if including pass5 hot at progs[EXTENDED_COUNT]).
+ */
+static inline unsigned
+nv_mme_build_extended_program_table(struct nv_mme_program progs[NV_MME_SLOT_EXTENDED_COUNT],
+                                    struct nv_mme_program *pass5_hot_out)
+{
+   uint32_t ram = 0;
+   if (!progs)
+      return 0;
+   nv_mme_build_draw_indirect_loop_scaffold(&progs[NV_MME_SLOT_DRAW_INDIRECT],
+                                            NV_MME_SLOT_DRAW_INDIRECT, ram, false);
+   ram += NV_MME_RAM_SLOT_STRIDE;
+   nv_mme_build_draw_indirect_loop_scaffold(&progs[NV_MME_SLOT_DRAW_INDEXED_INDIRECT],
+                                            NV_MME_SLOT_DRAW_INDEXED_INDIRECT, ram, true);
+   ram += NV_MME_RAM_SLOT_STRIDE;
+   nv_mme_build_channel_init_program_stub(&progs[NV_MME_SLOT_CHANNEL_INIT_SCRATCH], ram);
+   ram += NV_MME_RAM_SLOT_STRIDE;
+   nv_mme_build_clear_helper_program_stub(&progs[NV_MME_SLOT_CLEAR_HELPER], ram);
+   if (pass5_hot_out) {
+      ram += NV_MME_RAM_SLOT_STRIDE;
+      nv_mme_build_pass5_hot_program_stub(pass5_hot_out, ram);
+   }
+   return NV_MME_SLOT_EXTENDED_COUNT;
+}
+
+/**
  * Build both indirect macros into caller-provided array (size >= SLOT_COUNT).
  * Returns number of programs filled (2).
  */
@@ -272,12 +362,12 @@ nv_mme_build_indirect_draw_programs(struct nv_mme_program progs[NV_MME_SLOT_COUN
 {
    if (!progs)
       return 0;
-   nv_mme_build_draw_indirect_program(&progs[NV_MME_SLOT_DRAW_INDIRECT],
-                                      NV_MME_SLOT_DRAW_INDIRECT,
-                                      0, false);
-   nv_mme_build_draw_indirect_program(&progs[NV_MME_SLOT_DRAW_INDEXED_INDIRECT],
-                                      NV_MME_SLOT_DRAW_INDEXED_INDIRECT,
-                                      NV_MME_RAM_SLOT_STRIDE, true);
+   nv_mme_build_draw_indirect_loop_scaffold(&progs[NV_MME_SLOT_DRAW_INDIRECT],
+                                            NV_MME_SLOT_DRAW_INDIRECT,
+                                            0, false);
+   nv_mme_build_draw_indirect_loop_scaffold(&progs[NV_MME_SLOT_DRAW_INDEXED_INDIRECT],
+                                            NV_MME_SLOT_DRAW_INDEXED_INDIRECT,
+                                            NV_MME_RAM_SLOT_STRIDE, true);
    return NV_MME_SLOT_COUNT;
 }
 

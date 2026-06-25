@@ -900,6 +900,88 @@ nv_channel_fill_userd_alloc_params(const struct nv_channel *ch,
    return 0;
 }
 
+unsigned
+nv_channel_alloc_extra_userd_slots(struct nv_channel *ch, unsigned n_slots_total)
+{
+#if !defined(HAVE_LIBDRM_NVIDIA)
+   (void)ch;
+   (void)n_slots_total;
+   return 0;
+#else
+   struct nv_rm_bo_req req;
+   unsigned want, s;
+   const char *env_slots, *env_multi;
+
+   if (!ch || !ch->rm || !ch->h_userd_mem)
+      return 0;
+
+   want = n_slots_total ? n_slots_total : 1;
+   env_slots = getenv("NV_CHANNEL_USERD_SLOTS");
+   env_multi = getenv("NV_CHANNEL_MULTI_USERD");
+   if (env_slots && env_slots[0]) {
+      unsigned v = (unsigned)atoi(env_slots);
+      if (v)
+         want = v;
+   } else if (env_multi && env_multi[0] == '1') {
+      /* Multi-USERD: prefer RM subdevice_count (MIG/SLI), else at least 2 */
+      if (ch->info && ch->info->subdevice_count > 1)
+         want = ch->info->subdevice_count;
+      else
+         want = 2;
+   } else if (ch->info && ch->info->subdevice_count > 1) {
+      /* Auto-match USERD slots to probed subdevice topology (non-fatal if alloc fails) */
+      want = ch->info->subdevice_count;
+   }
+   if (want < 1)
+      want = 1;
+   if (want > NV_CHANNEL_MAX_USERD_HANDLES)
+      want = NV_CHANNEL_MAX_USERD_HANDLES;
+
+   /* Ensure slot 0 handle is registered */
+   if (!ch->userd_handle_count && ch->h_userd_mem)
+      (void)nv_channel_set_userd_handle(ch, 0, ch->h_userd_mem, 0);
+
+   for (s = 1; s < want; s++) {
+      struct nv_rm_bo *ubo;
+      volatile uint32_t *umap;
+      uint32_t hh;
+
+      if (ch->userd_handles[s])
+         continue;
+      memset(&req, 0, sizeof(req));
+      req.size = NV_CHANNEL_USERD_SIZE;
+      req.alignment = NV_CHANNEL_USERD_SIZE;
+      req.vram = true;
+      req.cpu_access = true;
+      req.map_gpu_va = true;
+      req.no_scanout = true;
+      ubo = nv_rm_bo_alloc(ch->rm, &req);
+      if (!ubo) {
+         req.vram = false;
+         ubo = nv_rm_bo_alloc(ch->rm, &req);
+      }
+      if (!ubo)
+         break;
+      hh = nv_rm_bo_handle(ubo);
+      if (!hh) {
+         nv_rm_bo_free(ubo);
+         break;
+      }
+      umap = nv_rm_bo_map(ubo);
+      if (umap)
+         nvidia_userd_init_host(umap, NV_CHANNEL_USERD_SIZE);
+      (void)nv_channel_set_userd_handle(ch, s, hh, 0);
+      if (umap)
+         (void)nv_channel_add_userd_slot(ch, (volatile void *)umap);
+      if (ch->userd_extra_bo_count < NV_CHANNEL_MAX_USERD_HANDLES)
+         ch->userd_extra_bos[ch->userd_extra_bo_count++] = ubo;
+      else
+         nv_rm_bo_free(ubo); /* handle already registered; leak BO ref avoided */
+   }
+   return ch->userd_handle_count ? ch->userd_handle_count : 1;
+#endif
+}
+
 uint32_t
 nv_channel_resolve_class_copy(const struct nv_channel *ch, uint32_t explicit_class)
 {
@@ -1040,6 +1122,9 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    /* GPGet/GPPut/Put/Get must start at 0 or first submit races with garbage */
    nvidia_userd_init_host(ch->userd, NV_CHANNEL_USERD_SIZE);
    ch->gpfifo_put = 0;
+
+   /* tick106: optional extra USERD BOs for multi-subdevice alloc (env-gated default 1) */
+   (void)nv_channel_alloc_extra_userd_slots(ch, 1);
 
    /* Error notifier memory + CTXDMA (NV01_CONTEXT_ERROR_TO_MEMORY) */
    req.size = NV_CHANNEL_NOTIFIER_SIZE;
@@ -1332,12 +1417,23 @@ fail:
 void
 nv_channel_destroy(struct nv_channel *ch)
 {
+   unsigned ui;
+
    if (!ch)
       return;
 
    nv_channel_destroy_error_event(ch);
 
 #if defined(HAVE_LIBDRM_NVIDIA)
+   /* Extra USERD BOs (slots 1..n); primary userd_bo freed below */
+   for (ui = 0; ui < ch->userd_extra_bo_count; ui++) {
+      if (ch->userd_extra_bos[ui]) {
+         nv_rm_bo_free(ch->userd_extra_bos[ui]);
+         ch->userd_extra_bos[ui] = NULL;
+      }
+   }
+   ch->userd_extra_bo_count = 0;
+
    if (ch->rm) {
       uint32_t h_dev = nv_rm_device_device_handle(ch->rm);
       /* Free engine objects before channel (use recorded alloc parent) */

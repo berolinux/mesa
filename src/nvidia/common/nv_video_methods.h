@@ -993,7 +993,152 @@ struct nv_nvenc_frame_setup {
    uint64_t rc_gpu_addr;
    uint64_t status_gpu_addr;
    uint32_t execute_flags;
+   /* tick106: encode geometry / rate-control hints for pic_setup BO */
+   uint32_t width;
+   uint32_t height;
+   uint32_t frame_rate_num;      /* e.g. 30 */
+   uint32_t frame_rate_den;      /* e.g. 1 */
+   uint32_t average_bitrate;     /* bps; 0 = VBR/default */
+   uint32_t max_bitrate;
+   uint32_t gop_length;          /* 0 = intra-only / driver default */
+   uint32_t idr_period;
+   uint8_t  profile_idc;         /* H.264/HEVC profile; 0 = default */
+   uint8_t  level_idc;
+   uint8_t  chroma_format_idc;   /* 1 = 4:2:0 */
+   uint8_t  bit_depth_luma_minus8;
+   uint32_t nvenc_sps_flags;     /* direct override for pic_setup dword 2 */
+   uint32_t nvenc_pps_rc_flags;  /* direct override for pic_setup dword 3 */
 };
+
+/* NVENC pic_setup BO (host-written, GPU-read); conservative size */
+#define NV_NVENC_PIC_SETUP_BYTES         1024
+#define NV_NVENC_PS_PIC_WH               0   /* (height<<16)|width */
+#define NV_NVENC_PS_FRAME_RATE           1   /* (den<<16)|num */
+#define NV_NVENC_PS_SPS_FLAGS            2   /* profile/level/chroma/bitdepth */
+#define NV_NVENC_PS_PPS_RC_FLAGS         3   /* RC/gop/idr subset */
+#define NV_NVENC_PS_AVG_BITRATE          4
+#define NV_NVENC_PS_MAX_BITRATE          5
+#define NV_NVENC_PS_GOP_LENGTH           6
+#define NV_NVENC_PS_IDR_PERIOD           7
+#define NV_NVENC_PS_INPUT_LUMA_OFF       8   /* input Y plane >>8 */
+#define NV_NVENC_PS_INPUT_CHROMA_OFF     9
+#define NV_NVENC_PS_BITSTREAM_OUT_OFF    10
+#define NV_NVENC_PS_RC_STATE_OFF         11
+#define NV_NVENC_PS_STATUS_OFF           12
+
+static inline uint32_t
+nv_nvenc_pic_setup_size(uint32_t app_id)
+{
+   (void)app_id;
+   return NV_NVENC_PIC_SETUP_BYTES;
+}
+
+/**
+ * tick106: pack NVENC SPS/profile dword (refine on silicon/traces).
+ *   [7:0]   profile_idc
+ *   [15:8]  level_idc
+ *   [17:16] chroma_format_idc
+ *   [23:20] bit_depth_luma_minus8
+ *   [31:24] app_id (echo for debug)
+ */
+static inline uint32_t
+nv_nvenc_pack_sps_flags(const struct nv_nvenc_frame_setup *fs)
+{
+   uint32_t profile, level, chroma, bdl, app;
+   if (!fs)
+      return 0;
+   if (fs->nvenc_sps_flags)
+      return fs->nvenc_sps_flags;
+   app = fs->app_id ? fs->app_id : NV_NVENC_APP_ID_H264;
+   profile = fs->profile_idc ? fs->profile_idc :
+             (app == NV_NVENC_APP_ID_HEVC ? 1 : 100);
+   level = fs->level_idc ? fs->level_idc : 41;
+   chroma = fs->chroma_format_idc ? fs->chroma_format_idc : 1;
+   bdl = fs->bit_depth_luma_minus8 & 0xfu;
+   return (profile & 0xffu) |
+          ((level & 0xffu) << 8) |
+          ((chroma & 3u) << 16) |
+          (bdl << 20) |
+          ((app & 0xffu) << 24);
+}
+
+/**
+ * tick106: RC/GOP control dword.
+ *   [0]     CBR (1) vs VBR/default (0) when average_bitrate set
+ *   [1]     max_bitrate present
+ *   [2]     gop_length present
+ *   [3]     idr_period present
+ *   [15:8]  frame_rate_num (clamped)
+ *   [23:16] frame_rate_den (clamped)
+ */
+static inline uint32_t
+nv_nvenc_pack_pps_rc_flags(const struct nv_nvenc_frame_setup *fs)
+{
+   uint32_t f = 0;
+   uint32_t fn, fd;
+   if (!fs)
+      return 0;
+   if (fs->nvenc_pps_rc_flags)
+      return fs->nvenc_pps_rc_flags;
+   if (fs->average_bitrate)
+      f |= 1u;
+   if (fs->max_bitrate)
+      f |= 2u;
+   if (fs->gop_length)
+      f |= 4u;
+   if (fs->idr_period)
+      f |= 8u;
+   fn = fs->frame_rate_num ? fs->frame_rate_num : 30;
+   fd = fs->frame_rate_den ? fs->frame_rate_den : 1;
+   if (fn > 255) fn = 255;
+   if (fd > 255) fd = 255;
+   f |= (fn & 0xffu) << 8;
+   f |= (fd & 0xffu) << 16;
+   return f;
+}
+
+/** Populate NVENC pic_setup dword buffer (minimal encode header). */
+static inline void
+nv_nvenc_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
+                                const struct nv_nvenc_frame_setup *fs)
+{
+   uint32_t w, h, fn, fd;
+   if (!pic_dwords || !pic_dwords_cap || !fs)
+      return;
+   memset(pic_dwords, 0, (size_t)pic_dwords_cap * 4u);
+   w = fs->width ? fs->width : 1;
+   h = fs->height ? fs->height : 1;
+   fn = fs->frame_rate_num ? fs->frame_rate_num : 30;
+   fd = fs->frame_rate_den ? fs->frame_rate_den : 1;
+   if (pic_dwords_cap > NV_NVENC_PS_PIC_WH)
+      pic_dwords[NV_NVENC_PS_PIC_WH] = (h << 16) | (w & 0xffffu);
+   if (pic_dwords_cap > NV_NVENC_PS_FRAME_RATE)
+      pic_dwords[NV_NVENC_PS_FRAME_RATE] = (fd << 16) | (fn & 0xffffu);
+   if (pic_dwords_cap > NV_NVENC_PS_SPS_FLAGS)
+      pic_dwords[NV_NVENC_PS_SPS_FLAGS] = nv_nvenc_pack_sps_flags(fs);
+   if (pic_dwords_cap > NV_NVENC_PS_PPS_RC_FLAGS)
+      pic_dwords[NV_NVENC_PS_PPS_RC_FLAGS] = nv_nvenc_pack_pps_rc_flags(fs);
+   if (pic_dwords_cap > NV_NVENC_PS_AVG_BITRATE)
+      pic_dwords[NV_NVENC_PS_AVG_BITRATE] = fs->average_bitrate;
+   if (pic_dwords_cap > NV_NVENC_PS_MAX_BITRATE)
+      pic_dwords[NV_NVENC_PS_MAX_BITRATE] = fs->max_bitrate;
+   if (pic_dwords_cap > NV_NVENC_PS_GOP_LENGTH)
+      pic_dwords[NV_NVENC_PS_GOP_LENGTH] = fs->gop_length;
+   if (pic_dwords_cap > NV_NVENC_PS_IDR_PERIOD)
+      pic_dwords[NV_NVENC_PS_IDR_PERIOD] = fs->idr_period;
+   if (fs->input_yuv_gpu_addr && pic_dwords_cap > NV_NVENC_PS_INPUT_LUMA_OFF)
+      pic_dwords[NV_NVENC_PS_INPUT_LUMA_OFF] =
+         (uint32_t)(fs->input_yuv_gpu_addr >> 8);
+   if (fs->bitstream_out_gpu_addr && pic_dwords_cap > NV_NVENC_PS_BITSTREAM_OUT_OFF)
+      pic_dwords[NV_NVENC_PS_BITSTREAM_OUT_OFF] =
+         (uint32_t)(fs->bitstream_out_gpu_addr >> 8);
+   if (fs->rc_gpu_addr && pic_dwords_cap > NV_NVENC_PS_RC_STATE_OFF)
+      pic_dwords[NV_NVENC_PS_RC_STATE_OFF] =
+         (uint32_t)(fs->rc_gpu_addr >> 8);
+   if (fs->status_gpu_addr && pic_dwords_cap > NV_NVENC_PS_STATUS_OFF)
+      pic_dwords[NV_NVENC_PS_STATUS_OFF] =
+         (uint32_t)(fs->status_gpu_addr >> 8);
+}
 
 static inline void
 nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *fs)
@@ -1023,6 +1168,29 @@ nv_nvenc_emit_frame_setup(struct nv_push *p, const struct nv_nvenc_frame_setup *
    nv_push_method(p, NV_NVENC_EXECUTE,
                   fs->execute_flags ? fs->execute_flags : 1u);
    nv_push_wfi(p);
+}
+
+/**
+ * tick106: NVENC vertical slice — SET_OBJECT + frame methods + sema + EXECUTE.
+ * pic_setup BO must be pre-filled (nv_nvenc_pic_setup_init_minimal) if used.
+ */
+static inline void
+nv_nvenc_emit_frame_kick(struct nv_push *p, uint32_t class_nvenc,
+                         const struct nv_nvenc_frame_setup *fs,
+                         uint64_t sema_gpu, uint32_t sema_payload,
+                         volatile uint32_t *status_cpu)
+{
+   if (!p)
+      return;
+   if (class_nvenc)
+      nv_nvenc_set_object(p, class_nvenc);
+   if (sema_gpu)
+      nv_nvdec_emit_semaphore_release_reset(p, sema_gpu, sema_payload,
+                                            status_cpu);
+   if (fs)
+      nv_nvenc_emit_frame_setup(p, fs);
+   else
+      nv_push_method(p, NV_NVENC_EXECUTE, 1u);
 }
 
 

@@ -126,6 +126,9 @@ struct nv_channel {
    unsigned usermode_slot_count;
 
    struct nv_rm_bo *userd_bo;
+   /* tick106: extra USERD BOs for multi-subdevice hUserdMemory[1..7] (MIG path) */
+   struct nv_rm_bo *userd_extra_bos[NV_CHANNEL_MAX_USERD_HANDLES];
+   unsigned userd_extra_bo_count;
    struct nv_rm_bo *notifier_bo;
    struct nv_rm_bo *gpfifo_bo;
    struct nv_rm_bo *push_bo;
@@ -148,6 +151,16 @@ unsigned nv_channel_fill_userd_alloc_params(const struct nv_channel *ch,
                                             uint32_t *h_userd_memory_out,
                                             uint64_t *userd_offset_out,
                                             unsigned max_slots);
+
+/**
+ * tick106: allocate and register additional USERD memory BOs for slots 1..n-1
+ * (slot 0 is primary userd_bo).  n_slots is desired total handles (1..8).
+ * Best-effort: returns number of handles registered (at least 1 if primary ok).
+ * Env NV_CHANNEL_USERD_SLOTS=N overrides (capped at 8).  Default: 1, or
+ * subdevice_count when RM reports >1, or NV_CHANNEL_MULTI_USERD=1 forces >=2.
+ */
+unsigned nv_channel_alloc_extra_userd_slots(struct nv_channel *ch,
+                                           unsigned n_slots_total);
 
 struct nv_channel *
 nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
