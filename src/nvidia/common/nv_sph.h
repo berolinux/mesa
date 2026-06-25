@@ -1247,6 +1247,144 @@ nv_pass21_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
       host_sema_payload, host_sema_mode);
 }
 
+/*
+ * tick162 / pass22: NIR depth ladder extension — full pass21 kinds including
+ * barrier variant, plus pass22 explicit-emit gate before G2 launch.  Still not
+ * full NIR lower; maps compiler-shaped objects to hand SPH builders until
+ * nv_nir_compile covers each kind.
+ */
+#define NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT  5u
+#define NV_PASS22_NIR_DEFAULT_KIND             NV_PASS21_CS_S2R_STORE_IMM
+#define NV_PASS22_NIR_MAX_KIND                 NV_PASS21_CS_S2R_STORE_IMM_BAR
+
+/** tick162: pass21 kinds in silicon/NIR bringup order (includes BAR depth). */
+static inline unsigned
+nv_pass22_nir_depth_kind_ladder_fill(enum nv_pass21_compute_shader_kind out[],
+                                     unsigned max_out)
+{
+   static const enum nv_pass21_compute_shader_kind k_order[] = {
+      NV_PASS21_CS_EXIT_ONLY,
+      NV_PASS21_CS_STORE_IMM,
+      NV_PASS21_CS_S2R_MULTI_SR,
+      NV_PASS21_CS_S2R_STORE_IMM,
+      NV_PASS21_CS_S2R_STORE_IMM_BAR,
+   };
+   unsigned n = 0, i;
+
+   if (!out || !max_out)
+      return 0;
+   for (i = 0; i < sizeof(k_order) / sizeof(k_order[0]) && n < max_out; i++)
+      out[n++] = k_order[i];
+   return n;
+}
+
+/** tick162: true if kind needs global store GVA for meaningful smoke. */
+static inline bool
+nv_pass22_nir_kind_needs_global_store(enum nv_pass21_compute_shader_kind kind)
+{
+   return kind == NV_PASS21_CS_STORE_IMM ||
+          kind == NV_PASS21_CS_S2R_STORE_IMM ||
+          kind == NV_PASS21_CS_S2R_STORE_IMM_BAR;
+}
+
+/** tick162: true if kind is within pass22 NIR depth ladder range. */
+static inline bool
+nv_pass22_nir_kind_valid(enum nv_pass21_compute_shader_kind kind)
+{
+   return (unsigned)kind <= (unsigned)NV_PASS22_NIR_MAX_KIND;
+}
+
+/**
+ * tick162: build pass21 compute object with pass22 policy checks (explicit emit
+ * required; path C still gated at RE layer).  Returns 0 on success.
+ */
+static inline int
+nv_pass22_compute_object_build(struct nv_pass21_compute_object *obj)
+{
+   if (!obj)
+      return -1;
+   if (!nv_pass22_explicit_emit_required())
+      return -10;
+   if (!NV_PASS22_RE_PATH_C_STILL_GATED)
+      return -11; /* pass22 requires path C remain gated until live MME ISA */
+   if (!nv_pass22_nir_kind_valid(obj->shader_kind))
+      return -12;
+   if (nv_pass22_nir_kind_needs_global_store(obj->shader_kind) &&
+       !obj->store_gpu_addr)
+      obj->store_gpu_addr = 0x300000ull;
+   return nv_pass21_compute_object_build(obj);
+}
+
+/**
+ * tick162: emit G2 launch only if pass22 span/policy OK after pass21 emit path.
+ * Returns pass21 codes, or -13 if explicit-emit policy violated, -14 if span bad.
+ */
+static inline int
+nv_pass22_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
+                                     struct nv_pass21_compute_object *obj,
+                                     uint64_t lmem_gpu_addr, bool post_wfi,
+                                     uint64_t host_sema_gpu,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode)
+{
+   uint32_t before, after;
+   int r;
+
+   if (!nv_pass22_explicit_emit_required())
+      return -13;
+   if (!p || !obj)
+      return -4;
+   before = nv_push_dw_count(p);
+   r = nv_pass21_compute_object_emit_launch(p, class_compute, obj, lmem_gpu_addr,
+                                            post_wfi, host_sema_gpu,
+                                            host_sema_payload, host_sema_mode);
+   if (r != 0)
+      return r;
+   after = nv_push_dw_count(p);
+   /* Contiguous mesa emit must stay under pass22/glcore median imm distance. */
+   if (after > before &&
+       !nv_pass22_inline_pcas_span_ok(after - before) &&
+       (after - before) >= NV_PASS22_INLINE_TO_PCAS_MEDIAN_GLCORE)
+      return -14;
+   return 0;
+}
+
+/**
+ * tick162: walk full pass22 NIR depth ladder — build each kind (no launch).
+ * Returns 0 if all kinds build; negative = -20 - kind index on failure.
+ */
+static inline int
+nv_pass22_nir_depth_ladder_build_all(struct nv_pass21_compute_object *scratch,
+                                     uint64_t program_gpu, uint64_t qmd_gpu,
+                                     uint64_t qmd_sema_gpu, uint64_t store_gpu)
+{
+   enum nv_pass21_compute_shader_kind kinds[NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT];
+   unsigned n, i;
+   int r;
+
+   if (!scratch || !program_gpu || !qmd_gpu || !qmd_sema_gpu)
+      return -1;
+   n = nv_pass22_nir_depth_kind_ladder_fill(kinds,
+                                            NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT);
+   if (n != NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT)
+      return -2;
+   for (i = 0; i < n; i++) {
+      memset(scratch, 0, sizeof(*scratch));
+      scratch->shader_kind = kinds[i];
+      scratch->program_gpu_addr = program_gpu;
+      scratch->qmd_gpu_addr = qmd_gpu;
+      scratch->qmd_sema_gpu = qmd_sema_gpu;
+      scratch->store_gpu_addr = store_gpu ? store_gpu : 0x300000ull;
+      scratch->imm_value = 0x62u + i;
+      r = nv_pass22_compute_object_build(scratch);
+      if (r != 0)
+         return -20 - (int)i;
+      if (!scratch->ser_bytes)
+         return -30 - (int)i;
+   }
+   return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

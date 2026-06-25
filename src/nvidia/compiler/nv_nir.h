@@ -66,6 +66,14 @@ bool nv_nir_compile_g2_store_imm_smoke(uint32_t imm_value, uint64_t store_gpu_ad
 int nv_nir_g2_store_imm_smoke_selftest(uint32_t imm_value, uint64_t store_gpu_addr,
                                        uint16_t regs);
 
+/*
+ * tick162 / pass22: NIR depth ladder via hand SPH builders (header path in
+ * nv_sph.h: nv_pass22_nir_depth_*).  Full nv_nir_compile per-kind is incremental;
+ * mesa channel/G2 should use nv_pass22_compute_object_* until compiler covers
+ * EXIT / S2R / S2R+store / BAR variants uniformly.
+ */
+#define NV_PASS22_NIR_USES_HAND_SPH_LADDER  1
+
 void nv_compiler_result_finish(struct nv_compiler_result *res);
 
 /** Map nv_shader_kind / mesa stage to compiler stage. */

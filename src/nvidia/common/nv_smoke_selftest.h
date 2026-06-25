@@ -3849,6 +3849,84 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -767;
    }
 
+   /* tick162: pass22 NIR depth ladder + G2 launch policy (no HW / no full NIR) */
+   {
+      struct nv_pass21_compute_object obj162;
+      enum nv_pass21_compute_shader_kind kinds162[8];
+      unsigned kn162, ki162;
+      struct nv_push cp162;
+      uint32_t cb162[512];
+      int lr;
+
+      if (NV_PASS22_NIR_DEPTH_LADDER_KIND_COUNT != 5u)
+         return -768;
+      if (NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
+         return -769;
+      if (!nv_pass22_nir_kind_valid(NV_PASS21_CS_S2R_STORE_IMM_BAR))
+         return -770;
+      if (nv_pass22_nir_kind_valid((enum nv_pass21_compute_shader_kind)99))
+         return -771;
+      if (!nv_pass22_nir_kind_needs_global_store(NV_PASS21_CS_STORE_IMM) ||
+          nv_pass22_nir_kind_needs_global_store(NV_PASS21_CS_EXIT_ONLY))
+         return -772;
+
+      kn162 = nv_pass22_nir_depth_kind_ladder_fill(kinds162, 8);
+      if (kn162 != 5u)
+         return -773;
+      if (kinds162[0] != NV_PASS21_CS_EXIT_ONLY ||
+          kinds162[4] != NV_PASS21_CS_S2R_STORE_IMM_BAR)
+         return -774;
+
+      lr = nv_pass22_nir_depth_ladder_build_all(&obj162, 0x220000ull, 0x810000ull,
+                                                0x320000ull, 0x300000ull);
+      if (lr != 0)
+         return -775;
+
+      /* rebuild default depth + launch via pass22 emit */
+      memset(&obj162, 0, sizeof(obj162));
+      obj162.shader_kind = NV_PASS22_NIR_DEFAULT_KIND;
+      obj162.program_gpu_addr = 0x220000ull;
+      obj162.qmd_gpu_addr = 0x810000ull;
+      obj162.qmd_sema_gpu = 0x320000ull;
+      obj162.store_gpu_addr = 0x300000ull;
+      obj162.imm_value = 0x62u;
+      if (nv_pass22_compute_object_build(&obj162) != 0)
+         return -780;
+      if (!(obj162.sph.sph[0] & (1u << 11)))
+         return -781; /* global store for default s2r+store kind */
+      memset(cb162, 0, sizeof(cb162));
+      nv_push_init(&cp162, cb162, (uint32_t)(sizeof(cb162) / 4));
+      if (nv_pass22_compute_object_emit_launch(
+             &cp162, 0xc5c0u, &obj162, 0, true, 0x620000ull, 0x77u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -782;
+      if (nv_push_dw_count(&cp162) < nv_pass20_inline_qmd_launch_min_methods(true))
+         return -783;
+      if (!nv_pass22_inline_pcas_span_ok(nv_push_dw_count(&cp162)))
+         return -784;
+
+      /* each ladder kind builds individually */
+      for (ki162 = 0; ki162 < kn162; ki162++) {
+         memset(&obj162, 0, sizeof(obj162));
+         obj162.shader_kind = kinds162[ki162];
+         obj162.program_gpu_addr = 0x220000ull;
+         obj162.qmd_gpu_addr = 0x810000ull;
+         obj162.qmd_sema_gpu = 0x320000ull;
+         obj162.store_gpu_addr = 0x300000ull;
+         if (nv_pass22_compute_object_build(&obj162) != 0)
+            return -785 - (int)ki162;
+      }
+
+      /* reject unbuilt object through pass22 launch */
+      memset(&obj162, 0, sizeof(obj162));
+      obj162.program_gpu_addr = 0x220000ull;
+      obj162.qmd_gpu_addr = 0x810000ull;
+      if (nv_pass22_compute_object_emit_launch(
+             &cp162, 0xc5c0u, &obj162, 0, false, 0, 0,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != -4)
+         return -790;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
