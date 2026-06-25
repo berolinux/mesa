@@ -371,6 +371,14 @@ struct nv_nvdec_frame_setup {
    uint32_t mb_height;
    uint32_t bit_depth_luma_minus8;
    uint32_t bit_depth_chroma_minus8;
+   /* tick101: H.264/HEVC DPB reference surfaces (GPU addrs >>8 in pic_setup) */
+   uint32_t num_refl0;
+   uint32_t num_refl1;
+   uint8_t  refl0_idx[NV_H264_PS_MAX_DPB_SLOTS];
+   uint8_t  refl1_idx[NV_H264_PS_MAX_DPB_SLOTS];
+   uint64_t dpb_luma_gpu_addr[NV_H264_PS_MAX_DPB_SLOTS];
+   uint64_t dpb_chroma_gpu_addr[NV_H264_PS_MAX_DPB_SLOTS];
+   uint32_t dpb_slot_count;      /* active DPB entries (0 = none) */
 };
 
 /*
@@ -397,11 +405,17 @@ struct nv_nvdec_frame_setup {
 #define NV_H264_PS_CURR_PIC_IDX          6
 #define NV_H264_PS_FIELD_ORDER_CNT_0     7
 #define NV_H264_PS_FIELD_ORDER_CNT_1     8
+/* tick101: DPB / ref frame indices (up to 16 slots; proprietary layout subset) */
+#define NV_H264_PS_REFL0_BASE            9   /* dwords 9..24 = L0 indices */
+#define NV_H264_PS_REFL1_BASE            25  /* dwords 25..40 = L1 indices */
+#define NV_H264_PS_DPB_LUMA_BASE         48  /* dwords 48..63 = DPB luma offs>>8 */
+#define NV_H264_PS_DPB_CHROMA_BASE       64  /* dwords 64..79 = DPB chroma offs>>8 */
 #define NV_H264_PS_OUTPUT_LUMA_OFF       16  /* >>8 offset words in some gens */
 #define NV_H264_PS_OUTPUT_CHROMA_OFF     17
 #define NV_H264_PS_HISTOGRAM_OFF         18
 #define NV_H264_PS_COLOC_OFF             19
 #define NV_H264_PS_BITSTREAM_LEN         20
+#define NV_H264_PS_MAX_DPB_SLOTS         16
 
 /* HEVC pic_setup */
 #define NV_HEVC_PS_PIC_WH                0   /* (height<<16)|width in pixels or CTBs */
@@ -490,6 +504,10 @@ nv_nvdec_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
          pic_dwords[NV_H264_PS_CURR_PIC_IDX] = fs->picture_index;
       if (pic_dwords_cap > NV_H264_PS_BITSTREAM_LEN)
          pic_dwords[NV_H264_PS_BITSTREAM_LEN] = fs->bitstream_size;
+      if (pic_dwords_cap > NV_H264_PS_NUM_REFL0)
+         pic_dwords[NV_H264_PS_NUM_REFL0] = fs->num_refl0;
+      if (pic_dwords_cap > NV_H264_PS_NUM_REFL1)
+         pic_dwords[NV_H264_PS_NUM_REFL1] = fs->num_refl1;
       if (fs->output_luma_gpu_addr && pic_dwords_cap > NV_H264_PS_OUTPUT_LUMA_OFF)
          pic_dwords[NV_H264_PS_OUTPUT_LUMA_OFF] =
             (uint32_t)(fs->output_luma_gpu_addr >> 8);
@@ -499,6 +517,37 @@ nv_nvdec_pic_setup_init_minimal(uint32_t *pic_dwords, uint32_t pic_dwords_cap,
       if (fs->coloc_gpu_addr && pic_dwords_cap > NV_H264_PS_COLOC_OFF)
          pic_dwords[NV_H264_PS_COLOC_OFF] =
             (uint32_t)(fs->coloc_gpu_addr >> 8);
+      /* tick101: pack L0/L1 ref indices and DPB plane offsets when provided */
+      {
+         uint32_t si, n;
+         n = fs->num_refl0;
+         if (n > NV_H264_PS_MAX_DPB_SLOTS)
+            n = NV_H264_PS_MAX_DPB_SLOTS;
+         for (si = 0; si < n; si++) {
+            uint32_t di = NV_H264_PS_REFL0_BASE + si;
+            if (di < pic_dwords_cap)
+               pic_dwords[di] = fs->refl0_idx[si];
+         }
+         n = fs->num_refl1;
+         if (n > NV_H264_PS_MAX_DPB_SLOTS)
+            n = NV_H264_PS_MAX_DPB_SLOTS;
+         for (si = 0; si < n; si++) {
+            uint32_t di = NV_H264_PS_REFL1_BASE + si;
+            if (di < pic_dwords_cap)
+               pic_dwords[di] = fs->refl1_idx[si];
+         }
+         n = fs->dpb_slot_count;
+         if (n > NV_H264_PS_MAX_DPB_SLOTS)
+            n = NV_H264_PS_MAX_DPB_SLOTS;
+         for (si = 0; si < n; si++) {
+            uint32_t dl = NV_H264_PS_DPB_LUMA_BASE + si;
+            uint32_t dc = NV_H264_PS_DPB_CHROMA_BASE + si;
+            if (dl < pic_dwords_cap && fs->dpb_luma_gpu_addr[si])
+               pic_dwords[dl] = (uint32_t)(fs->dpb_luma_gpu_addr[si] >> 8);
+            if (dc < pic_dwords_cap && fs->dpb_chroma_gpu_addr[si])
+               pic_dwords[dc] = (uint32_t)(fs->dpb_chroma_gpu_addr[si] >> 8);
+         }
+      }
       break;
    }
 }

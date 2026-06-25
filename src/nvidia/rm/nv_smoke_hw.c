@@ -315,7 +315,11 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       goto fail;
    memset(sc.qmd_cpu, 0, 256);
 
+   /* tick101: G3 colour target as 2D pitch surface when possible */
    memset(&req, 0, sizeof(req));
+   req.width = 64;
+   req.height = 64;
+   req.pitch = 64 * 4;
    req.size = 64 * 64 * 4; /* 64x64 A8B8G8R8 pitch */
    req.alignment = 256;
    req.vram = false;

@@ -57,6 +57,12 @@ struct nv_rm_bo {
    void *cpu_ptr;
    bool mapped;
    bool gpu_va_mapped;
+   /* tick101: 2D surface metadata when allocated via memory_alloc_ex */
+   uint32_t width;
+   uint32_t height;
+   int32_t pitch;
+   bool surface_2d;
+   bool direct_rm_alloc;     /* true if rm_handle from memory_alloc_ex (no nvbo) */
 };
 
 bool
@@ -144,6 +150,15 @@ nv_rm_device_open(int drm_fd, int gpu_index)
       dev->info.tpc_count = gi.tpc_count;
       dev->info.vram_size_bytes = gi.fb_size;
       dev->info.vram_usable_bytes = gi.fb_usable ? gi.fb_usable : gi.fb_size;
+      /* tick101: BAR1/heap/ECC for mapping policy */
+      dev->info.fb_heap_size = gi.fb_heap_size;
+      dev->info.fb_heap_start = gi.fb_heap_start;
+      dev->info.bar1_size = gi.bar1_size;
+      dev->info.bar1_avail_size = gi.bar1_avail_size;
+      dev->info.fbpa_ecc_enabled = gi.fbpa_ecc_enabled;
+      if (!dev->info.sysmem_visible_bytes && gi.bar1_size)
+         dev->info.sysmem_visible_bytes = gi.bar1_avail_size ?
+            gi.bar1_avail_size : gi.bar1_size;
       /* tick96: refined FB/PCI/page-size probe from libdrm refresh */
       dev->info.fb_region_count = gi.fb_region_count;
       dev->info.fb_region0_base = gi.fb_region0_base;
@@ -762,6 +777,107 @@ nv_rm_probe_aux_paths(struct nv_rm_device *dev,
 #endif
 }
 
+#if defined(HAVE_LIBDRM_NVIDIA)
+static struct nv_rm_bo *
+nv_rm_bo_alloc_via_memory_ex(struct nv_rm_device *dev,
+                             const struct nv_rm_bo_req *req)
+{
+   struct nv_rm_bo *bo;
+   uint32_t h_mem = 0;
+   uint32_t h_class;
+   uint32_t type;
+   uint32_t flags;
+   uint32_t attr, attr2;
+   uint32_t h_vas = 0;
+   uint64_t size, align, off = 0, lim = 0;
+   int32_t pitch_in, pitch_out = 0;
+   int ret;
+
+   if (!dev || !dev->nvdev || !req)
+      return NULL;
+
+   size = req->size;
+   if (req->width && req->height) {
+      int32_t p = req->pitch;
+      if (p <= 0)
+         p = (int32_t)((req->width * 4u + 255u) & ~255u); /* A8R8G8B8 default pitch */
+      if (size < (uint64_t)p * (uint64_t)req->height)
+         size = (uint64_t)p * (uint64_t)req->height;
+      pitch_in = req->pitch; /* 0 lets RM refine */
+   } else {
+      pitch_in = 0;
+   }
+   if (size == 0)
+      return NULL;
+
+   align = req->alignment ? req->alignment : 256;
+   type = req->rm_type;
+   if (!type)
+      type = (req->width && req->height) ? NVOS32_TYPE_IMAGE : NVOS32_TYPE_DMA;
+
+   flags = NVOS32_ALLOC_FLAGS_ALIGNMENT_FORCE |
+           NVOS32_ALLOC_FLAGS_MAP_NOT_REQUIRED;
+   if (req->vram)
+      flags |= NVOS32_ALLOC_FLAGS_PERSISTENT_VIDMEM;
+   if (req->no_scanout)
+      flags |= NVOS32_ALLOC_FLAGS_NO_SCANOUT;
+
+   if (req->vram) {
+      h_class = NV01_MEMORY_LOCAL_USER;
+      attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED_NONCONTIG;
+      attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_NO_VAL;
+   } else {
+      h_class = NV01_MEMORY_SYSTEM;
+      attr = req->cpu_access ? NV_OS32_ATTR_PCI_4K_WRITECOMBINE
+                             : NV_OS32_ATTR_PCI_4K_UNCACHED;
+      attr2 = NV_OS32_ATTR2_GPU_CACHEABLE_DEFAULT_VAL;
+   }
+
+   if (req->map_gpu_va || dev->vas_ready) {
+      (void)nv_rm_device_ensure_vaspace(dev);
+      h_vas = dev->h_vaspace;
+   }
+
+   bo = calloc(1, sizeof(*bo));
+   if (!bo)
+      return NULL;
+   bo->dev = dev;
+   bo->direct_rm_alloc = true;
+
+   ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type, flags,
+                                   attr, attr2, req->format,
+                                   req->width, req->height, pitch_in,
+                                   size, align, h_vas, &off, &lim, &pitch_out);
+   if (ret != 0 && req->vram) {
+      /* retry strict contig / default cache */
+      attr = NV_OS32_ATTR_VIDMEM_4K_UNCACHED;
+      ret = nvidia_rm_memory_alloc_ex(dev->nvdev, 0, &h_mem, h_class, type,
+                                      flags, attr, attr2, req->format,
+                                      req->width, req->height, pitch_in,
+                                      size, align, h_vas, &off, &lim,
+                                      &pitch_out);
+   }
+   if (ret != 0) {
+      free(bo);
+      return NULL;
+   }
+
+   bo->rm_handle = h_mem;
+   bo->size = lim ? (lim + 1) : size;
+   if (lim && lim + 1 > size)
+      bo->size = lim + 1;
+   bo->gpu_offset = off;
+   bo->width = req->width;
+   bo->height = req->height;
+   bo->pitch = pitch_out ? pitch_out : pitch_in;
+   bo->surface_2d = (req->width && req->height);
+
+   if (req->map_gpu_va || dev->vas_ready)
+      (void)nv_rm_bo_map_gpu_va(bo);
+   return bo;
+}
+#endif
+
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
 {
@@ -771,8 +887,16 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
    struct nvidia_bo_metadata meta;
    int ret;
 
-   if (!dev || !dev->nvdev || !req || req->size == 0)
+   if (!dev || !dev->nvdev || !req || (req->size == 0 && !(req->width && req->height)))
       return NULL;
+
+   /* tick101: 2D/surface path prefers memory_alloc_ex (correct ATTR + pitch) */
+   if (req->width && req->height) {
+      bo = nv_rm_bo_alloc_via_memory_ex(dev, req);
+      if (bo)
+         return bo;
+      /* fall through to linear size estimate */
+   }
 
    bo = calloc(1, sizeof(*bo));
    if (!bo)
@@ -781,6 +905,11 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
 
    memset(&areq, 0, sizeof(areq));
    areq.size = req->size;
+   if (!areq.size && req->width && req->height) {
+      int32_t p = req->pitch > 0 ? req->pitch
+                                 : (int32_t)((req->width * 4u + 255u) & ~255u);
+      areq.size = (uint64_t)p * (uint64_t)req->height;
+   }
    areq.alignment = req->alignment;
    areq.domain = req->vram ? NVIDIA_BO_DOMAIN_VRAM : NVIDIA_BO_DOMAIN_GART;
    areq.flags = 0;
@@ -788,6 +917,8 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
       areq.flags |= NVIDIA_BO_FLAGS_CPU_ACCESS;
    if (req->no_scanout)
       areq.flags |= NVIDIA_BO_FLAGS_NO_SCANOUT;
+   if (req->rm_type)
+      areq.rm_type = req->rm_type;
 
    ret = nvidia_bo_alloc(dev->nvdev, &areq, &bo->nvbo);
    if (ret != 0) {
@@ -797,9 +928,13 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
 
    memset(&meta, 0, sizeof(meta));
    nvidia_bo_query_metadata(bo->nvbo, &meta);
-   bo->size = meta.aligned_size ? meta.aligned_size : req->size;
+   bo->size = meta.aligned_size ? meta.aligned_size : areq.size;
    bo->gpu_offset = meta.gpu_offset;
    bo->rm_handle = meta.rm_handle;
+   bo->width = req->width;
+   bo->height = req->height;
+   bo->pitch = req->pitch;
+   bo->surface_2d = (req->width && req->height);
 
    /* Map into device VASpace when requested or when VAS is ready (default path
     * for channel push/GPFIFO memory needs real GPU VAs). */
@@ -813,6 +948,57 @@ nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req)
    (void)dev; (void)req;
    return NULL;
 #endif
+}
+
+struct nv_rm_bo *
+nv_rm_bo_alloc_2d(struct nv_rm_device *dev, uint32_t width, uint32_t height,
+                  int32_t *pitch_inout, bool vram, bool cpu_access,
+                  bool map_gpu_va, uint32_t rm_type, uint32_t format)
+{
+   struct nv_rm_bo_req req;
+   struct nv_rm_bo *bo;
+   int32_t pitch;
+
+   if (!dev || !width || !height)
+      return NULL;
+   pitch = pitch_inout ? *pitch_inout : 0;
+   memset(&req, 0, sizeof(req));
+   req.width = width;
+   req.height = height;
+   req.pitch = pitch;
+   req.vram = vram;
+   req.cpu_access = cpu_access;
+   req.map_gpu_va = map_gpu_va;
+   req.no_scanout = true;
+   req.rm_type = rm_type;
+   req.format = format;
+   if (pitch > 0)
+      req.size = (uint64_t)pitch * (uint64_t)height;
+   else
+      req.size = (uint64_t)((width * 4u + 255u) & ~255u) * (uint64_t)height;
+   req.alignment = 256;
+   bo = nv_rm_bo_alloc(dev, &req);
+   if (bo && pitch_inout)
+      *pitch_inout = bo->pitch;
+   return bo;
+}
+
+int32_t
+nv_rm_bo_pitch(const struct nv_rm_bo *bo)
+{
+   return bo ? bo->pitch : 0;
+}
+
+uint32_t
+nv_rm_bo_width(const struct nv_rm_bo *bo)
+{
+   return bo ? bo->width : 0;
+}
+
+uint32_t
+nv_rm_bo_height(const struct nv_rm_bo *bo)
+{
+   return bo ? bo->height : 0;
 }
 
 void
@@ -831,10 +1017,16 @@ nv_rm_bo_free(struct nv_rm_bo *bo)
                                  0);
       bo->gpu_va_mapped = false;
    }
-   if (bo->mapped)
+   if (bo->mapped && bo->nvbo)
       nvidia_bo_cpu_unmap(bo->nvbo);
    if (bo->nvbo)
       nvidia_bo_free(bo->nvbo);
+   else if (bo->direct_rm_alloc && bo->dev && bo->dev->nvdev && bo->rm_handle) {
+      /* Direct RmAlloc path: free RM object under device */
+      uint32_t h_dev = nvidia_device_get_device_handle(bo->dev->nvdev);
+      if (h_dev)
+         (void)nvidia_rm_free(bo->dev->nvdev, h_dev, bo->rm_handle);
+   }
 #endif
    free(bo);
 }

@@ -62,6 +62,12 @@ struct nv_device_info {
    uint64_t vram_size_bytes;
    uint64_t vram_usable_bytes;
    uint64_t sysmem_visible_bytes;
+   /* tick101: FB_GET_INFO_V2 BAR1/heap/ECC (from libdrm nvidia_gpu_info) */
+   uint64_t fb_heap_size;
+   uint64_t fb_heap_start;
+   uint64_t bar1_size;
+   uint64_t bar1_avail_size;
+   uint32_t fbpa_ecc_enabled;
 
    /* tick96: from nvidia_gpu_info refined probe */
    uint32_t fb_region_count;

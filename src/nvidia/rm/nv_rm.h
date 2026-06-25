@@ -29,6 +29,17 @@ struct nv_rm_bo_req {
    bool no_scanout;
    /** If true, map BO into device VASpace via NVOS46 after alloc (needs VAS). */
    bool map_gpu_va;
+   /**
+    * tick101: optional 2D/surface alloc via NV_MEMORY_ALLOCATION_PARAMS
+    * (nvidia_rm_memory_alloc_ex).  When width & height are non-zero, mesa
+    * allocates as pitch surface (IMAGE/DEPTH/VIDEO type); size is still
+    * used as minimum byte size (max(size, pitch*height) if pitch set).
+    */
+   uint32_t width;
+   uint32_t height;
+   int32_t pitch;       /* 0 = RM computes; returned via nv_rm_bo_pitch() */
+   uint32_t rm_type;    /* NVOS32_TYPE_*; 0 = DMA or IMAGE when 2D */
+   uint32_t format;     /* surface format dword when applicable */
 };
 
 struct nv_rm_device *
@@ -164,8 +175,23 @@ int nv_rm_probe_aux_paths(struct nv_rm_device *dev,
 struct nv_rm_bo *
 nv_rm_bo_alloc(struct nv_rm_device *dev, const struct nv_rm_bo_req *req);
 
+/**
+ * tick101: allocate a 2D pitch surface (color/depth/video) via memory_alloc_ex
+ * when libdrm supports it; falls back to linear nv_rm_bo_alloc(size=pitch*h).
+ * pitch_inout: in 0 = RM/default; out = allocated pitch on success.
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_2d(struct nv_rm_device *dev, uint32_t width, uint32_t height,
+                  int32_t *pitch_inout, bool vram, bool cpu_access,
+                  bool map_gpu_va, uint32_t rm_type, uint32_t format);
+
 void
 nv_rm_bo_free(struct nv_rm_bo *bo);
+
+/** Allocated pitch for 2D surfaces (0 if linear/unknown). */
+int32_t nv_rm_bo_pitch(const struct nv_rm_bo *bo);
+uint32_t nv_rm_bo_width(const struct nv_rm_bo *bo);
+uint32_t nv_rm_bo_height(const struct nv_rm_bo *bo);
 
 void *
 nv_rm_bo_map(struct nv_rm_bo *bo);
