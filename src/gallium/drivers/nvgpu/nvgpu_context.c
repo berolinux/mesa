@@ -686,6 +686,17 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
       smooth = !rs->flatshade;
    }
 
+   /* tick130: viewport/scissor/clip from current FB size (pass10/tick128 methods) */
+   {
+      uint32_t fw = 1, fh = 1;
+      if (ctx->fb.width)
+         fw = ctx->fb.width;
+      if (ctx->fb.height)
+         fh = ctx->fb.height;
+      nv_3d_emit_g3_viewport_scissor_full(push, fw, fh, true);
+      nv_3d_emit_viewport_z_clip_range(push, true /* zero_to_one */);
+   }
+
    nv_3d_emit_blend_zsa_raster(push, blend_en, rgb_func, rgb_src, rgb_dst,
                                a_func, a_src, a_dst, cm,
                                depth_en, depth_wr, depth_fn, stencil_en,

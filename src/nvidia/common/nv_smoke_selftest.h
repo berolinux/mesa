@@ -1469,6 +1469,14 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       if (!nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB_ALIGN4) ||
           nv_host_sema_mode_name(NV_HOST_SEMA_MODE_BLOB_ALIGN4)[0] == '\0')
          return -423;
+      /* tick130: no duplicates in ladder */
+      for (il = 0; il < nl; il++) {
+         unsigned jl;
+         for (jl = il + 1; jl < nl; jl++) {
+            if (ladder[il] == ladder[jl])
+               return -424;
+         }
+      }
    }
 
    if (trace_push && trace_dwords) {

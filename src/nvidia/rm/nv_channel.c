@@ -2552,33 +2552,9 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
       prefer = nv_channel_resolve_class_copy(ch, 0);
    nv_device_info_fill_class_ladder(2, prefer, classes, &n);
 
-   /* Build sema mode order (sticky pref first, then pass8 ladder) */
-   if (ch->host_sema_mode_pref >= 0 &&
-       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
-      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
-   {
-      static const enum nv_host_sema_mode def_order[] = {
-         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
-         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
-         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
-         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
-         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
-         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
-      };
-      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
-         enum nv_host_sema_mode m = def_order[mi];
-         unsigned j;
-         bool dup = false;
-         for (j = 0; j < n_sm; j++) {
-            if (sema_modes_try[j] == m) {
-               dup = true;
-               break;
-            }
-         }
-         if (!dup)
-            sema_modes_try[n_sm++] = m;
-      }
-   }
+   /* tick130: sema mode order via nv_host_sema_ladder_fill (sticky pref first) */
+   n_sm = nv_host_sema_ladder_fill(sema_modes_try, ch->host_sema_mode_pref);
+   (void)mi;
 
    for (i = 0; i < n; i++) {
       uint32_t cl = classes[i];
@@ -2815,23 +2791,8 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
    if (pre)
       return pre;
 
-   /* Prefer mode that already worked on this channel (tick80 sticky). */
-   if (ch->host_sema_mode_pref >= 0 &&
-       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
-      order[n_order++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
-   for (i = 0; i < NV_HOST_SEMA_MODE_COUNT; i++) {
-      enum nv_host_sema_mode m = nv_host_sema_try_order[i];
-      unsigned j;
-      bool dup = false;
-      for (j = 0; j < n_order; j++) {
-         if (order[j] == m) {
-            dup = true;
-            break;
-         }
-      }
-      if (!dup)
-         order[n_order++] = m;
-   }
+   /* tick130: unified sema ladder (tick129 helper; sticky pref first) */
+   n_order = nv_host_sema_ladder_fill(order, ch->host_sema_mode_pref);
 
    for (i = 0; i < n_order; i++) {
       enum nv_host_sema_mode mode = order[i];
@@ -3158,32 +3119,9 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
    classes[n++] = 0x0000c5c0u;
    classes[n++] = 0x0000c3c0u;
 
-   if (ch->host_sema_mode_pref >= 0 &&
-       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
-      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
-   {
-      static const enum nv_host_sema_mode def_order[] = {
-         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
-         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
-         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
-         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
-         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
-         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
-      };
-      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
-         enum nv_host_sema_mode m = def_order[mi];
-         unsigned j;
-         bool dup = false;
-         for (j = 0; j < n_sm; j++) {
-            if (sema_modes_try[j] == m) {
-               dup = true;
-               break;
-            }
-         }
-         if (!dup)
-            sema_modes_try[n_sm++] = m;
-      }
-   }
+   /* tick130: sema mode order via nv_host_sema_ladder_fill */
+   n_sm = nv_host_sema_ladder_fill(sema_modes_try, ch->host_sema_mode_pref);
+   (void)mi;
 
    /* tick108: host-sema G2 — smoke_device for GR/LMEM; completion via host sema */
    if (ch && ch->info) {
@@ -3989,32 +3927,9 @@ nv_channel_g3_clear_then_host_sema_submit(struct nv_channel *ch,
    else
       memset(c, 0, sizeof(c));
 
-   if (ch->host_sema_mode_pref >= 0 &&
-       ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
-      sema_modes_try[n_sm++] = (enum nv_host_sema_mode)ch->host_sema_mode_pref;
-   {
-      static const enum nv_host_sema_mode def_order[] = {
-         NV_HOST_SEMA_MODE_BLOB_SHIFT2,
-         NV_HOST_SEMA_MODE_BLOB_ALIGN4,
-         NV_HOST_SEMA_MODE_VDPAU_SHIFT2,
-         NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
-         NV_HOST_SEMA_MODE_OPEN_SHIFT2,
-         NV_HOST_SEMA_MODE_OPEN_ALIGN4,
-      };
-      for (mi = 0; mi < NV_HOST_SEMA_MODE_COUNT; mi++) {
-         enum nv_host_sema_mode m = def_order[mi];
-         unsigned j;
-         bool dup = false;
-         for (j = 0; j < n_sm; j++) {
-            if (sema_modes_try[j] == m) {
-               dup = true;
-               break;
-            }
-         }
-         if (!dup)
-            sema_modes_try[n_sm++] = m;
-      }
-   }
+   /* tick130: sema mode order via nv_host_sema_ladder_fill */
+   n_sm = nv_host_sema_ladder_fill(sema_modes_try, ch->host_sema_mode_pref);
+   (void)mi;
 
    for (i = 0; i < n; i++) {
       uint32_t c3 = classes[i];
