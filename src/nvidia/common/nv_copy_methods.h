@@ -157,12 +157,28 @@ nv_copy_launch_dma_with_sema_one_word(uint32_t launch_dma)
           NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
 }
 
+/** OR sema four-word release (16-byte report; pass8 CE alternate). */
+static inline uint32_t
+nv_copy_launch_dma_with_sema_four_word(uint32_t launch_dma)
+{
+   return (launch_dma & ~(0x3u << 3)) |
+          NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_FOUR_WORD;
+}
+
 /** True if LAUNCH_DMA dword requests one-word sema release (G1 bring-up check). */
 static inline bool
 nv_copy_launch_dma_has_sema_one_word(uint32_t launch_dma)
 {
    return (launch_dma & (0x3u << 3)) ==
           NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+}
+
+/** True if LAUNCH_DMA dword requests four-word sema release. */
+static inline bool
+nv_copy_launch_dma_has_sema_four_word(uint32_t launch_dma)
+{
+   return (launch_dma & (0x3u << 3)) ==
+          NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_FOUR_WORD;
 }
 
 /**
@@ -183,6 +199,121 @@ nv_copy_emit_semaphore_release(struct nv_push *p, uint64_t sema_gpu_addr,
             NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
             NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
    nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * tick127: CE sema-only with four-word report (16B at sema_gpu_addr).
+ * Some CE class/silicon combos prefer four-word over one-word; try after
+ * one-word fails on HW. sema BO must be at least 16 bytes.
+ */
+static inline void
+nv_copy_emit_semaphore_release_four_word(struct nv_push *p,
+                                         uint64_t sema_gpu_addr,
+                                         uint32_t payload)
+{
+   uint32_t launch;
+
+   if (!p || !sema_gpu_addr)
+      return;
+   nv_copy_set_semaphore(p, sema_gpu_addr, payload);
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_FOUR_WORD;
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * tick127: pitch buffer copy with four-word sema on same LAUNCH_DMA.
+ */
+static inline void
+nv_copy_emit_buffer_copy_with_sema_four_word(struct nv_push *p,
+                                             uint64_t src_gpu_addr,
+                                             uint64_t dst_gpu_addr,
+                                             uint32_t size_bytes,
+                                             uint64_t sema_gpu_addr,
+                                             uint32_t sema_payload)
+{
+   uint32_t launch;
+
+   if (!p || !size_bytes)
+      return;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_four_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+}
+
+/**
+ * tick127: try one-word sema copy first, emit four-word variant into same
+ * push as alternate tail (HW smoke can choose via separate submit).
+ * Returns launch_dma dword of primary (one-word) path for selftest.
+ */
+static inline uint32_t
+nv_copy_emit_buffer_copy_with_sema_ladder(struct nv_push *p,
+                                          uint64_t src_gpu_addr,
+                                          uint64_t dst_gpu_addr,
+                                          uint32_t size_bytes,
+                                          uint64_t sema_gpu_addr,
+                                          uint32_t sema_payload,
+                                          bool emit_four_word_alt)
+{
+   uint32_t launch = 0;
+
+   if (!p || !size_bytes)
+      return 0;
+
+   if (sema_gpu_addr)
+      nv_copy_set_semaphore(p, sema_gpu_addr, sema_payload);
+
+   nv_push_method(p, NVC6B5_OFFSET_IN_UPPER,
+                  (uint32_t)(src_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_IN_LOWER,
+                  (uint32_t)(src_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_OFFSET_OUT_UPPER,
+                  (uint32_t)(dst_gpu_addr >> 32) & 0x1ffff);
+   nv_push_method(p, NVC6B5_OFFSET_OUT_LOWER,
+                  (uint32_t)(dst_gpu_addr & 0xffffffffu));
+   nv_push_method(p, NVC6B5_PITCH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_PITCH_OUT, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_LENGTH_IN, size_bytes);
+   nv_push_method(p, NVC6B5_LINE_COUNT, 1);
+
+   launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+            NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+            NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+            NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH;
+   if (sema_gpu_addr)
+      launch = nv_copy_launch_dma_with_sema_one_word(launch);
+   nv_push_method(p, NVC6B5_LAUNCH_DMA, launch);
+
+   if (emit_four_word_alt && sema_gpu_addr) {
+      uint32_t l4 = (launch & ~(0x3u << 3)) |
+                    NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_FOUR_WORD;
+      /* Re-issue sema + four-word no-transfer as optional completion path */
+      nv_copy_emit_semaphore_release_four_word(p, sema_gpu_addr, sema_payload);
+      (void)l4;
+   }
+   return launch;
 }
 
 /**

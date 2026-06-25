@@ -1289,6 +1289,73 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -398;
    }
 
+   /* tick127: CE four-word sema + sema ladder emit shape */
+   {
+      uint32_t buf_ce[96];
+      uint32_t nce, ice, launch_dw = 0;
+      bool saw_sema_ab = false, saw_launch4 = false;
+
+      memset(buf_ce, 0, sizeof(buf_ce));
+      nv_push_init(&p, buf_ce, (uint32_t)(sizeof(buf_ce) / 4));
+      nv_copy_emit_semaphore_release_four_word(&p, 0x500000ull, 0x42u);
+      nce = nv_push_dw_count(&p);
+      if (nce < 6)
+         return -399;
+      for (ice = 0; ice + 1 < nce; ice++) {
+         uint32_t hdr = buf_ce[ice];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC6B5_SET_SEMAPHORE_A || method == NVC6B5_SET_SEMAPHORE_B)
+            saw_sema_ab = true;
+         if (method == NVC6B5_LAUNCH_DMA) {
+            launch_dw = buf_ce[ice + 1];
+            if (nv_copy_launch_dma_has_sema_four_word(launch_dw))
+               saw_launch4 = true;
+         }
+      }
+      if (!saw_sema_ab || !saw_launch4)
+         return -400;
+
+      memset(buf_ce, 0, sizeof(buf_ce));
+      nv_push_init(&p, buf_ce, (uint32_t)(sizeof(buf_ce) / 4));
+      launch_dw = nv_copy_emit_buffer_copy_with_sema_ladder(
+         &p, 0x1000ull, 0x2000ull, 64u, 0x500000ull, 0x7u, true);
+      if (!nv_copy_launch_dma_has_sema_one_word(launch_dw))
+         return -401;
+      nce = nv_push_dw_count(&p);
+      if (nce < 12)
+         return -402; /* copy launch + four-word sema-only tail */
+   }
+
+   /* tick127: QMD multi-CTA smoke encode */
+   {
+      uint32_t qg[NV_QMD_DWORDS];
+      struct nv_qmd_desc dg;
+      if (nv_qmd_build_compute_smoke_grid(qg, 0x100000ull, 16, 0x86,
+                                          8 /* grid_x */, 32 /* cta_x */,
+                                          0x400000ull, 0x99u) != 0)
+         return -403;
+      nv_qmd_desc_init_smoke_grid(&dg, 0x100000ull, 16, 0x86, 8, 1, 1, 32, 1, 1,
+                                  0x400000ull, 0x99u);
+      if (dg.grid_x != 8 || dg.cta_x != 32)
+         return -404;
+      if (!nv_qmd_verify_sema_release0(qg, 0x400000ull, 0x99u))
+         return -405;
+   }
+
+   /* tick127: host sema execute values (pass8/9/10 modes) */
+   {
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB_ALIGN4) != 0x1001u)
+         return -406;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_VDPAU_ALIGN4) != 0x2u)
+         return -407;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_BLOB_SHIFT2) != 0x1001u)
+         return -408;
+      if (nv_host_sema_execute(NV_HOST_SEMA_MODE_VDPAU_SHIFT2) != 0x2u)
+         return -409;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

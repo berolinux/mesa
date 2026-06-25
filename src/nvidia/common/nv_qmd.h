@@ -1069,6 +1069,53 @@ nv_qmd_desc_init_smoke(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
       nv_qmd_desc_set_sema_release0(d, sema_gpu_addr, sema_payload);
 }
 
+/**
+ * tick127: multi-CTA smoke QMD (grid/cta non-1) for G2 ladder stress.
+ * sema_payload 0 skips sema release0 (caller may add later).
+ */
+static inline void
+nv_qmd_desc_init_smoke_grid(struct nv_qmd_desc *d, uint64_t program_gpu_addr,
+                            uint32_t register_count, uint8_t sass_version,
+                            uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
+                            uint32_t cta_x, uint32_t cta_y, uint32_t cta_z,
+                            uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_qmd_desc_init_smoke(d, program_gpu_addr, register_count, sass_version,
+                          sema_gpu_addr, sema_payload);
+   if (!d)
+      return;
+   d->grid_x = grid_x ? grid_x : 1;
+   d->grid_y = grid_y ? grid_y : 1;
+   d->grid_z = grid_z ? grid_z : 1;
+   d->cta_x = cta_x ? cta_x : 1;
+   d->cta_y = cta_y ? cta_y : 1;
+   d->cta_z = cta_z ? cta_z : 1;
+   if (d->cta_x > 1024)
+      d->cta_x = 1024;
+   if (d->cta_y > 1024)
+      d->cta_y = 1024;
+   if (d->cta_z > 64)
+      d->cta_z = 64;
+}
+
+/** Encode smoke QMD with optional non-1x1x1 grid; returns 0 on success. */
+static inline int
+nv_qmd_build_compute_smoke_grid(uint32_t qmd_out[NV_QMD_DWORDS],
+                                uint64_t program_gpu_addr,
+                                uint32_t register_count, uint8_t sass_version,
+                                uint32_t grid_x, uint32_t cta_x,
+                                uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   struct nv_qmd_desc d;
+   if (!qmd_out)
+      return -1;
+   nv_qmd_desc_init_smoke_grid(&d, program_gpu_addr, register_count,
+                               sass_version, grid_x, 1, 1, cta_x, 1, 1,
+                               sema_gpu_addr, sema_payload);
+   nv_qmd_encode_full(&d, qmd_out);
+   return 0;
+}
+
 /** tick102: smoke QMD + apply GR limits from nv_device_info probe fields */
 static inline void
 nv_qmd_desc_init_smoke_gr(struct nv_qmd_desc *d, uint64_t program_gpu_addr,

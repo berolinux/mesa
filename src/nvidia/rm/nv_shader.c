@@ -389,10 +389,15 @@ nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count)
 
    nv_shader_fill_stage_defaults(sh);
 
+   /*
+    * tick127: prefer MOV-imm+EXIT smoke (tick125/pass10 SPH builders) over
+    * EXIT-only so bind/trace has a non-trivial SASS stream.  Still not real
+    * attribute/RT I/O; fixed-func remains the preferred G3 bring-up path.
+    */
    switch (sh->kind) {
    case NV_SHADER_KIND_FRAGMENT:
       sph_type = NV_SPH_TYPE_PIXEL;
-      nv_sph_build_pixel_exit_only(&blob, (uint16_t)regs);
+      nv_sph_build_pixel_mov_imm_exit(&blob, 0xffffffffu, (uint16_t)regs);
       break;
    case NV_SHADER_KIND_GEOMETRY:
       sph_type = NV_SPH_TYPE_GEOMETRY;
@@ -410,7 +415,7 @@ nv_shader_upload_graphics_smoke(struct nv_shader *sh, uint32_t register_count)
    default:
       sph_type = NV_SPH_TYPE_VERTEX;
       sh->kind = NV_SHADER_KIND_VERTEX;
-      nv_sph_build_vertex_exit_only(&blob, (uint16_t)regs);
+      nv_sph_build_vertex_smoke_default(&blob, (uint16_t)regs);
       break;
    }
 
