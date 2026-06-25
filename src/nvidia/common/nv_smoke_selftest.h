@@ -4249,6 +4249,37 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
                 NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
             return -860;
       }
+      /* tick178: pass24 G0–G4 symmetry + G1/G3/G4 pass24 helpers */
+      if (!NV_PASS24_G0_G4_SYMMETRY_AUDIT || !nv_pass24_g0_g4_symmetry_ok())
+         return -861;
+      if (!NV_PASS24_G1_CE_PASS23 || !NV_PASS24_G2_COMPUTE_PASS24 ||
+          !NV_PASS24_G3_3D_PASS23_BARRIER || !NV_PASS24_G4_VIDEO_PASS23_PASS24)
+         return -862;
+      {
+         struct nv_push p178;
+         uint32_t b178[128];
+         memset(b178, 0, sizeof(b178));
+         nv_push_init(&p178, b178, (uint32_t)(sizeof(b178) / 4));
+         if (nv_g1_emit_copy_then_host_sema_pass24(
+                &p178, 0xc5b5u, 0x1000ull, 0x2000ull, 64u, false, true,
+                0x5c0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -863;
+         if (nv_push_dw_count(&p178) < 8u)
+            return -864;
+      }
+      {
+         struct nv_push p178g3;
+         uint32_t b178g3[128];
+         memset(b178g3, 0, sizeof(b178g3));
+         nv_push_init(&p178g3, b178g3, (uint32_t)(sizeof(b178g3) / 4));
+         if (nv_3d_emit_g3_barrier_all_pass24(
+                &p178g3, 0x5d0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -865;
+         if (nv_3d_emit_g3_inv_wfi_host_sema_pass24(
+                &p178g3, 0x5d0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+                true) != 0)
+            return -866;
+      }
    }
 
    if (trace_push && trace_dwords) {

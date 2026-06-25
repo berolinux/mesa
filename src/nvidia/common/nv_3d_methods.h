@@ -4406,6 +4406,44 @@ nv_3d_emit_g3_inv_wfi_host_sema_pass23(struct nv_push *p,
 }
 
 /**
+ * tick178 / pass24: G3 full barrier + pass24 host sema tail.
+ */
+static inline int
+nv_3d_emit_g3_barrier_all_pass24(struct nv_push *p,
+                                 uint64_t host_sema_gpu,
+                                 uint32_t host_sema_payload,
+                                 enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p)
+      return -1;
+   nv_3d_emit_g3_barrier_all_pass21(p);
+   if (!host_sema_gpu)
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass24(
+      p, false, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/**
+ * tick178 / pass24: G3 inv ladder + WFI + pass24 host sema.
+ */
+static inline int
+nv_3d_emit_g3_inv_wfi_host_sema_pass24(struct nv_push *p,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       enum nv_host_sema_mode sema_mode,
+                                       bool pre_wfi_on_3d)
+{
+   if (!p || !sema_gpu_addr)
+      return -1;
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
+                                               true, true);
+   return nv_push_g0_g4_host_sema_tail_pass24(
+      p, pre_wfi_on_3d, sema_gpu_addr,
+      sema_payload ? sema_payload : 1u, sema_mode);
+}
+
+/**
  * tick166: indirect draw ladder pass22 — same as pass20 but documents pass22
  * MME gate; path C only when !nv_pass22_mme_must_use_host_path().
  */

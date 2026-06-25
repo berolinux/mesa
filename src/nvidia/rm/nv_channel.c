@@ -2729,6 +2729,35 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
                   return r;
             }
          }
+         /* tick178 / pass24: pass23 timed out — pass24 G1 entry */
+         if (NV_PASS24_RE_SCAFFOLD && NV_PASS24_G1_CE_PASS23 &&
+             nv_pass24_g0_g4_symmetry_ok()) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need);
+            if (nv_g1_emit_copy_then_host_sema_pass24(
+                   &push, cl, src_gpu_addr, dst_gpu_addr, size_bytes, false,
+                   true, sema_gpu_addr, sema_payload,
+                   NV_PASS21_HOST_SEMA_DEFAULT_MODE) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (host_sema_mode_out)
+                  *host_sema_mode_out = (int)NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+               if (r == 0) {
+                  ch->host_sema_mode_pref = (int)NV_PASS21_HOST_SEMA_DEFAULT_MODE;
+                  if (!ch->class_copy_bound)
+                     ch->class_copy_bound = cl;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
       }
    }
    return last;
@@ -4551,6 +4580,34 @@ nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
                   return r;
             }
          }
+         /* tick178 / pass24: pass23 timed out — pass24 G3 inv+host */
+         if (NV_PASS24_RE_SCAFFOLD && NV_PASS24_G3_3D_PASS23_BARRIER &&
+             nv_pass24_g0_g4_symmetry_ok()) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need);
+            if (c3)
+               nv_3d_set_object(&push, c3);
+            if (nv_3d_emit_g3_inv_wfi_host_sema_pass24(
+                   &push, sema_gpu_addr, sema_payload, hs_mode, true) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (r == 0) {
+                  if (!ch->class_3d_bound)
+                     ch->class_3d_bound = c3;
+                  if (class_used_out)
+                     *class_used_out = c3;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
       }
    }
    return last;
@@ -4752,6 +4809,33 @@ nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
                   return r;
             }
          }
+         if (NV_PASS24_RE_SCAFFOLD && NV_PASS24_G4_VIDEO_PASS23_PASS24 &&
+             nv_pass24_g0_g4_symmetry_ok()) {
+            if (sema_reset)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need + 40);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need + 40);
+            if (nv_g4_emit_nvenc_bringup_pass24(
+                   &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+                   width, height, sema_gpu_addr, sema_payload, NULL, true,
+                   hs) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (r == 0) {
+                  if (!ch->class_nvenc_bound)
+                     ch->class_nvenc_bound = ce;
+                  if (class_used_out)
+                     *class_used_out = ce;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
       }
    }
    return last;
@@ -4929,6 +5013,31 @@ nv_channel_nvdec_smoke_slice_submit(struct nv_channel *ch,
                return -ENOMEM;
             nv_push_init(&push, map, need + 40);
             if (nv_g4_emit_nvdec_bringup_pass23(&push, cl, pic, sema_gpu_addr,
+                                                sema_payload, sema_cpu, true,
+                                                hs) == 0) {
+               nv_channel_push_advance(ch, nv_push_dw_count(&push));
+               r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                               wait_timeout_ns, check_notifier);
+               if (r == 0) {
+                  ch->class_nvdec_bound = cl;
+                  if (class_used_out)
+                     *class_used_out = cl;
+                  return 0;
+               }
+               last = r;
+               if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                  return r;
+            }
+         }
+         if (NV_PASS24_RE_SCAFFOLD && NV_PASS24_G4_VIDEO_PASS23_PASS24 &&
+             nv_pass24_g0_g4_symmetry_ok()) {
+            if (sema_reset && sema_cpu)
+               sema_cpu[0] = 0;
+            map = nv_channel_push_begin(ch, need + 40);
+            if (!map)
+               return -ENOMEM;
+            nv_push_init(&push, map, need + 40);
+            if (nv_g4_emit_nvdec_bringup_pass24(&push, cl, pic, sema_gpu_addr,
                                                 sema_payload, sema_cpu, true,
                                                 hs) == 0) {
                nv_channel_push_advance(ch, nv_push_dw_count(&push));
