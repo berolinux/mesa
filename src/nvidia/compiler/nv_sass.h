@@ -266,6 +266,11 @@ bool nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b);
 bool nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
                                          uint64_t store_gpu_addr,
                                          uint32_t imm_value);
+/** pass12/tick135: MOV Rd, imm + EXIT (graphics/compute trivial shader). */
+bool nv_sass_emit_smoke_mov_imm_exit(struct nv_sass_buf *b, uint8_t rd,
+                                     uint32_t imm);
+/** pass12/tick135: NOP + EXIT (gpucomp 0x50b0/0x7918 signature alignment). */
+bool nv_sass_emit_smoke_nop_exit(struct nv_sass_buf *b);
 
 bool nv_sass_emit_smoke_store_imm32(struct nv_sass_buf *b, uint8_t rd_data,
                                     uint8_t ra_addr, uint32_t imm);

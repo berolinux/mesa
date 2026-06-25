@@ -22,6 +22,8 @@
 #include "nv_qmd.h"
 #include "nv_sph.h"
 #include "nv_video_methods.h"
+/* tick135: SASS smoke helpers (compiler/nv_sass.h — path relative to src/nvidia) */
+#include "../compiler/nv_sass.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -1773,6 +1775,69 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
       if (!saw_spa || !saw_mme)
          return -460;
       (void)saw_wfi; /* WFI is best-effort; SPA+MME are required */
+   }
+
+   /* tick135: pass12 channel wire-up — SASS smoke helpers + MME clear scaffold */
+   {
+      struct nv_sass_buf sb;
+      struct nv_mme_program mme_clr;
+      uint32_t g2buf[220], g3buf[220];
+      uint32_t n2, n3, ii;
+      bool saw_prep_wfi = false, saw_prep_spa = false;
+
+      nv_sass_buf_init(&sb);
+      if (!nv_sass_emit_smoke_mov_imm_exit(&sb, 0, 0xcfu))
+         return -461;
+      if (sb.count < 4) /* 2 insns × 2 dwords */
+         return -462;
+      nv_sass_buf_finish(&sb);
+
+      nv_sass_buf_init(&sb);
+      if (!nv_sass_emit_smoke_nop_exit(&sb))
+         return -463;
+      if (sb.count < 4)
+         return -464;
+      nv_sass_buf_finish(&sb);
+
+      nv_mme_build_clear_helper_program_stub(&mme_clr, 48);
+      if (!mme_clr.is_stub_end_only || mme_clr.insn_count < 6 ||
+          mme_clr.slot != NV_MME_SLOT_CLEAR_HELPER)
+         return -465;
+
+      /* G2 smoke_slice still emits WFI via channel_prep (tick135 path) */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      if (nv_compute_emit_g2_smoke_slice(&p, 0xc5c0u, 0x900000ull, 16, 0x53,
+                                         0xa00000ull, NULL, 0, 0xc00000ull, 7u,
+                                         1u, 1u) != 0)
+         return -466;
+      n2 = nv_push_dw_count(&p);
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC3C0_WAIT_FOR_IDLE)
+            saw_prep_wfi = true;
+      }
+      if (!saw_prep_wfi || n2 < 20)
+         return -467;
+
+      memset(g3buf, 0, sizeof(g3buf));
+      nv_push_init(&p, g3buf, (uint32_t)(sizeof(g3buf) / 4));
+      nv_3d_emit_g3_bringup_slice(&p, 0xc597u, 0x800000ull, 32, 32, 0xcf,
+                                  NULL, 0, 0, 0, 0, 0, 0xd00000ull, 9u);
+      n3 = nv_push_dw_count(&p);
+      for (ii = 0; ii + 1 < n3; ii++) {
+         uint32_t hdr = g3buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_SPA_VERSION)
+            saw_prep_spa = true;
+      }
+      if (!saw_prep_spa || n3 < 20)
+         return -468;
    }
 
    if (trace_push && trace_dwords) {

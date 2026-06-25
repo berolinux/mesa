@@ -2913,15 +2913,22 @@ nv_channel_g2_compute_dispatch_sema_submit(struct nv_channel *ch,
       return -ENOMEM;
 
    nv_push_init(&push, map, need);
-   if (emit_init_state)
-      nv_compute_emit_init_state(&push, cc, 0 /* spa */, 0 /* cwd slots */);
-   else
+   if (emit_init_state) {
+      /* pass12/tick135: SPA/CWD/LMEM + WFI + double inv before first QMD/PCAS */
+      nv_compute_emit_g2_channel_prep(&push, cc, 0 /* spa 0x53 default */,
+                                      0 /* no LMEM window here */, 256u);
+      if (method_invalidate)
+         nv_compute_emit_invalidate_caches(&push);
+   } else {
       nv_compute_set_object(&push, cc);
+      if (method_invalidate)
+         nv_compute_emit_invalidate_caches(&push);
+   }
 
-   /* class_compute 0: object/subch already set above */
+   /* class_compute 0: object/subch already set above; method_invalidate done in prep */
    nv_compute_emit_dispatch_with_sema(&push, &local, qmd_gpu_addr, qmd_host,
                                       0, sema_gpu_addr, sema_payload,
-                                      method_invalidate);
+                                      false /* inv already emitted */);
    nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
    return nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
@@ -3339,6 +3346,8 @@ nv_channel_g3_clear_sema_submit(struct nv_channel *ch,
                return -ENOMEM;
 
             nv_push_init(&push, map, need);
+            /* tick135: SPA + MME stubs + inv + WFI once per try (pass12 channel_prep) */
+            nv_3d_emit_g3_channel_prep(&push, c3, 5, 3, mode_pass == 0);
             if (emit_draw)
                nv_3d_emit_g3_clear_draw_sema(&push, c3, ct_gpu_addr, ct_w, ct_h,
                                              ct_format, c, false,
@@ -4021,6 +4030,309 @@ nv_channel_g3_clear_then_host_sema_submit(struct nv_channel *ch,
             ch->class_3d_bound = c3;
          if (class_used_out)
             *class_used_out = c3;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+/*
+ * tick135: pass12 bring-up slices as first-class channel submits.
+ * G2 uses nv_compute_emit_g2_smoke_slice (channel_prep + QMD + PCAS).
+ * G3 uses nv_3d_emit_g3_bringup_slice (channel_prep + viewport/clear/draw).
+ * Video uses nv_nvenc_emit_h264_smoke_slice / nv_nvdec_emit_smoke_slice.
+ */
+
+int
+nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
+                                   uint32_t class_compute,
+                                   uint64_t program_gpu_addr,
+                                   uint32_t register_count,
+                                   uint8_t sass_version,
+                                   uint64_t qmd_gpu_addr,
+                                   void *qmd_host,
+                                   uint64_t lmem_gpu_addr,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint32_t grid_x,
+                                   uint32_t cta_x,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier,
+                                   uint32_t *class_used_out)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 256;
+   uint32_t classes[16];
+   unsigned n = 0, i, nt = 0;
+   uint32_t tried[16];
+   int pre, last = -EINVAL;
+   uint32_t cc_try;
+
+   if (!ch || !qmd_gpu_addr)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (class_compute)
+      classes[n++] = class_compute;
+   if (ch->class_compute_bound)
+      classes[n++] = ch->class_compute_bound;
+   if (ch->info && ch->info->class_compute)
+      classes[n++] = ch->info->class_compute;
+   classes[n++] = nv_channel_resolve_class_compute(ch, 0);
+   /* pass11/12 ladder heads + common alts */
+   classes[n++] = 0x0000cec0u;
+   classes[n++] = 0x0000cdc0u;
+   classes[n++] = 0x0000cbc0u;
+   classes[n++] = 0x0000c9c0u;
+   classes[n++] = 0x0000c7c0u;
+   classes[n++] = 0x0000c5c0u;
+   classes[n++] = 0x0000c3c0u;
+
+   for (i = 0; i < n && i < 16; i++) {
+      unsigned t;
+      int r;
+      cc_try = classes[i];
+      if (!cc_try)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == cc_try)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 16)
+         tried[nt++] = cc_try;
+
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+      nv_push_init(&push, map, need);
+      if (nv_compute_emit_g2_smoke_slice(&push, cc_try, program_gpu_addr,
+                                         register_count, sass_version,
+                                         qmd_gpu_addr, qmd_host,
+                                         lmem_gpu_addr, sema_gpu_addr,
+                                         sema_payload, grid_x, cta_x) != 0) {
+         last = -EINVAL;
+         continue;
+      }
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         if (!ch->class_compute_bound)
+            ch->class_compute_bound = cc_try;
+         if (class_used_out)
+            *class_used_out = cc_try;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+int
+nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
+                                   uint32_t class_3d,
+                                   uint64_t ct_gpu_addr,
+                                   uint32_t ct_w,
+                                   uint32_t ct_h,
+                                   uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t program_region_gpu,
+                                   uint64_t vs_gpu,
+                                   uint32_t vs_regs,
+                                   uint64_t ps_gpu,
+                                   uint32_t ps_regs,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier,
+                                   uint32_t *class_used_out)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 256;
+   uint32_t classes[12];
+   unsigned n = 12, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
+   uint32_t prefer;
+
+   if (!ch)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   prefer = class_3d ? class_3d : 0;
+   nv_channel_g3_fill_class_ladder(ch, prefer, classes, &n, 12);
+   if (!ct_format)
+      ct_format = NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
+
+   for (i = 0; i < n; i++) {
+      uint32_t c3 = classes[i];
+      unsigned t;
+      int r;
+
+      if (!c3)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == c3)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = c3;
+
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+      nv_push_init(&push, map, need);
+      nv_3d_emit_g3_bringup_slice(&push, c3, ct_gpu_addr, ct_w, ct_h,
+                                  ct_format, color_ui, program_region_gpu,
+                                  vs_gpu, vs_regs, ps_gpu, ps_regs,
+                                  sema_gpu_addr, sema_payload);
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      if (sema_gpu_addr && sema_cpu) {
+         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                         wait_timeout_ns, check_notifier);
+      } else {
+         r = nv_channel_kickoff(ch);
+      }
+      if (r == 0) {
+         if (!ch->class_3d_bound)
+            ch->class_3d_bound = c3;
+         if (class_used_out)
+            *class_used_out = c3;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
+   }
+   return last;
+}
+
+int
+nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
+                                         uint32_t class_nvenc,
+                                         uint64_t pic_setup_gpu,
+                                         uint64_t in_buf_gpu,
+                                         uint64_t bs_buf_gpu,
+                                         uint64_t status_gpu,
+                                         uint32_t width,
+                                         uint32_t height,
+                                         uint64_t sema_gpu_addr,
+                                         volatile uint32_t *sema_cpu,
+                                         uint32_t sema_payload,
+                                         bool sema_reset,
+                                         uint64_t wait_timeout_ns,
+                                         bool check_notifier,
+                                         uint32_t *class_used_out)
+{
+   struct nv_push push;
+   uint32_t *map;
+   uint32_t need = 200;
+   uint32_t classes[12];
+   unsigned n = 0, i, nt = 0;
+   uint32_t tried[12];
+   int pre, last = -EINVAL;
+
+   if (!ch)
+      return -EINVAL;
+   if (!sema_payload)
+      sema_payload = 0x42u;
+   if (class_used_out)
+      *class_used_out = 0;
+
+   pre = nv_channel_submit_preflight(ch, NULL);
+   if (pre)
+      return pre;
+
+   if (class_nvenc)
+      classes[n++] = class_nvenc;
+   if (ch->class_nvenc_bound)
+      classes[n++] = ch->class_nvenc_bound;
+   if (ch->info && ch->info->class_nvenc)
+      classes[n++] = ch->info->class_nvenc;
+   /* pass11/12 NVENC ladder (newest first) */
+   classes[n++] = 0x0000d1b7u;
+   classes[n++] = 0x0000cfb7u;
+   classes[n++] = 0x0000ceb7u;
+   classes[n++] = 0x0000c9b7u;
+   classes[n++] = 0x0000c8b7u;
+   classes[n++] = 0x0000c7b7u;
+
+   for (i = 0; i < n && i < 12; i++) {
+      uint32_t ce = classes[i];
+      unsigned t;
+      int r;
+
+      if (!ce)
+         continue;
+      for (t = 0; t < nt; t++)
+         if (tried[t] == ce)
+            break;
+      if (t < nt)
+         continue;
+      if (nt < 12)
+         tried[nt++] = ce;
+
+      if (sema_reset && sema_cpu)
+         sema_cpu[0] = 0;
+
+      map = nv_channel_push_begin(ch, need);
+      if (!map)
+         return -ENOMEM;
+      nv_push_init(&push, map, need);
+      if (nv_nvenc_emit_h264_smoke_slice(&push, ce, pic_setup_gpu, in_buf_gpu,
+                                         bs_buf_gpu, status_gpu, width, height,
+                                         sema_gpu_addr, sema_payload,
+                                         NULL) != 0) {
+         last = -EINVAL;
+         continue;
+      }
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+
+      if (sema_gpu_addr && sema_cpu)
+         r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                         wait_timeout_ns, check_notifier);
+      else
+         r = nv_channel_kickoff(ch);
+      if (r == 0) {
+         if (!ch->class_nvenc_bound)
+            ch->class_nvenc_bound = ce;
+         if (class_used_out)
+            *class_used_out = ce;
          return 0;
       }
       last = r;

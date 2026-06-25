@@ -75,6 +75,23 @@ nv_sass_emit_smoke_exit_only(struct nv_sass_buf *b)
 }
 
 bool
+nv_sass_emit_smoke_mov_imm_exit(struct nv_sass_buf *b, uint8_t rd,
+                                uint32_t imm)
+{
+   if (!nv_sass_emit_mov_ri(b, rd, imm))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
+nv_sass_emit_smoke_nop_exit(struct nv_sass_buf *b)
+{
+   if (!nv_sass_emit_nop(b))
+      return false;
+   return nv_sass_emit_exit(b);
+}
+
+bool
 nv_sass_emit_smoke_store_imm_at_gva(struct nv_sass_buf *b,
                                     uint64_t store_gpu_addr,
                                     uint32_t imm_value)

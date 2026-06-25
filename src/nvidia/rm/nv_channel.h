@@ -755,6 +755,76 @@ nv_channel_nvenc_frame_sema_submit(struct nv_channel *ch,
                                    uint64_t wait_timeout_ns,
                                    bool check_notifier);
 
+/**
+ * tick135 / pass12: G2 bring-up slice submit — channel_prep + QMD + PCAS via
+ * nv_compute_emit_g2_smoke_slice.  Tries compute class ladder; sets
+ * class_compute_bound on success.
+ */
+int
+nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
+                                   uint32_t class_compute,
+                                   uint64_t program_gpu_addr,
+                                   uint32_t register_count,
+                                   uint8_t sass_version,
+                                   uint64_t qmd_gpu_addr,
+                                   void *qmd_host,
+                                   uint64_t lmem_gpu_addr,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint32_t grid_x,
+                                   uint32_t cta_x,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier,
+                                   uint32_t *class_used_out);
+
+/**
+ * tick135 / pass12: G3 bring-up slice submit — channel_prep (SPA/MME/inv/WFI)
+ * + viewport/fixed-func/clear/draw via nv_3d_emit_g3_bringup_slice.
+ */
+int
+nv_channel_g3_bringup_slice_submit(struct nv_channel *ch,
+                                   uint32_t class_3d,
+                                   uint64_t ct_gpu_addr,
+                                   uint32_t ct_w,
+                                   uint32_t ct_h,
+                                   uint32_t ct_format,
+                                   const uint32_t color_ui[4],
+                                   uint64_t program_region_gpu,
+                                   uint64_t vs_gpu,
+                                   uint32_t vs_regs,
+                                   uint64_t ps_gpu,
+                                   uint32_t ps_regs,
+                                   uint64_t sema_gpu_addr,
+                                   volatile uint32_t *sema_cpu,
+                                   uint32_t sema_payload,
+                                   bool sema_reset,
+                                   uint64_t wait_timeout_ns,
+                                   bool check_notifier,
+                                   uint32_t *class_used_out);
+
+/**
+ * tick135: NVENC H.264 smoke slice submit (nv_nvenc_emit_h264_smoke_slice).
+ * Tries NVENC class ladder (D1B7..C8B7..); sets class_nvenc_bound on success.
+ */
+int
+nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
+                                         uint32_t class_nvenc,
+                                         uint64_t pic_setup_gpu,
+                                         uint64_t in_buf_gpu,
+                                         uint64_t bs_buf_gpu,
+                                         uint64_t status_gpu,
+                                         uint32_t width,
+                                         uint32_t height,
+                                         uint64_t sema_gpu_addr,
+                                         volatile uint32_t *sema_cpu,
+                                         uint32_t sema_payload,
+                                         bool sema_reset,
+                                         uint64_t wait_timeout_ns,
+                                         bool check_notifier,
+                                         uint32_t *class_used_out);
+
 #ifdef __cplusplus
 }
 #endif

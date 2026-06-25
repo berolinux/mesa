@@ -245,10 +245,12 @@ nv_mme_build_channel_init_program_stub(struct nv_mme_program *prog,
 }
 
 /**
- * tick105/112: clear/blit helper macro scaffold (slot 3).
- * Intended (unvalidated) sequence mirrors host G3: set colour clear values,
- * CLEAR_SURFACE (0x19d0), optional report sema — all pseudo-ops until RE.
- * Host nv_3d_emit_g3_* remains authoritative; this only primes MME RAM/CALL.
+ * tick105/112/135: clear/blit helper macro scaffold (slot 3).
+ * pass12 RE: glcore programs MME via LOAD_MME_INSTRUCTION_RAM (0x114/0x118)
+ * not SET_MME_INSTRUCTION_RAM_PTR (0x3880) in the hot path we observed; host
+ * still uses LOAD_* helpers.  Pseudo insn sequence documents intended G3
+ * clear path; is_stub_end_only remains true until opcode table is proven.
+ * Host nv_3d_emit_g3_* remains authoritative.
  */
 static inline void
 nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
@@ -259,17 +261,23 @@ nv_mme_build_clear_helper_program_stub(struct nv_mme_program *prog,
    memset(prog, 0, sizeof(*prog));
    prog->slot = NV_MME_SLOT_CLEAR_HELPER;
    prog->ram_offset = ram_offset;
-   /* Pseudo: load clear state, emit SET_COLOR_CLEAR_VALUE band, CLEAR_SURFACE, END */
+   /* Pseudo: state load → colour clear values ×4 → CLEAR_SURFACE → sema band → END */
    prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
                     NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
    prog->insns[1] = nv_mme_insn_emit_method(0x0d80u /* SET_COLOR_CLEAR_VALUE(0) */,
                                             0);
-   prog->insns[2] = nv_mme_insn_emit_method(0x19d0u /* CLEAR_SURFACE */, 1);
-   prog->insns[3] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+   prog->insns[2] = nv_mme_insn_emit_method(0x0d84u /* SET_COLOR_CLEAR_VALUE(1) */,
+                                            0);
+   prog->insns[3] = nv_mme_insn_emit_method(0x0d88u /* SET_COLOR_CLEAR_VALUE(2) */,
+                                            0);
+   prog->insns[4] = nv_mme_insn_emit_method(0x0d8cu /* SET_COLOR_CLEAR_VALUE(3) */,
+                                            0);
+   prog->insns[5] = nv_mme_insn_emit_method(0x19d0u /* CLEAR_SURFACE */, 1);
+   prog->insns[6] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
                     NV_MME_INSN_IMM16(0x1b00u /* report sema band approx */) |
                     NV_MME_INSN_MERGE_CLASS;
-   prog->insns[4] = NV_MME_INSN_OP(NV_MME_OP_END);
-   prog->insn_count = 5;
+   prog->insns[7] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 8;
    prog->is_stub_end_only = true;
 }
 
