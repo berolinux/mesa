@@ -1566,6 +1566,46 @@ nv_pass26_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
 #define NV_PASS26_CHANNEL_G2_LAUNCH_LADDER     1
 #define NV_PASS26_GALLIUM_VULKAN_DISPATCH_TAIL 1
 
+/**
+ * tick189: pass27 G2 launch — pass26 emit plus pass27 policy/symmetry gate.
+ * Returns pass26 codes, or -18 if pass27 policy fails.
+ */
+static inline int
+nv_pass27_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
+                                     struct nv_pass21_compute_object *obj,
+                                     uint64_t lmem_gpu_addr, bool post_wfi,
+                                     uint64_t host_sema_gpu,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass27_policy_ok())
+      return -18;
+   if (!nv_pass27_g0_g4_symmetry_ok())
+      return -18;
+   return nv_pass26_compute_object_emit_launch(p, class_compute, obj,
+                                               lmem_gpu_addr, post_wfi,
+                                               host_sema_gpu, host_sema_payload,
+                                               host_sema_mode);
+}
+
+static inline int
+nv_pass27_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
+                                               uint64_t host_sema_gpu,
+                                               uint32_t host_sema_payload,
+                                               enum nv_host_sema_mode host_sema_mode,
+                                               bool pre_wfi)
+{
+   if (!p || !host_sema_gpu)
+      return 0;
+   if (!nv_pass27_policy_ok())
+      return 0;
+   return nv_pass26_emit_compute_dispatch_host_sema_tail(
+      p, host_sema_gpu, host_sema_payload, host_sema_mode, pre_wfi);
+}
+
+#define NV_PASS27_CHANNEL_G2_LAUNCH_LADDER     1
+#define NV_PASS27_GALLIUM_VULKAN_DISPATCH_TAIL 1
+
 #ifdef __cplusplus
 }
 #endif

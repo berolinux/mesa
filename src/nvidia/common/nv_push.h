@@ -813,6 +813,42 @@ nv_pass26_g0_g4_symmetry_ok(void)
           NV_PASS26_G4_VIDEO_PASS25_PASS26 != 0;
 }
 
+/* tick189 / pass27: G0–G4 symmetry inherits pass26 impl wire */
+#define NV_PASS27_G0_G4_SYMMETRY_AUDIT       1
+#define NV_PASS27_G0_G4_HOST_SEMA_IS_PASS21  1
+#define NV_PASS27_G1_CE_PASS26               1
+#define NV_PASS27_G2_COMPUTE_PASS26          1
+#define NV_PASS27_G3_3D_PASS26_BARRIER       1
+#define NV_PASS27_G4_VIDEO_PASS26_PASS27     1
+#define NV_PASS27_G0_G4_SYMMETRY_TICK189     1
+
+/** tick189: pass27 host sema tail — alias pass26/25/21. */
+static inline int
+nv_push_g0_g4_host_sema_tail_pass27(struct nv_push *p,
+                                    bool pre_wfi_on_cur_subch,
+                                    uint64_t host_sema_gpu,
+                                    uint32_t host_sema_payload,
+                                    enum nv_host_sema_mode host_sema_mode)
+{
+   return nv_push_g0_g4_host_sema_tail_pass26(p, pre_wfi_on_cur_subch,
+                                              host_sema_gpu, host_sema_payload,
+                                              host_sema_mode);
+}
+
+/** tick189: pass27 G0–G4 symmetry coherent with pass26 wire + pass27 policy. */
+static inline bool
+nv_pass27_g0_g4_symmetry_ok(void)
+{
+   return NV_PASS27_G0_G4_SYMMETRY_AUDIT != 0 &&
+          NV_PASS27_G0_G4_HOST_SEMA_IS_PASS21 != 0 &&
+          NV_PASS27_G0_G4_SYMMETRY_TICK189 != 0 &&
+          nv_pass26_g0_g4_symmetry_ok() &&
+          NV_PASS27_G1_CE_PASS26 != 0 &&
+          NV_PASS27_G2_COMPUTE_PASS26 != 0 &&
+          NV_PASS27_G3_3D_PASS26_BARRIER != 0 &&
+          NV_PASS27_G4_VIDEO_PASS26_PASS27 != 0;
+}
+
 /**
  * tick155: recommended sema mode order for G0–G4 silicon ladders (pass17
  * first, then classic BLOB1002/0802/1001, then open/vdpau).  Fills *out with

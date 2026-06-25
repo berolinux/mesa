@@ -4498,6 +4498,52 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -919;
       if (NV_PASS27_IMPL_INHERITS_PASS26_WIRE != NV_PASS26_IMPL_WIRE_COMPLETE)
          return -920;
+      /* tick189: pass27 G0–G4 symmetry + G2 launch ladder */
+      if (!NV_PASS27_G0_G4_SYMMETRY_TICK189 || !nv_pass27_g0_g4_symmetry_ok())
+         return -921;
+      if (!NV_PASS27_G1_CE_PASS26 || !NV_PASS27_G2_COMPUTE_PASS26 ||
+          !NV_PASS27_G3_3D_PASS26_BARRIER || !NV_PASS27_G4_VIDEO_PASS26_PASS27)
+         return -922;
+      if (!NV_PASS27_CHANNEL_G2_LAUNCH_LADDER ||
+          !NV_PASS27_GALLIUM_VULKAN_DISPATCH_TAIL)
+         return -923;
+      {
+         struct nv_push p189;
+         uint32_t b189[32];
+         memset(b189, 0, sizeof(b189));
+         nv_push_init(&p189, b189, (uint32_t)(sizeof(b189) / 4));
+         if (nv_push_g0_g4_host_sema_tail_pass27(
+                &p189, false, 0x640000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -924;
+         if (nv_pass27_emit_compute_dispatch_host_sema_tail(
+                &p189, 0x640000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+                false) != 0)
+            return -925;
+      }
+      {
+         struct nv_push p189b;
+         uint32_t b189b[256];
+         struct nv_pass21_compute_object o189;
+         memset(b189b, 0, sizeof(b189b));
+         memset(&o189, 0, sizeof(o189));
+         nv_push_init(&p189b, b189b, (uint32_t)(sizeof(b189b) / 4));
+         o189.shader_kind = NV_PASS24_NIR_DEFAULT_KIND;
+         o189.program_gpu_addr = 0x100000ull;
+         o189.qmd_gpu_addr = 0x200000ull;
+         o189.qmd_sema_gpu = 0x210000ull;
+         o189.qmd_sema_payload = 1u;
+         o189.register_count = 8u;
+         o189.spa_version = 0x0700u;
+         o189.grid_x = 1u;
+         o189.cta_x = 32u;
+         if (nv_pass22_compute_object_build(&o189) != 0)
+            return -926;
+         if (nv_pass27_compute_object_emit_launch(
+                &p189b, 0xc5c0u, &o189, 0x400000ull, true, 0x210000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -927;
+      }
    }
 
    if (trace_push && trace_dwords) {

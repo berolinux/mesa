@@ -4,13 +4,19 @@
 **Driver:** NVIDIA-Linux-x86_64-610.43.02  
 **Status:** Scaffold only; full pass27 RE pending.
 
-## Mesa wire-up (tick188)
+## Mesa wire-up (ticks 188–189)
 
-| Deliverable | Notes |
-|-------------|-------|
-| Pass27 RE constants | `NV_PASS27_RE_*`, `nv_pass27_policy_ok()` |
-| Pass26 G4 channel | NVDEC pass26 retry after pass25 (`NV_PASS26_IMPL_G4_CHANNEL_TICK188`) |
-| Inherits | pass26 impl wire complete + pass25/24/23 explicit-emit |
+| Tick | Deliverable |
+|------|-------------|
+| 188 | Pass27 RE constants; pass26 G4 NVDEC channel pass26 |
+| 189 | G0–G4 pass27 symmetry; pass27 G2 launch/dispatch; channel pass27-first |
+
+## G0–G4 (pass27)
+
+| Engine | Entry |
+|--------|-------|
+| G0–G4 sema | `nv_push_g0_g4_host_sema_tail_pass27` → pass26/21 |
+| G2 compute | `nv_pass27_compute_object_emit_launch` → pass26 → pass25 → pass24 → pass22 |
 
 ## Still pending
 
