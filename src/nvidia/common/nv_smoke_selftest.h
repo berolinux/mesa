@@ -1084,6 +1084,42 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -362;
    }
 
+   /* tick124: NVENC emit_encode_frame / frame_kick shape */
+   {
+      struct nv_nvenc_frame_setup efs;
+      uint32_t buf_e[128];
+      uint32_t ne, ie;
+      bool saw_app = false, saw_exec = false, saw_in = false;
+
+      nv_nvenc_frame_setup_init_h264_smoke(&efs, 0x710000ull, 0x800000ull,
+                                           0x810000ull, 128, 72);
+      efs.status_gpu_addr = 0x300000ull;
+      memset(buf_e, 0, sizeof(buf_e));
+      nv_push_init(&p, buf_e, (uint32_t)(sizeof(buf_e) / 4));
+      if (nv_nvenc_emit_encode_frame(&p, 0xc0b7u, &efs, 0x300000ull, 0x11u,
+                                     NULL) != 0)
+         return -363;
+      ne = nv_push_dw_count(&p);
+      if (ne < 8)
+         return -364;
+      for (ie = 0; ie + 1 < ne; ie++) {
+         uint32_t hdr = buf_e[ie];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NV_NVENC_SET_APPLICATION_ID)
+            saw_app = true;
+         if (method == NV_NVENC_EXECUTE)
+            saw_exec = true;
+         if (method == NV_NVENC_SET_IN_BUF_BASE_OFFSET)
+            saw_in = true;
+      }
+      if (!saw_app || !saw_exec || !saw_in)
+         return -365;
+      if (efs.width != 128 || efs.height != 72)
+         return -366;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

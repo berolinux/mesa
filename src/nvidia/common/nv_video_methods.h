@@ -3428,6 +3428,23 @@ nv_nvenc_frame_setup_init_h264_smoke(struct nv_nvenc_frame_setup *fs,
    fs->chroma_format_idc = 1;
 }
 
+/**
+ * tick124: Gallium/NVENC session-like emit — sema + frame_setup without requiring
+ * full nv_nvenc_session object.  class_nvenc 0 uses subch only.
+ */
+static inline int
+nv_nvenc_emit_encode_frame(struct nv_push *p, uint32_t class_nvenc,
+                           const struct nv_nvenc_frame_setup *fs,
+                           uint64_t sema_gpu, uint32_t sema_payload,
+                           volatile uint32_t *status_cpu)
+{
+   if (!p || !fs)
+      return -1;
+   nv_nvenc_emit_frame_kick(p, class_nvenc, fs, sema_gpu, sema_payload,
+                            status_cpu);
+   return 0;
+}
+
 /** tick114: NVENC pic_setup-only methods (no sema; use existing frame_kick for full slice). */
 static inline void
 nv_nvenc_emit_pic_setup_simple(struct nv_push *p, uint32_t app_id,

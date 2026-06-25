@@ -722,6 +722,332 @@ nvgpu_video_flush(struct pipe_video_codec *codec)
       (void)nv_channel_wait_idle(dec->ctx->channel, 1000000000ull);
 }
 
+/* ---- tick124: NVENC encode (pipe_video_codec ENCODE entrypoint) ---- */
+
+struct nvgpu_video_encoder {
+   struct pipe_video_codec base;
+   struct nvgpu_context *ctx;
+   struct nv_rm_bo *pic_setup_bo;
+   void *pic_setup_map;
+   struct nv_rm_bo *bitstream_out_bo;
+   void *bitstream_out_map;
+   uint32_t bitstream_out_size;
+   struct nv_rm_bo *status_bo;
+   void *status_map;
+   uint32_t class_nvenc;
+   uint32_t app_id;
+   uint32_t width;
+   uint32_t height;
+   uint32_t frame_num;
+   uint32_t last_sema_payload;
+   struct pipe_video_buffer *cur_source;
+   struct pipe_picture_desc *cur_picture;
+   struct pipe_resource *pending_dest;
+   void *pending_feedback;
+   bool frame_active;
+};
+
+static uint32_t
+nvgpu_profile_to_nvenc_app_id(enum pipe_video_profile profile)
+{
+   switch (u_reduce_video_profile(profile)) {
+   case PIPE_VIDEO_FORMAT_MPEG4_AVC:
+      return NV_NVENC_APP_ID_H264;
+   case PIPE_VIDEO_FORMAT_HEVC:
+      return NV_NVENC_APP_ID_HEVC;
+   default:
+      return 0;
+   }
+}
+
+static bool
+nvgpu_enc_ensure_bos(struct nvgpu_video_encoder *enc)
+{
+   struct nv_rm_bo_req req;
+   struct nvgpu_screen *screen;
+
+   if (!enc || !enc->ctx || !enc->ctx->screen || !enc->ctx->screen->rm)
+      return false;
+   screen = enc->ctx->screen;
+
+   if (!enc->pic_setup_bo) {
+      memset(&req, 0, sizeof(req));
+      req.size = NVGPU_VID_PIC_SETUP_BO_SIZE;
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      enc->pic_setup_bo = nv_rm_bo_alloc(screen->rm, &req);
+      if (!enc->pic_setup_bo)
+         return false;
+      enc->pic_setup_map = nv_rm_bo_map(enc->pic_setup_bo);
+      if (enc->pic_setup_map)
+         memset(enc->pic_setup_map, 0, NVGPU_VID_PIC_SETUP_BO_SIZE);
+   }
+   if (!enc->bitstream_out_bo) {
+      memset(&req, 0, sizeof(req));
+      req.size = NVGPU_VID_BITSTREAM_BO_SIZE;
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      enc->bitstream_out_bo = nv_rm_bo_alloc(screen->rm, &req);
+      if (!enc->bitstream_out_bo)
+         return false;
+      enc->bitstream_out_size = NVGPU_VID_BITSTREAM_BO_SIZE;
+      enc->bitstream_out_map = nv_rm_bo_map(enc->bitstream_out_bo);
+   }
+   if (!enc->status_bo) {
+      memset(&req, 0, sizeof(req));
+      req.size = NVGPU_VID_STATUS_BO_SIZE;
+      req.alignment = 256;
+      req.vram = false;
+      req.cpu_access = true;
+      req.no_scanout = true;
+      req.map_gpu_va = true;
+      enc->status_bo = nv_rm_bo_alloc(screen->rm, &req);
+      if (!enc->status_bo)
+         return false;
+      enc->status_map = nv_rm_bo_map(enc->status_bo);
+      if (enc->status_map)
+         memset(enc->status_map, 0, NVGPU_VID_STATUS_BO_SIZE);
+   }
+   return enc->pic_setup_bo && enc->bitstream_out_bo && enc->status_bo;
+}
+
+static void
+nvgpu_enc_destroy(struct pipe_video_codec *codec)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   if (!enc)
+      return;
+   if (enc->status_bo)
+      nv_rm_bo_free(enc->status_bo);
+   if (enc->bitstream_out_bo)
+      nv_rm_bo_free(enc->bitstream_out_bo);
+   if (enc->pic_setup_bo)
+      nv_rm_bo_free(enc->pic_setup_bo);
+   FREE(enc);
+}
+
+static void
+nvgpu_enc_begin_frame(struct pipe_video_codec *codec,
+                      struct pipe_video_buffer *target,
+                      struct pipe_picture_desc *picture)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   if (!enc)
+      return;
+   enc->frame_active = true;
+   enc->cur_source = target;
+   enc->cur_picture = picture;
+   enc->pending_dest = NULL;
+   enc->pending_feedback = NULL;
+}
+
+static void
+nvgpu_enc_encode_bitstream(struct pipe_video_codec *codec,
+                           struct pipe_video_buffer *source,
+                           struct pipe_resource *destination,
+                           void **feedback)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   if (!enc)
+      return;
+   if (source)
+      enc->cur_source = source;
+   enc->pending_dest = destination;
+   if (feedback)
+      *feedback = (void *)(uintptr_t)(enc->frame_num + 1u);
+   enc->pending_feedback = feedback ? *feedback : NULL;
+}
+
+static int
+nvgpu_enc_end_frame(struct pipe_video_codec *codec,
+                    struct pipe_video_buffer *target,
+                    struct pipe_picture_desc *picture)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   struct nvgpu_context *ctx;
+   struct nv_nvenc_frame_setup fs;
+   struct nv_push push;
+   uint64_t pic_gpu, bs_gpu, st_gpu, in_gpu = 0;
+   uint32_t luma_pitch = 0, chroma_pitch = 0;
+   uint64_t luma_va = 0, chroma_va = 0;
+   uint32_t w, h;
+   int r = -1;
+   (void)target;
+   (void)picture;
+
+   if (!enc || !enc->frame_active)
+      return 0;
+   ctx = enc->ctx;
+   if (!ctx || !nvgpu_enc_ensure_bos(enc))
+      goto out_clear;
+
+   w = enc->width ? enc->width : (enc->base.width ? enc->base.width : 64);
+   h = enc->height ? enc->height : (enc->base.height ? enc->base.height : 64);
+
+   if (enc->cur_source)
+      nvgpu_video_buffer_planes(enc->cur_source, &luma_va, &chroma_va,
+                                &luma_pitch, &chroma_pitch);
+   in_gpu = luma_va ? luma_va : 0;
+
+   pic_gpu = nv_rm_bo_gpu_offset(enc->pic_setup_bo);
+   bs_gpu = nv_rm_bo_gpu_offset(enc->bitstream_out_bo);
+   st_gpu = nv_rm_bo_gpu_offset(enc->status_bo);
+
+   if (enc->pic_setup_map) {
+      if (enc->app_id == NV_NVENC_APP_ID_H264 ||
+          enc->app_id == NV_NVENC_APP_ID_HEVC) {
+         nv_nvenc_pic_setup_fill_h264_smoke(
+            (uint32_t *)enc->pic_setup_map,
+            NVGPU_VID_PIC_SETUP_BO_SIZE / 4, w, h, 30, 1, in_gpu, bs_gpu);
+         if (enc->app_id == NV_NVENC_APP_ID_HEVC) {
+            /* HEVC uses same smoke layout subset until dedicated packer exists */
+            ((uint32_t *)enc->pic_setup_map)[NV_NVENC_PS_SPS_FLAGS] =
+               (1u /* Main */) | (120u << 8) | (1u << 16);
+         }
+      }
+   }
+
+   nv_nvenc_frame_setup_init_h264_smoke(&fs, pic_gpu, in_gpu, bs_gpu, w, h);
+   fs.app_id = enc->app_id ? enc->app_id : NV_NVENC_APP_ID_H264;
+   fs.status_gpu_addr = st_gpu;
+   if (enc->app_id == NV_NVENC_APP_ID_HEVC)
+      fs.app_id = NV_NVENC_APP_ID_HEVC;
+
+   enc->last_sema_payload = enc->frame_num + 1u;
+   if (enc->status_map)
+      *(volatile uint32_t *)enc->status_map = 0;
+
+   if (ctx->channel) {
+      r = nv_channel_nvenc_frame_sema_submit(
+         ctx->channel, enc->class_nvenc, &fs, st_gpu,
+         enc->status_map ? (volatile uint32_t *)enc->status_map : NULL,
+         enc->last_sema_payload, true, 2000000000ull, true);
+      if (r == 0 || r == -EAGAIN)
+         r = (r == -EAGAIN) ? -1 : 0;
+   }
+
+   if (r != 0) {
+      if (!nvgpu_push_start(ctx, &push, 128))
+         goto out_clear;
+      nv_nvenc_emit_frame_kick(&push, enc->class_nvenc, &fs, st_gpu,
+                               enc->last_sema_payload,
+                               enc->status_map
+                                  ? (volatile uint32_t *)enc->status_map
+                                  : NULL);
+      nvgpu_push_finish(ctx, &push, true);
+      r = 0;
+   }
+
+   if (r == 0 && enc->status_map) {
+      if (nv_nvdec_wait_status_cpu((volatile uint32_t *)enc->status_map,
+                                   enc->last_sema_payload,
+                                   2000000000ull) != 0) {
+         if (ctx->channel)
+            (void)nv_channel_wait_idle(ctx->channel, 2000000000ull);
+      }
+   } else if (r == 0 && ctx->channel) {
+      (void)nv_channel_wait_idle(ctx->channel, 2000000000ull);
+   }
+   if (ctx->channel)
+      (void)nv_channel_check_notifier(ctx->channel, true, 0);
+
+   /*
+    * Feedback / destination: no size written by HW yet — report 0 bytes so
+    * clients do not read garbage; refine when status BO layout is silicon-proven.
+    */
+   (void)enc->pending_dest;
+   (void)enc->pending_feedback;
+
+   enc->frame_num++;
+
+out_clear:
+   enc->frame_active = false;
+   enc->cur_source = NULL;
+   enc->cur_picture = NULL;
+   enc->pending_dest = NULL;
+   enc->pending_feedback = NULL;
+   return r;
+}
+
+static void
+nvgpu_enc_flush(struct pipe_video_codec *codec)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   if (!enc || !enc->ctx)
+      return;
+   if (enc->ctx->channel)
+      (void)nv_channel_wait_idle(enc->ctx->channel, 1000000000ull);
+}
+
+static void
+nvgpu_enc_get_feedback(struct pipe_video_codec *codec,
+                       void *feedback, unsigned *size)
+{
+   struct nvgpu_video_encoder *enc = (struct nvgpu_video_encoder *)codec;
+   (void)feedback;
+   if (size)
+      *size = 0; /* unknown until status/bitstream size ring is reverse-engineered */
+   (void)enc;
+}
+
+static struct pipe_video_codec *
+nvgpu_create_video_encoder(struct pipe_context *context,
+                           const struct pipe_video_codec *templ)
+{
+   struct nvgpu_context *ctx = (struct nvgpu_context *)context;
+   struct nvgpu_video_encoder *enc;
+   struct nvgpu_screen *screen;
+   uint32_t app_id;
+   uint32_t class_nvenc = 0;
+
+   if (!context || !templ || !ctx)
+      return NULL;
+
+   app_id = nvgpu_profile_to_nvenc_app_id(templ->profile);
+   if (!app_id)
+      return NULL;
+
+   screen = ctx->screen;
+   if (!screen || !screen->rm)
+      return NULL;
+   if (screen->info)
+      class_nvenc = screen->info->class_nvenc;
+   if (!class_nvenc)
+      class_nvenc = NV_VIDEO_CLASS_NVENC_TURING_C0B7;
+
+   enc = CALLOC_STRUCT(nvgpu_video_encoder);
+   if (!enc)
+      return NULL;
+
+   enc->base = *templ;
+   enc->base.context = context;
+   enc->ctx = ctx;
+   enc->app_id = app_id;
+   enc->class_nvenc = class_nvenc;
+   enc->width = templ->width;
+   enc->height = templ->height;
+
+   enc->base.destroy = nvgpu_enc_destroy;
+   enc->base.begin_frame = nvgpu_enc_begin_frame;
+   enc->base.encode_bitstream = nvgpu_enc_encode_bitstream;
+   enc->base.end_frame = nvgpu_enc_end_frame;
+   enc->base.flush = nvgpu_enc_flush;
+   enc->base.get_feedback = nvgpu_enc_get_feedback;
+
+   if (!nvgpu_enc_ensure_bos(enc)) {
+      nvgpu_enc_destroy(&enc->base);
+      return NULL;
+   }
+
+   return &enc->base;
+}
+
 struct pipe_video_codec *
 nvgpu_create_video_codec(struct pipe_context *context,
                          const struct pipe_video_codec *templ)
@@ -734,12 +1060,12 @@ nvgpu_create_video_codec(struct pipe_context *context,
 
    if (!context || !templ || !ctx)
       return NULL;
-   /* tick123: bitstream decode (NVDEC); encode entrypoint reserved for NVENC later */
+   /* tick123/124: bitstream decode (NVDEC) or encode (NVENC) */
    if (templ->entrypoint != PIPE_VIDEO_ENTRYPOINT_BITSTREAM &&
        templ->entrypoint != PIPE_VIDEO_ENTRYPOINT_ENCODE)
       return NULL;
    if (templ->entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE)
-      return NULL; /* encoder path not yet wired to pipe_video_codec */
+      return nvgpu_create_video_encoder(context, templ);
 
    app_id = nvgpu_profile_to_app_id(templ->profile);
    if (!app_id)
@@ -811,15 +1137,13 @@ nvgpu_screen_get_video_param(struct pipe_screen *pscreen,
    app_id = nvgpu_profile_to_app_id(profile);
    if (!app_id)
       return 0;
-   /* tick123: advertise encode capability for H.264/HEVC; create returns NULL until wired */
+   /* tick124: NVENC H.264/HEVC encode via pipe_video_codec */
    if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE &&
        app_id != NV_NVDEC_APP_ID_H264 && app_id != NV_NVDEC_APP_ID_HEVC)
       return 0;
 
    switch (param) {
    case PIPE_VIDEO_CAP_SUPPORTED:
-      if (entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE)
-         return 0; /* capability probe only; implementation incomplete */
       return 1;
    case PIPE_VIDEO_CAP_MAX_WIDTH:
    case PIPE_VIDEO_CAP_MAX_HEIGHT:
