@@ -180,6 +180,9 @@ nv_channel_recover(struct nv_channel *ch, bool stop_first)
       return -EINVAL;
    rm = ch->rm;
 
+   /* tick100: clear host/error notifier so recovery is not blocked by stale RC */
+   nv_channel_notifier_reset(ch);
+
    /* tick91: group preempt first (drains TSG without full channel unbind) */
    if (ch->h_channel_group) {
       NVA06C_CTRL_PREEMPT_PARAMS pr;
@@ -198,15 +201,29 @@ nv_channel_recover(struct nv_channel *ch, bool stop_first)
                           &stop, sizeof(stop));
    }
 
+   /* Best-effort idle before restart (spin+pb; non-fatal if unsupported) */
+   (void)nv_channel_idle_rm(ch, 0, 500000u);
+
    memset(&rst, 0, sizeof(rst));
    rst.bBypassWaitForEngIdle = NV_FALSE;
    r = nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_RESTART_RUNLIST,
                      &rst, sizeof(rst));
-   /* RESTART may fail if not supported; still try re-schedule */
+   /* RESTART may fail if not supported; try with bypass if first fails */
+   if (r != 0) {
+      memset(&rst, 0, sizeof(rst));
+      rst.bBypassWaitForEngIdle = NV_TRUE;
+      (void)nv_rm_control(rm, ch->h_channel, NVA06F_CTRL_CMD_RESTART_RUNLIST,
+                          &rst, sizeof(rst));
+   }
+
+   /* Re-bind error CTXDMA if present (RC path may have detached) */
+   if (ch->h_error_ctxdma)
+      (void)nv_channel_bind_error_ctxdma(ch);
 
    ch->scheduled = false;
    ch->schedule_rc = -EAGAIN;
    ch->schedule_path = 0;
+   ch->schedule_bind_rc = -1;
    r = nv_channel_try_schedule(ch);
    return r;
 }

@@ -72,6 +72,29 @@ extern "C" {
 #define NV_MME_PASS5_HOT_METHOD_OFF          0x39e0u
 #define NV_MME_PASS5_HOT_MACRO_INDEX         28u
 
+/*
+ * tick100: provisional MME instruction bitfields (Maxwell/Pascal+ class family).
+ * Not validated against silicon; used only to document RE progress.  Production
+ * paths must keep is_stub_end_only=true until opcode table is proven.
+ *
+ * Common pattern in dumps: low bits select op; high bits carry immediates /
+ * register indices / method merge targets.  END is reliably 0x1 in observed
+ * terminator slots.
+ */
+#define NV_MME_OP_MASK                       0x0000000fu
+#define NV_MME_OP_END                        0x1u
+#define NV_MME_OP_NOP                        0x0u
+#define NV_MME_OP_MERGE_METHOD               0x2u /* tentative */
+#define NV_MME_OP_ALU                        0x4u /* tentative */
+#define NV_MME_OP_BRANCH                     0x5u /* tentative */
+#define NV_MME_OP_STATE_LOAD                 0x6u /* tentative */
+#define NV_MME_OP_EMIT_METHOD                0x8u /* tentative method emit */
+
+#define NV_MME_INSN_OP(op)                   ((uint32_t)(op) & NV_MME_OP_MASK)
+#define NV_MME_INSN_IMM16(v)                 (((uint32_t)(v) & 0xffffu) << 8)
+#define NV_MME_INSN_REG(a, b) \
+   ((((uint32_t)(a) & 0x1fu) << 24) | (((uint32_t)(b) & 0x1fu) << 16))
+
 /* Instruction RAM layout: each macro gets a dedicated region */
 #define NV_MME_RAM_SLOT_STRIDE               16  /* dwords per macro region */
 #define NV_MME_MAX_INSNS_PER_MACRO           16
@@ -127,12 +150,19 @@ nv_mme_build_draw_indirect_program(struct nv_mme_program *prog, uint32_t slot,
    memset(prog, 0, sizeof(*prog));
    prog->slot = slot;
    prog->ram_offset = ram_offset;
-   /* Reserved class bits document intended roles; all low bits still END-safe. */
-   prog->insns[0] = NV_MME_INSN_NOP | (indexed ? NV_MME_INSN_STATE_LOAD_CLASS : 0);
-   prog->insns[1] = NV_MME_INSN_NOP | NV_MME_INSN_ALU_CLASS;
-   prog->insns[2] = NV_MME_INSN_NOP | NV_MME_INSN_BRANCH_CLASS;
-   prog->insns[3] = NV_MME_INSN_NOP | NV_MME_INSN_MERGE_CLASS;
-   prog->insns[4] = NV_MME_INSN_END;
+   /*
+    * tick100: structured stub using provisional op/imm/reg fields (still not
+    * silicon-valid ISA).  Host indirect path remains authoritative.
+    */
+   prog->insns[0] = NV_MME_INSN_OP(indexed ? NV_MME_OP_STATE_LOAD : NV_MME_OP_NOP) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   prog->insns[1] = NV_MME_INSN_OP(NV_MME_OP_ALU) | NV_MME_INSN_REG(0, 1) |
+                    NV_MME_INSN_ALU_CLASS;
+   prog->insns[2] = NV_MME_INSN_OP(NV_MME_OP_BRANCH) | NV_MME_INSN_IMM16(4) |
+                    NV_MME_INSN_BRANCH_CLASS;
+   prog->insns[3] = NV_MME_INSN_OP(NV_MME_OP_MERGE_METHOD) |
+                    NV_MME_INSN_IMM16(0x3800) | NV_MME_INSN_MERGE_CLASS;
+   prog->insns[4] = NV_MME_INSN_OP(NV_MME_OP_END); /* == NV_MME_INSN_END when op=1 */
    prog->insn_count = 5;
    prog->is_stub_end_only = true; /* not real microcode; do not enable in prod paths */
    (void)indexed;
