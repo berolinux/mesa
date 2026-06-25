@@ -2010,12 +2010,39 @@ nv_3d_emit_draw_indirect_multi_with_sema(struct nv_push *p,
       nv_3d_report_semaphore_release(p, sema_gpu_addr, sema_payload, true);
 }
 
-/** Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object). */
+/**
+ * Host channel semaphore release (NVC36F_SEMAPHORE*, any subchannel object).
+ * tick141: pass14 non-D execute modes (0x1004/1002/0804/0802) use slot-aware
+ * emit; classic 0x1001/0x1000/vdpau/open keep execute in D.
+ */
 static inline void
 nv_push_host_semaphore_release_mode(struct nv_push *p, uint64_t sema_gpu_addr,
                                     uint32_t payload, enum nv_host_sema_mode mode)
 {
+   if (nv_host_sema_execute_method(mode) != NVC36F_SEMAPHORED)
+      nv_push_sema_release_mode_slot(p, sema_gpu_addr, payload, mode);
+   else
+      nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
+}
+
+/** tick141: force classic execute-in-D even for 1004/1002/080x modes (fallback). */
+static inline void
+nv_push_host_semaphore_release_mode_classic(struct nv_push *p,
+                                            uint64_t sema_gpu_addr,
+                                            uint32_t payload,
+                                            enum nv_host_sema_mode mode)
+{
    nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
+}
+
+/** tick141: force pass14 slot-aware emit regardless of execute method. */
+static inline void
+nv_push_host_semaphore_release_mode_slot(struct nv_push *p,
+                                         uint64_t sema_gpu_addr,
+                                         uint32_t payload,
+                                         enum nv_host_sema_mode mode)
+{
+   nv_push_sema_release_mode_slot(p, sema_gpu_addr, payload, mode);
 }
 
 static inline void
@@ -2040,6 +2067,29 @@ nv_push_host_semaphore_release_wfi_mode(struct nv_push *p,
    if (with_wfi)
       nv_push_method(p, NVC36F_WFI, 0);
    nv_push_host_semaphore_release_mode(p, sema_gpu_addr, payload, mode);
+}
+
+/**
+ * tick141: WFI + sema with explicit slot/classic policy for silicon ladder.
+ * sema_emit: 0 = auto (non-D modes use slot), 1 = classic D, 2 = force slot.
+ */
+static inline void
+nv_push_host_semaphore_release_wfi_mode_ex(struct nv_push *p,
+                                           uint64_t sema_gpu_addr,
+                                           uint32_t payload, bool with_wfi,
+                                           enum nv_host_sema_mode mode,
+                                           int sema_emit)
+{
+   if (with_wfi)
+      nv_push_method(p, NVC36F_WFI, 0);
+   if (sema_emit == 1)
+      nv_push_host_semaphore_release_mode_classic(p, sema_gpu_addr, payload,
+                                                  mode);
+   else if (sema_emit == 2)
+      nv_push_host_semaphore_release_mode_slot(p, sema_gpu_addr, payload,
+                                               mode);
+   else
+      nv_push_host_semaphore_release_mode(p, sema_gpu_addr, payload, mode);
 }
 
 static inline void

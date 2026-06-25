@@ -2213,6 +2213,77 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -540;
    }
 
+   /* tick141: host sema auto/slot/classic policy; sema emit wfi_ex */
+   {
+      struct nv_push p2;
+      uint32_t g2buf[64], n2, ii;
+      bool saw_exec_c = false, saw_exec_d = false;
+      enum nv_host_sema_mode m1004 = NV_HOST_SEMA_MODE_BLOB1004_ALIGN4;
+      enum nv_host_sema_mode m1001 = NV_HOST_SEMA_MODE_BLOB_ALIGN4;
+
+      /* auto: 1004 uses slot (exec on C, pad D=0) */
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_host_semaphore_release_wfi_mode_ex(&p2, 0x800000ull, 3u, false,
+                                                 m1004, 0 /* auto */);
+      n2 = nv_push_dw_count(&p2);
+      if (n2 < 6)
+         return -541;
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         uint32_t imm = (ii + 1 < n2) ? g2buf[ii + 1] : 0;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && imm == NVC36F_SEMAPHORED_RELEASE_BLOB_1004)
+            saw_exec_c = true;
+         if (method == NVC36F_SEMAPHORED && imm == NVC36F_SEMAPHORED_RELEASE_BLOB_1004)
+            saw_exec_d = true;
+      }
+      if (!saw_exec_c)
+         return -542;
+
+      /* classic: 1004 execute only in D */
+      saw_exec_c = false;
+      saw_exec_d = false;
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_host_semaphore_release_wfi_mode_ex(&p2, 0x800000ull, 3u, false,
+                                                 m1004, 1 /* classic */);
+      n2 = nv_push_dw_count(&p2);
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         uint32_t imm = (ii + 1 < n2) ? g2buf[ii + 1] : 0;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && imm == NVC36F_SEMAPHORED_RELEASE_BLOB_1004)
+            saw_exec_c = true;
+         if (method == NVC36F_SEMAPHORED && imm == NVC36F_SEMAPHORED_RELEASE_BLOB_1004)
+            saw_exec_d = true;
+      }
+      if (!saw_exec_d || saw_exec_c)
+         return -543;
+
+      /* 1001 always execute in D regardless of emit policy */
+      saw_exec_d = false;
+      memset(g2buf, 0, sizeof(g2buf));
+      nv_push_init(&p2, g2buf, (uint32_t)(sizeof(g2buf) / 4));
+      nv_push_host_semaphore_release_mode(&p2, 0x900000ull, 1u, m1001);
+      n2 = nv_push_dw_count(&p2);
+      for (ii = 0; ii + 1 < n2; ii++) {
+         uint32_t hdr = g2buf[ii];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         uint32_t imm = (ii + 1 < n2) ? g2buf[ii + 1] : 0;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHORED && imm == NVC36F_SEMAPHORED_RELEASE_BLOB_610)
+            saw_exec_d = true;
+      }
+      if (!saw_exec_d)
+         return -544;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

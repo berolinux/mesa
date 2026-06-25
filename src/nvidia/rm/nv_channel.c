@@ -1329,6 +1329,7 @@ nv_channel_create(struct nv_rm_device *rm, uint32_t engine_type,
    ch->schedule_path = 0;
    ch->schedule_bind_rc = -1;
    ch->host_sema_mode_pref = -1;
+   ch->host_sema_emit_pref = 0; /* tick141: auto sema emit (slot for pass14 modes) */
    ch->fault_method_rc = -1;
    (void)nv_channel_try_schedule(ch);
 
@@ -2579,38 +2580,50 @@ nv_channel_g1_ce_copy_then_host_sema_submit(struct nv_channel *ch,
             if (sema_reset && sema_cpu)
                sema_cpu[0] = 0;
 
-            map = nv_channel_push_begin(ch, need);
-            if (!map)
-               return -ENOMEM;
-
-            nv_push_init(&push, map, need);
-            nv_copy_set_object(&push, cl);
-            if (launch_lines[li] == 0)
-               nv_copy_emit_buffer_copy(&push, src_gpu_addr, dst_gpu_addr,
-                                        size_bytes, 0, 0, 1);
-            else
-               nv_copy_emit_buffer_copy_launch_line(&push, src_gpu_addr,
-                                                    dst_gpu_addr, size_bytes,
-                                                    launch_lines[li]);
-            /* Host sema on subch 0 after CE methods (WFI ensures CE completes) */
-            nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-            nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr,
-                                                    sema_payload, true, sm);
-            nv_channel_push_advance(ch, nv_push_dw_count(&push));
-
-            r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
-                                            wait_timeout_ns, check_notifier);
-            if (host_sema_mode_out)
-               *host_sema_mode_out = (int)sm;
-            if (r == 0) {
-               ch->host_sema_mode_pref = (int)sm;
-               if (!ch->class_copy_bound)
-                  ch->class_copy_bound = cl;
-               return 0;
+            /* tick141: try auto sema emit, then classic D fallback for pass14 modes */
+            {
+               int emit_try[3];
+               unsigned ei, n_emit = 0;
+               int emit_pref = ch->host_sema_emit_pref;
+               emit_try[n_emit++] = (emit_pref >= 0 && emit_pref <= 2) ? emit_pref : 0;
+               if (nv_host_sema_execute_method(sm) != NVC36F_SEMAPHORED) {
+                  if (emit_try[0] != 1)
+                     emit_try[n_emit++] = 1; /* classic execute-in-D fallback */
+               }
+               for (ei = 0; ei < n_emit; ei++) {
+                  map = nv_channel_push_begin(ch, need);
+                  if (!map)
+                     return -ENOMEM;
+                  nv_push_init(&push, map, need);
+                  nv_copy_set_object(&push, cl);
+                  if (launch_lines[li] == 0)
+                     nv_copy_emit_buffer_copy(&push, src_gpu_addr, dst_gpu_addr,
+                                              size_bytes, 0, 0, 1);
+                  else
+                     nv_copy_emit_buffer_copy_launch_line(&push, src_gpu_addr,
+                                                          dst_gpu_addr, size_bytes,
+                                                          launch_lines[li]);
+                  /* Host sema after CE (WFI ensures CE completes) */
+                  nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
+                  nv_push_host_semaphore_release_wfi_mode_ex(
+                     &push, sema_gpu_addr, sema_payload, true, sm, emit_try[ei]);
+                  nv_channel_push_advance(ch, nv_push_dw_count(&push));
+                  r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                                  wait_timeout_ns, check_notifier);
+                  if (host_sema_mode_out)
+                     *host_sema_mode_out = (int)sm;
+                  if (r == 0) {
+                     ch->host_sema_mode_pref = (int)sm;
+                     ch->host_sema_emit_pref = emit_try[ei];
+                     if (!ch->class_copy_bound)
+                        ch->class_copy_bound = cl;
+                     return 0;
+                  }
+                  last = r;
+                  if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+                     return r;
+               }
             }
-            last = r;
-            if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
-               return r;
          }
       }
 
@@ -2807,9 +2820,11 @@ nv_channel_gpfifo_host_sema_submit_ex(struct nv_channel *ch,
       /* Host sema on subch 0; no engine SET_OBJECT — only GPFIFO/channel executes */
       nv_push_init(&push, map, need);
       nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-      /* WFI then sema: ensures prior segment methods complete before sema write */
-      nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr, sema_payload,
-                                              true, mode);
+      /* tick141: WFI+sema with pass14 slot/classic policy from channel sticky pref */
+      nv_push_host_semaphore_release_wfi_mode_ex(
+         &push, sema_gpu_addr, sema_payload, true, mode,
+         (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
+            ? ch->host_sema_emit_pref : 0);
       nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
       last_rc = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
@@ -3178,8 +3193,10 @@ nv_channel_g2_compute_smoke_then_host_sema_submit(struct nv_channel *ch,
                                             qmd_host, 0, 0, 0,
                                             method_invalidate);
          nv_push_set_subch(&push, NV_PUSH_SUBCH_3D);
-         nv_push_host_semaphore_release_wfi_mode(&push, sema_gpu_addr,
-                                                 sema_payload, true, sm);
+         nv_push_host_semaphore_release_wfi_mode_ex(
+            &push, sema_gpu_addr, sema_payload, true, sm,
+            (ch->host_sema_emit_pref >= 0 && ch->host_sema_emit_pref <= 2)
+               ? ch->host_sema_emit_pref : 0);
          nv_channel_push_advance(ch, nv_push_dw_count(&push));
 
          r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,

@@ -1853,10 +1853,20 @@ nvrm_cmd_emit_push_constants(struct nvrm_cmd_buffer *cmd)
    if (cmd->push_const_map)
       memcpy(cmd->push_const_map, cmd->push_const, n_dw * 4u);
    nv_push_set_subch(&cmd->push, NV_PUSH_SUBCH_3D);
-   nv_3d_upload_and_bind_push_constants(&cmd->push, addr,
-                                        cmd->push_const_bo_size ?
-                                        cmd->push_const_bo_size : 256u,
-                                        0, cmd->push_const, n_dw);
+   /*
+    * tick141 / pass14: when push_const_map is live, CPU has already written the
+    * CB BO — emit SEL_A/B/C + BIND only (no inline LOAD_CONSTANT_BUFFER).
+    * Otherwise fall back to selector + LOAD + BIND via method stream.
+    */
+   if (cmd->push_const_map)
+      nv_3d_select_and_bind_push_constants(&cmd->push, addr,
+                                           cmd->push_const_bo_size ?
+                                           cmd->push_const_bo_size : 256u);
+   else
+      nv_3d_upload_and_bind_push_constants(&cmd->push, addr,
+                                           cmd->push_const_bo_size ?
+                                           cmd->push_const_bo_size : 256u,
+                                           0, cmd->push_const, n_dw);
    cmd->push_const_dirty = false;
 }
 

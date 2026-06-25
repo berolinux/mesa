@@ -90,6 +90,8 @@ struct nv_channel {
     * -1 = unknown (try full ladder); else nv_host_sema_mode value to reuse first.
     */
    int host_sema_mode_pref;
+   /* tick141: 0=auto pass14 slot for non-D exec, 1=classic D only, 2=force slot */
+   int host_sema_emit_pref;
    /* Fault method buffer BO (optional; pass5 0xc36f0109 UPDATE_FAULT_METHOD_BUFFER) */
    struct nv_rm_bo *fault_method_bo;
    uint64_t fault_method_gpu_addr;
