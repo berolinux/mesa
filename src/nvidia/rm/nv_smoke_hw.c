@@ -340,25 +340,15 @@ nv_smoke_hw_scratch_create(struct nv_rm_device *rm,
       /* CT optional; G3 clear sema works without mapped CT for encode path */
    }
 
-   /* tick113: G3 ZETA pitch target (Z24S8, 4 Bpp, same 64x64 as CT) */
-   memset(&req, 0, sizeof(req));
-   req.width = 64;
-   req.height = 64;
-   req.pitch = 64 * 4;
-   req.size = 64 * 64 * 4;
-   req.alignment = 256;
-   req.vram = false;
-   req.cpu_access = true;
-   req.no_scanout = true;
-   req.map_gpu_va = true;
-   req.rm_type = 0; /* IMAGE/DMA default */
-   sc.zt_bo = nv_rm_bo_alloc(rm, &req);
-   if (!sc.zt_bo) {
-      req.vram = true;
-      sc.zt_bo = nv_rm_bo_alloc(rm, &req);
+   /* tick113/114: G3 ZETA via NVOS32_TYPE_DEPTH (Z24S8 pitch, 64x64) */
+   {
+      int32_t zt_pitch = 64 * 4;
+      sc.zt_bo = nv_rm_bo_alloc_depth_2d(rm, 64, 64, &zt_pitch, false, true);
+      if (!sc.zt_bo)
+         sc.zt_bo = nv_rm_bo_alloc_depth_2d(rm, 64, 64, &zt_pitch, true, true);
+      if (sc.zt_bo)
+         sc.zt_gpu = nv_rm_bo_gpu_offset(sc.zt_bo);
    }
-   if (sc.zt_bo)
-      sc.zt_gpu = nv_rm_bo_gpu_offset(sc.zt_bo);
 
    *out = sc;
    return 0;

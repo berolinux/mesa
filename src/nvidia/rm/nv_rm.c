@@ -1216,6 +1216,43 @@ nv_rm_bo_alloc_video_2d(struct nv_rm_device *dev, uint32_t width,
                             NVOS32_TYPE_VIDEO, 0);
 }
 
+struct nv_rm_bo *
+nv_rm_bo_alloc_depth_2d(struct nv_rm_device *dev, uint32_t width,
+                        uint32_t height, int32_t *pitch_inout, bool vram,
+                        bool map_gpu_va)
+{
+   struct nv_rm_bo *bo;
+   int32_t pitch = pitch_inout && *pitch_inout > 0 ? *pitch_inout
+                                                   : (int32_t)(width * 4u);
+   bool cpu = !vram;
+
+   if (!dev || !width || !height)
+      return NULL;
+
+   /* Prefer DEPTH type; STENCIL for S8-only paths; IMAGE as last resort */
+   bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
+                          NVOS32_TYPE_DEPTH, 0);
+   if (!bo)
+      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
+                             NVOS32_TYPE_STENCIL, 0);
+   if (!bo)
+      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, vram, cpu, map_gpu_va,
+                             NVOS32_TYPE_IMAGE, 0);
+   if (!bo && vram) {
+      /* virt/sysmem fallback when vidmem DEPTH rejected */
+      pitch = pitch_inout && *pitch_inout > 0 ? *pitch_inout
+                                              : (int32_t)(width * 4u);
+      bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, false, true,
+                             map_gpu_va, NVOS32_TYPE_DEPTH, 0);
+      if (!bo)
+         bo = nv_rm_bo_alloc_2d(dev, width, height, &pitch, false, true,
+                                map_gpu_va, NVOS32_TYPE_IMAGE, 0);
+   }
+   if (bo && pitch_inout)
+      *pitch_inout = nv_rm_bo_pitch(bo) ? nv_rm_bo_pitch(bo) : pitch;
+   return bo;
+}
+
 int32_t
 nv_rm_bo_pitch(const struct nv_rm_bo *bo)
 {

@@ -3198,6 +3198,59 @@ nv_nvdec_fill_frame_from_av1(struct nv_nvdec_frame_setup *fs,
    return 0;
 }
 
+/**
+ * tick114: NVDEC offset encoding helper — most *B0 classes use 256-byte units
+ * (VA >> 8).  Some newer classes may want 4K (>>12); pass unit_shift=8 or 12.
+ */
+static inline uint32_t
+nv_video_gpu_addr_to_offset_units(uint64_t gpu_addr, unsigned unit_shift)
+{
+   if (!unit_shift)
+      unit_shift = 8;
+   return (uint32_t)(gpu_addr >> unit_shift);
+}
+
+/** tick114: fill minimal H.264 pic_setup dwords for IDR/I smoke (no DPB). */
+static inline void
+nv_nvdec_pic_setup_fill_h264_intra_smoke(uint32_t *pic_dwords,
+                                         uint32_t pic_dwords_cap,
+                                         uint32_t mb_w, uint32_t mb_h,
+                                         uint32_t frame_num,
+                                         uint32_t curr_pic_idx)
+{
+   if (!pic_dwords || pic_dwords_cap < 8)
+      return;
+   memset(pic_dwords, 0, (size_t)pic_dwords_cap * sizeof(uint32_t));
+   if (!mb_w)
+      mb_w = 1;
+   if (!mb_h)
+      mb_h = 1;
+   pic_dwords[NV_H264_PS_MB_WH] = (mb_h << 16) | (mb_w & 0xffffu);
+   pic_dwords[NV_H264_PS_FRAME_NUM] = frame_num;
+   pic_dwords[NV_H264_PS_SPS_FLAGS] =
+      (100u /* High */) | (41u << 8) | (1u << 16); /* 4:2:0 */
+   pic_dwords[NV_H264_PS_PPS_FLAGS] = 1u; /* CABAC */
+   pic_dwords[NV_H264_PS_NUM_REFL0] = 0;
+   pic_dwords[NV_H264_PS_NUM_REFL1] = 0;
+   pic_dwords[NV_H264_PS_CURR_PIC_IDX] = curr_pic_idx;
+}
+
+/** tick114: NVENC pic_setup-only methods (no sema; use existing frame_kick for full slice). */
+static inline void
+nv_nvenc_emit_pic_setup_simple(struct nv_push *p, uint32_t app_id,
+                               uint32_t control_params, uint64_t pic_setup_gpu)
+{
+   if (!p)
+      return;
+   if (app_id)
+      nv_push_method(p, NV_NVENC_SET_APPLICATION_ID, app_id);
+   if (control_params)
+      nv_push_method(p, NV_NVENC_SET_CONTROL_PARAMS, control_params);
+   if (pic_setup_gpu) {
+      nv_push_method(p, NV_NVENC_SET_DRV_PIC_SETUP_OFFSET,
+                     nv_video_gpu_addr_to_offset_units(pic_setup_gpu, 8));
+   }
+}
 
 #ifdef __cplusplus
 }

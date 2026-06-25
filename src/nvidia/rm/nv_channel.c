@@ -3595,8 +3595,8 @@ nv_channel_g3_clear_rt_sema_submit(struct nv_channel *ch,
       if (nt < 12)
          tried[nt++] = c3;
 
-      /* pass 0: full RT clear; pass 1: ZT depth-only; pass 2: sema bracket */
-      for (pass = 0; pass < 3; pass++) {
+      /* pass 0: RT clear; 1: ZT depth; 2: clear+draw+ZT; 3: sema bracket */
+      for (pass = 0; pass < 4; pass++) {
          if (sema_reset && sema_cpu)
             sema_cpu[0] = 0;
 
@@ -3616,6 +3616,11 @@ nv_channel_g3_clear_rt_sema_submit(struct nv_channel *ch,
                                               depth_val, stencil_val,
                                               sema_gpu_addr, sema_payload,
                                               true);
+         else if (pass == 2)
+            nv_3d_emit_g3_clear_draw_sema_zt(
+               &push, c3, ct_gpu_addr, ct_w, ct_h, ct_format, c, zt_gpu_addr,
+               ct_w, ct_h, zt_format, 0, false, sema_gpu_addr, sema_payload,
+               true /* wfi before draw */);
          else
             nv_3d_emit_g3_sema_only_wfi_bracket(&push, c3, sema_gpu_addr,
                                                 sema_payload);

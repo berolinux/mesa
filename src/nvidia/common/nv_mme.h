@@ -606,6 +606,35 @@ nv_mme_build_clear_surface_loop_scaffold(struct nv_mme_program *prog,
    prog->is_stub_end_only = true;
 }
 
+/**
+ * tick114: draw-indirect loop scaffold using richer ALU/branch pseudo-ops plus
+ * tentative method emits for BEGIN/END (still is_stub_end_only).
+ * Host path C' remains authoritative until binary RE validates opcodes.
+ */
+static inline void
+nv_mme_build_draw_indirect_with_clear_scaffold(struct nv_mme_program *prog,
+                                               uint32_t slot,
+                                               uint32_t ram_offset,
+                                               bool indexed)
+{
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+   prog->insns[0] = NV_MME_INSN_OP(NV_MME_OP_STATE_LOAD) |
+                    NV_MME_INSN_IMM16(0) | NV_MME_INSN_STATE_LOAD_CLASS;
+   /* optional pre-draw clear via CLEAR_SURFACE pseudo */
+   prog->insns[1] = nv_mme_insn_emit_method(0x19d0u, 0);
+   prog->insns[2] = nv_mme_insn_emit_method(indexed ? 0x1620u : 0x1610u, 1);
+   prog->insns[3] = nv_mme_insn_alu_add_imm(0, -1);
+   prog->insns[4] = nv_mme_insn_branch_nz(2, 0);
+   prog->insns[5] = NV_MME_INSN_OP(NV_MME_OP_END);
+   prog->insn_count = 6;
+   prog->is_stub_end_only = true;
+   (void)indexed;
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -244,6 +244,15 @@ nv_rm_bo_alloc_video_2d(struct nv_rm_device *dev, uint32_t width,
                         uint32_t height, int32_t *pitch_inout, bool vram,
                         bool map_gpu_va);
 
+/**
+ * tick114: depth/stencil ZETA surface (NVOS32_TYPE_DEPTH, then STENCIL, IMAGE).
+ * pitch_inout: in = row pitch hint (0 = width*4); out = RM pitch when set.
+ */
+struct nv_rm_bo *
+nv_rm_bo_alloc_depth_2d(struct nv_rm_device *dev, uint32_t width,
+                        uint32_t height, int32_t *pitch_inout, bool vram,
+                        bool map_gpu_va);
+
 void
 nv_rm_bo_free(struct nv_rm_bo *bo);
 

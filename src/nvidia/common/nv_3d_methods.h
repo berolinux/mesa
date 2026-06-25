@@ -2946,6 +2946,7 @@ nv_3d_emit_g3_clear_color_sema(struct nv_push *p, uint32_t class_3d,
 /**
  * G3: colour clear + smoke triangle draw + sema (after draw). sema only on
  * final report (clear does not sema unless sema_after_clear is set).
+ * tick114: ZT-aware variant lives after nv_3d_emit_g3_bind_zeta_target below.
  */
 static inline void
 nv_3d_emit_g3_clear_draw_sema(struct nv_push *p, uint32_t class_3d,
@@ -2981,7 +2982,6 @@ nv_3d_emit_g3_clear_draw_sema(struct nv_push *p, uint32_t class_3d,
 
    nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
    nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
-   /* Draw without sema if sema_after_clear used it; else sema after draw */
    if (sema_after_clear || !sema_gpu_addr)
       nv_3d_emit_draw_vertex_array(p, 0, 3);
    else
@@ -3284,6 +3284,80 @@ nv_3d_emit_g3_clear_rt_full_sema(struct nv_push *p, uint32_t class_3d,
       zt_gpu_addr, ct_w, ct_h, zt_format ? zt_format : NVC597_SET_ZT_FORMAT_V_Z24S8,
       0, zs, depth_val, stencil_val, sema_gpu_addr, sema_payload,
       wfi_before_sema);
+}
+
+/**
+ * tick114: G3 clear (+ optional ZT/depth clear) + smoke triangle + sema.
+ * zt_gpu_addr 0: colour-only (same as nv_3d_emit_g3_clear_draw_sema).
+ * wfi_before_draw drains clear before tri; still no shaders.
+ */
+static inline void
+nv_3d_emit_g3_clear_draw_sema_zt(struct nv_push *p, uint32_t class_3d,
+                                 uint64_t ct_gpu_addr, uint32_t ct_w,
+                                 uint32_t ct_h, uint32_t ct_format,
+                                 const uint32_t color_ui[4],
+                                 uint64_t zt_gpu_addr, uint32_t zt_w,
+                                 uint32_t zt_h, uint32_t zt_format,
+                                 uint32_t zt_pitch,
+                                 bool sema_after_clear,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                 bool wfi_before_draw)
+{
+   uint32_t c[4];
+   uint64_t sema_clear = sema_after_clear ? sema_gpu_addr : 0;
+   uint32_t sema_clear_pay = sema_after_clear ? sema_payload : 0;
+   uint32_t w = ct_w ? ct_w : (zt_w ? zt_w : 1);
+   uint32_t h = ct_h ? ct_h : (zt_h ? zt_h : 1);
+   uint32_t zs = 0x100u;
+
+   if (!p)
+      return;
+   if (!zt_gpu_addr) {
+      nv_3d_emit_g3_clear_draw_sema(p, class_3d, ct_gpu_addr, ct_w, ct_h,
+                                    ct_format, color_ui, sema_after_clear,
+                                    sema_gpu_addr, sema_payload);
+      if (wfi_before_draw && sema_after_clear)
+         ; /* no-op: sema already emitted after clear; draw still ran */
+      return;
+   }
+
+   if (class_3d)
+      nv_3d_set_object(p, class_3d);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+
+   if (ct_gpu_addr)
+      nv_3d_emit_blit_dst_color_target(p, ct_gpu_addr, w, h, ct_format, false, 0);
+
+   if (!zt_format)
+      zt_format = NVC597_SET_ZT_FORMAT_V_Z24S8;
+   nv_3d_emit_g3_bind_zeta_target(p, zt_gpu_addr, zt_w ? zt_w : w,
+                                  zt_h ? zt_h : h, zt_format, zt_pitch);
+   if (zt_format == NVC597_SET_ZT_FORMAT_V_Z24S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8Z24 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_S8 ||
+       zt_format == NVC597_SET_ZT_FORMAT_V_ZF32_X24S8)
+      zs = 0x300u;
+
+   if (color_ui)
+      memcpy(c, color_ui, sizeof(c));
+   else
+      memset(c, 0, sizeof(c));
+   nv_3d_emit_clear_surface(p, 0x10, c, 0.0f, 0);
+   nv_3d_emit_clear_surface(p, zs, NULL, 1.0f, 0);
+   if (sema_clear && sema_clear_pay)
+      nv_3d_report_semaphore_release(p, sema_clear, sema_clear_pay, true);
+
+   if (wfi_before_draw)
+      nv_push_wfi(p);
+
+   nv_3d_set_primitive_topology(p, NVC597_TOPOLOGY_TRIANGLES);
+   nv_3d_set_draw_control(p, NVC597_TOPOLOGY_TRIANGLES, 1, false);
+   if (sema_after_clear || !sema_gpu_addr)
+      nv_3d_emit_draw_vertex_array(p, 0, 3);
+   else
+      nv_3d_emit_draw_vertex_array_with_sema(p, 0, 3, sema_gpu_addr,
+                                             sema_payload);
 }
 
 #ifdef __cplusplus

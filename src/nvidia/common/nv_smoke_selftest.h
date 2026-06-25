@@ -635,6 +635,40 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -316;
    }
 
+   /* tick114: clear+draw+ZT encodes ZT bind, two clears, and draw methods */
+   {
+      uint64_t zt_gpu = 0x510000ull;
+      uint32_t buf_dr[192];
+      uint32_t ndr, idr;
+      bool saw_zt = false, saw_draw_topo = false;
+      unsigned clear_n = 0;
+
+      memset(buf_dr, 0, sizeof(buf_dr));
+      nv_push_init(&p, buf_dr, (uint32_t)(sizeof(buf_dr) / 4));
+      nv_3d_emit_g3_clear_draw_sema_zt(
+         &p, NV_SMOKE_G3_CLASS_PLACEHOLDER, ct_gpu, NV_SMOKE_G3_CT_W_DEFAULT,
+         NV_SMOKE_G3_CT_H_DEFAULT, NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8,
+         color, zt_gpu, NV_SMOKE_G3_CT_W_DEFAULT, NV_SMOKE_G3_CT_H_DEFAULT,
+         NVC597_SET_ZT_FORMAT_V_Z24S8, 0, false, sema_gpu, sema_payload, true);
+      ndr = nv_push_dw_count(&p);
+      if (ndr < 20)
+         return -317;
+      for (idr = 0; idr + 1 < ndr; idr++) {
+         uint32_t hdr = buf_dr[idr];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC597_SET_ZT_B)
+            saw_zt = true;
+         if (method == NVC597_CLEAR_SURFACE)
+            clear_n++;
+         if (method == NVC597_SET_PRIMITIVE_TOPOLOGY)
+            saw_draw_topo = true;
+      }
+      if (!saw_zt || clear_n < 2 || !saw_draw_topo)
+         return -318;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
