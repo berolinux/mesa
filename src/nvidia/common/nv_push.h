@@ -63,9 +63,12 @@ extern "C" {
  * (a4498e etc), NEVER as pushbuffer sema execute. Keep open-header modes as
  * last-resort theoretical A/B only; primary is blob 0x1001, then vdpau 0x2.
  *
- * pass14 sema config table (glcore @ 0x11e30c0): structured records
+ * pass14/16/17 sema config table (glcore @ 0x11e30c0): structured records
  *   exec (0x1001/02/04, 0x0802/04) + tag_a(4/5/0) + tag_b(2/3/1) + sema_idx
- *   (0x10=A .. 0x12=C; 0x1004→C, 0x1002→B, 0x0802→A; 0x1001 primary @ +0x140).
+ *   (0x10=A .. 0x12=C; 0x1004→C, 0x1002/0804→B, 0x0802→A; 0x1001 primary @ +0x150
+ *   with sema_idx 0x1d nonstd — execute still in D for classic path).
+ * pass17 formal: exactly 11 authoritative rows (+0x10..+0x150, stride 0x20);
+ * do not implement tail noise past +0x150.  See nv_host_sema_pass17_row().
  * Slot-aware sema (execute on A/B/C not only D) is experimental; ladder below
  * still programs full ABCD with execute in D, varying only execute imm.
  *
@@ -90,6 +93,117 @@ extern "C" {
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_1004      0x00001004u
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_0804      0x00000804u
 #define NVC36F_SEMAPHORED_RELEASE_BLOB_0802      0x00000802u
+
+/*
+ * pass17 formal sema table (glcore 0x11e30c0 +0x10, stride 0x20, 11 rows).
+ * sema_idx 0x10/11/12 = A/B/C execute slot; 0x07/08/1d = nonstd (classic D).
+ */
+#define NV_HOST_SEMA_PASS17_TABLE_BASE_OFF       0x11e30c0u
+#define NV_HOST_SEMA_PASS17_ROW_STRIDE           0x20u
+#define NV_HOST_SEMA_PASS17_FIRST_ROW_OFF        0x10u
+#define NV_HOST_SEMA_PASS17_NUM_ROWS             11u
+#define NV_HOST_SEMA_PASS17_IDX_A                0x10u
+#define NV_HOST_SEMA_PASS17_IDX_B                0x11u
+#define NV_HOST_SEMA_PASS17_IDX_C                0x12u
+#define NV_HOST_SEMA_PASS17_IDX_NONSTD_07        0x07u
+#define NV_HOST_SEMA_PASS17_IDX_NONSTD_08        0x08u
+#define NV_HOST_SEMA_PASS17_IDX_PRIMARY_NONSTD   0x1du
+
+enum nv_host_sema_slot {
+   NV_HOST_SEMA_SLOT_A = 0,       /* sema_idx 0x10 / SEMAPHOREA execute */
+   NV_HOST_SEMA_SLOT_B = 1,       /* sema_idx 0x11 / SEMAPHOREB execute */
+   NV_HOST_SEMA_SLOT_C = 2,       /* sema_idx 0x12 / SEMAPHOREC execute */
+   NV_HOST_SEMA_SLOT_D = 3,       /* classic execute in SEMAPHORED */
+   NV_HOST_SEMA_SLOT_NONSTD = 4,  /* sema_idx 0x07/08/1d — treat as D path */
+};
+
+struct nv_host_sema_pass17_row {
+   uint32_t exec;      /* execute imm: 0x1004/1002/0804/0802/1001 */
+   uint8_t  tag_a;     /* 4, 5, or 0 */
+   uint8_t  tag_b;     /* 2, 3, or 1 */
+   uint8_t  sema_idx;  /* 0x10/11/12/07/08/1d */
+   uint8_t  aux;       /* often equals tag_b */
+   enum nv_host_sema_slot slot;
+};
+
+/** pass17 authoritative 11-row formal table (no tail noise). */
+static inline const struct nv_host_sema_pass17_row *
+nv_host_sema_pass17_table(unsigned *out_count)
+{
+   static const struct nv_host_sema_pass17_row k_rows[NV_HOST_SEMA_PASS17_NUM_ROWS] = {
+      /* +0x10  tag(4,2) ladder */
+      { 0x1004u, 4, 2, 0x12u, 2, NV_HOST_SEMA_SLOT_C },
+      { 0x1002u, 4, 2, 0x11u, 2, NV_HOST_SEMA_SLOT_B },
+      { 0x0804u, 4, 2, 0x11u, 2, NV_HOST_SEMA_SLOT_B },
+      { 0x0802u, 4, 2, 0x10u, 2, NV_HOST_SEMA_SLOT_A },
+      /* +0x90  tag(5,3) ladder */
+      { 0x1004u, 5, 3, 0x12u, 3, NV_HOST_SEMA_SLOT_C },
+      { 0x1002u, 5, 3, 0x11u, 3, NV_HOST_SEMA_SLOT_B },
+      { 0x0804u, 5, 3, 0x11u, 3, NV_HOST_SEMA_SLOT_B },
+      { 0x0802u, 5, 3, 0x10u, 3, NV_HOST_SEMA_SLOT_A },
+      /* +0x110 nonstd / primary nonstd */
+      { 0x1004u, 0, 1, 0x08u, 1, NV_HOST_SEMA_SLOT_NONSTD },
+      { 0x1002u, 0, 1, 0x07u, 1, NV_HOST_SEMA_SLOT_NONSTD },
+      { 0x1001u, 0, 1, 0x1du, 1, NV_HOST_SEMA_SLOT_NONSTD },
+   };
+   if (out_count)
+      *out_count = NV_HOST_SEMA_PASS17_NUM_ROWS;
+   return k_rows;
+}
+
+static inline const struct nv_host_sema_pass17_row *
+nv_host_sema_pass17_row(unsigned index)
+{
+   unsigned n = 0;
+   const struct nv_host_sema_pass17_row *t = nv_host_sema_pass17_table(&n);
+   if (index >= n)
+      return NULL;
+   return &t[index];
+}
+
+/** Map execute imm → pass17 slot (first matching row in formal table). */
+static inline enum nv_host_sema_slot
+nv_host_sema_pass17_slot_for_exec(uint32_t exec_imm)
+{
+   unsigned n = 0, i;
+   const struct nv_host_sema_pass17_row *t = nv_host_sema_pass17_table(&n);
+   for (i = 0; i < n; i++) {
+      if (t[i].exec == exec_imm)
+         return t[i].slot;
+   }
+   return NV_HOST_SEMA_SLOT_D;
+}
+
+/** Map sema_idx (0x10/11/12/1d/…) → GPFIFO sema method offset. */
+static inline uint32_t
+nv_host_sema_pass17_method_for_idx(uint8_t sema_idx)
+{
+   switch (sema_idx) {
+   case NV_HOST_SEMA_PASS17_IDX_A: return NVC36F_SEMAPHOREA;
+   case NV_HOST_SEMA_PASS17_IDX_B: return NVC36F_SEMAPHOREB;
+   case NV_HOST_SEMA_PASS17_IDX_C: return NVC36F_SEMAPHOREC;
+   case NV_HOST_SEMA_PASS17_IDX_NONSTD_07:
+   case NV_HOST_SEMA_PASS17_IDX_NONSTD_08:
+   case NV_HOST_SEMA_PASS17_IDX_PRIMARY_NONSTD:
+   default:
+      return NVC36F_SEMAPHORED;
+   }
+}
+
+/** Map pass17 slot → method offset (NONSTD/D → SEMAPHORED). */
+static inline uint32_t
+nv_host_sema_pass17_method_for_slot(enum nv_host_sema_slot slot)
+{
+   switch (slot) {
+   case NV_HOST_SEMA_SLOT_A: return NVC36F_SEMAPHOREA;
+   case NV_HOST_SEMA_SLOT_B: return NVC36F_SEMAPHOREB;
+   case NV_HOST_SEMA_SLOT_C: return NVC36F_SEMAPHOREC;
+   case NV_HOST_SEMA_SLOT_D:
+   case NV_HOST_SEMA_SLOT_NONSTD:
+   default:
+      return NVC36F_SEMAPHORED;
+   }
+}
 
 /* Host sema emit modes for silicon A/B (nv_channel_gpfifo_host_sema_submit). */
 enum nv_host_sema_mode {
@@ -404,6 +518,10 @@ static inline uint32_t
 nv_host_sema_execute_method(enum nv_host_sema_mode mode)
 {
    uint32_t exec = nv_host_sema_execute(mode);
+   enum nv_host_sema_slot slot = nv_host_sema_pass17_slot_for_exec(exec);
+   /* pass17 formal table is authoritative for known execute imms */
+   if (slot != NV_HOST_SEMA_SLOT_D && slot != NV_HOST_SEMA_SLOT_NONSTD)
+      return nv_host_sema_pass17_method_for_slot(slot);
    switch (exec) {
    case NVC36F_SEMAPHORED_RELEASE_BLOB_1004:
       return NVC36F_SEMAPHOREC; /* pass14 sema_idx 0x12 → C */
@@ -478,6 +596,31 @@ nv_push_sema_release_mode_slot(struct nv_push *p, uint64_t sema_gpu_addr,
    nv_push_method(p, exec_mthd, exec);
    if (exec_mthd != NVC36F_SEMAPHORED)
       nv_push_method(p, NVC36F_SEMAPHORED, 0);
+}
+
+/** pass17: prefer slot-aware emit for modes with formal A/B/C rows. */
+static inline bool
+nv_host_sema_pass17_prefers_slot_emit(enum nv_host_sema_mode mode)
+{
+   uint32_t exec = nv_host_sema_execute(mode);
+   enum nv_host_sema_slot s = nv_host_sema_pass17_slot_for_exec(exec);
+   return s == NV_HOST_SEMA_SLOT_A || s == NV_HOST_SEMA_SLOT_B ||
+          s == NV_HOST_SEMA_SLOT_C;
+}
+
+/**
+ * tick146 / pass17: sema release using formal table policy.
+ * Modes with A/B/C execute slots use slot-aware emit; 0x1001/nonstd/open/vdpau
+ * stay on classic execute-in-D path.
+ */
+static inline void
+nv_push_sema_release_mode_pass17(struct nv_push *p, uint64_t sema_gpu_addr,
+                                 uint32_t payload, enum nv_host_sema_mode mode)
+{
+   if (nv_host_sema_pass17_prefers_slot_emit(mode))
+      nv_push_sema_release_mode_slot(p, sema_gpu_addr, payload, mode);
+   else
+      nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
 }
 
 /* Host semaphore release (4-byte payload) at GPU sema address */

@@ -2512,6 +2512,119 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -578;
    }
 
+   /* tick146 / pass17: formal sema table; pass17 SPH 0x4c; G2 prep+QMD */
+   {
+      unsigned sema_n = 0, si;
+      const struct nv_host_sema_pass17_row *sema_t;
+      struct nv_push p17;
+      uint32_t sbuf[64], sn, sjj;
+      bool saw_exec_c = false, saw_exec_a = false;
+      struct nv_sph_blob p17_sph;
+      uint8_t sr3, sr5;
+      struct nv_qmd_desc qd17;
+      uint32_t qmd17[NV_QMD_DWORDS];
+      struct nv_push g2p;
+      uint32_t g2b[512], gn;
+
+      sema_t = nv_host_sema_pass17_table(&sema_n);
+      if (!sema_t || sema_n != NV_HOST_SEMA_PASS17_NUM_ROWS)
+         return -579;
+      /* first row: 0x1004 → C; last authoritative: 0x1001 → NONSTD/D */
+      if (sema_t[0].exec != 0x1004u || sema_t[0].sema_idx != 0x12u ||
+          sema_t[0].slot != NV_HOST_SEMA_SLOT_C)
+         return -580;
+      if (sema_t[10].exec != 0x1001u || sema_t[10].sema_idx != 0x1du ||
+          sema_t[10].slot != NV_HOST_SEMA_SLOT_NONSTD)
+         return -581;
+      if (nv_host_sema_pass17_slot_for_exec(0x1004u) != NV_HOST_SEMA_SLOT_C)
+         return -582;
+      if (nv_host_sema_pass17_slot_for_exec(0x0802u) != NV_HOST_SEMA_SLOT_A)
+         return -583;
+      if (nv_host_sema_pass17_method_for_idx(0x12u) != NVC36F_SEMAPHOREC)
+         return -584;
+      if (!nv_host_sema_pass17_prefers_slot_emit(NV_HOST_SEMA_MODE_BLOB1004_ALIGN4))
+         return -585;
+      if (nv_host_sema_pass17_prefers_slot_emit(NV_HOST_SEMA_MODE_BLOB_ALIGN4))
+         return -586; /* 0x1001 → classic D, not slot-prefer */
+
+      /* pass17 sema emit: 0x1004 should write execute on SEMAPHOREC */
+      memset(sbuf, 0, sizeof(sbuf));
+      nv_push_init(&p17, sbuf, (uint32_t)(sizeof(sbuf) / 4));
+      nv_push_set_subch(&p17, NV_PUSH_SUBCH_3D);
+      nv_push_sema_release_mode_pass17(&p17, 0x400000ull, 0x99u,
+                                       NV_HOST_SEMA_MODE_BLOB1004_ALIGN4);
+      sn = nv_push_dw_count(&p17);
+      for (sjj = 0; sjj + 1 < sn; sjj++) {
+         uint32_t hdr = sbuf[sjj];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && sbuf[sjj + 1] == 0x1004u)
+            saw_exec_c = true;
+      }
+      if (!saw_exec_c)
+         return -587;
+
+      memset(sbuf, 0, sizeof(sbuf));
+      nv_push_init(&p17, sbuf, (uint32_t)(sizeof(sbuf) / 4));
+      nv_push_set_subch(&p17, NV_PUSH_SUBCH_3D);
+      nv_push_sema_release_mode_pass17(&p17, 0x400000ull, 0x99u,
+                                       NV_HOST_SEMA_MODE_BLOB0802_ALIGN4);
+      sn = nv_push_dw_count(&p17);
+      for (sjj = 0; sjj + 1 < sn; sjj++) {
+         uint32_t hdr = sbuf[sjj];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREA && sbuf[sjj + 1] == 0x0802u)
+            saw_exec_a = true;
+      }
+      if (!saw_exec_a)
+         return -588;
+
+      /* all 11 rows have aux == tag_b and valid sema_idx set */
+      for (si = 0; si < sema_n; si++) {
+         if (sema_t[si].aux != sema_t[si].tag_b)
+            return -589;
+         if (sema_t[si].sema_idx != 0x10u && sema_t[si].sema_idx != 0x11u &&
+             sema_t[si].sema_idx != 0x12u && sema_t[si].sema_idx != 0x07u &&
+             sema_t[si].sema_idx != 0x08u && sema_t[si].sema_idx != 0x1du)
+            return -590;
+      }
+
+      nv_sph_build_compute_s2r_pass17_multi_sr_exit(&p17_sph, 0x57u, 16);
+      if (nv_sph_smoke_validate_blob(&p17_sph, NV_SPH_TYPE_COMPUTE) != 0)
+         return -591;
+      if (p17_sph.sass_dwords < 18)
+         return -592;
+      /* R3=SR0x48, R5=SR0x4c (insn indices 3,5) */
+      sr3 = (uint8_t)((p17_sph.sass[6] >> 20) & 0xffu);
+      sr5 = (uint8_t)((p17_sph.sass[10] >> 20) & 0xffu);
+      if (sr3 != 0x48u || sr5 != 0x4cu)
+         return -593;
+
+      nv_qmd_desc_init_pass17_defaults(&qd17, 0x210000ull, 0, 16,
+                                       0x310000ull, 0x43u);
+      nv_qmd_encode_full(&qd17, qmd17);
+      if (nv_qmd_get(qmd17, NV_QMD_F_SEMAPHORE_RELEASE_ENABLE0) != 1)
+         return -594;
+      if (nv_qmd_get(qmd17, NV_QMD_F_INVALIDATE_INSTRUCTION_CACHE) != 1)
+         return -595;
+
+      memset(g2b, 0, sizeof(g2b));
+      nv_push_init(&g2p, g2b, (uint32_t)(sizeof(g2b) / 4));
+      if (nv_compute_emit_g2_smoke_slice_pass17(&g2p, 0xc5c0u, 0x900000ull,
+                                                16, 0x53, 0x800000ull, NULL,
+                                                0, 0x500000ull, 0x11u,
+                                                1, 32,
+                                                NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+                                                true) != 0)
+         return -596;
+      gn = nv_push_dw_count(&g2p);
+      if (gn < 40)
+         return -597;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

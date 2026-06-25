@@ -304,6 +304,20 @@ nv_qmd_desc_init_pass16_defaults(struct nv_qmd_desc *d, uint64_t program_addr,
    }
 }
 
+/**
+ * tick146 / pass17: same as pass16 defaults.  pass17 static QMD/SPH scans still
+ * weak (x86/reloc bleed); keep mesa builders authoritative.  Alias documents
+ * pass17 mesa priority alignment with pass16 sema_release0 + invalidate.
+ */
+static inline void
+nv_qmd_desc_init_pass17_defaults(struct nv_qmd_desc *d, uint64_t program_addr,
+                                 uint32_t program_offset, uint32_t register_count,
+                                 uint64_t sema_gpu_addr, uint32_t sema_payload)
+{
+   nv_qmd_desc_init_pass16_defaults(d, program_addr, program_offset,
+                                    register_count, sema_gpu_addr, sema_payload);
+}
+
 /** Encode a QMD v02.02 descriptor into a 64-dword buffer. */
 static inline void
 nv_qmd_encode(const struct nv_qmd_desc *d, uint32_t qmd[NV_QMD_DWORDS])
@@ -1254,6 +1268,33 @@ nv_compute_emit_g2_channel_prep(struct nv_push *p, uint32_t class_compute,
 }
 
 /**
+ * tick146 / pass17: G2 channel prep aligned with pass15–17 ngrams
+ * (inv/WFI/inv) plus optional host sema release via pass17 formal policy
+ * when sema_gpu_addr != 0.  Does not launch QMD/PCAS.
+ */
+static inline void
+nv_compute_emit_g2_channel_prep_pass17(struct nv_push *p,
+                                       uint32_t class_compute,
+                                       uint8_t spa_version,
+                                       uint64_t lmem_gpu_addr,
+                                       uint32_t local_mem_low_bytes,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       enum nv_host_sema_mode sema_mode)
+{
+   if (!p)
+      return;
+   nv_compute_emit_g2_channel_prep(p, class_compute, spa_version,
+                                   lmem_gpu_addr, local_mem_low_bytes);
+   if (sema_gpu_addr) {
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+      nv_push_sema_release_mode_pass17(p, sema_gpu_addr,
+                                       sema_payload ? sema_payload : 1u,
+                                       sema_mode);
+   }
+}
+
+/**
  * tick139 / pass13 cuda n-grams: second invalidate wave after QMD/PCAS launch
  * (INV_SD / INV_TH / INV_SC family interleaved with SIG_PCAS_B in binaries).
  * Optional; safe to call after inline QMD or SEND_PCAS.
@@ -1307,6 +1348,60 @@ nv_compute_emit_g2_smoke_slice(struct nv_push *p, uint32_t class_compute,
       nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
    nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
    /* pass13: post-PCAS invalidate wave (cuda-shaped compute path) */
+   nv_compute_emit_g2_post_launch_invalidate(p);
+   return 0;
+}
+
+/**
+ * tick146 / pass17: G2 smoke slice using pass17 channel_prep (optional host
+ * sema) + pass16/17 QMD defaults (invalidate + sema_release0) + inline QMD
+ * + post-launch invalidate.  Prefer over g2_smoke_slice when exercising
+ * pass15–17 sema/QMD coherence on silicon.
+ */
+static inline int
+nv_compute_emit_g2_smoke_slice_pass17(struct nv_push *p, uint32_t class_compute,
+                                      uint64_t program_gpu_addr,
+                                      uint32_t register_count, uint8_t sass_version,
+                                      uint64_t qmd_gpu_addr, void *qmd_host,
+                                      uint64_t lmem_gpu_addr,
+                                      uint64_t sema_gpu_addr, uint32_t sema_payload,
+                                      uint32_t grid_x, uint32_t cta_x,
+                                      enum nv_host_sema_mode host_sema_mode,
+                                      bool emit_host_sema_in_prep)
+{
+   struct nv_qmd_desc d;
+   uint32_t qmd[NV_QMD_DWORDS];
+   uint8_t spa = sass_version ? sass_version : (uint8_t)0x53u;
+
+   if (!p)
+      return -1;
+
+   if (emit_host_sema_in_prep && sema_gpu_addr)
+      nv_compute_emit_g2_channel_prep_pass17(p, class_compute, spa,
+                                             lmem_gpu_addr, 256u,
+                                             sema_gpu_addr, sema_payload,
+                                             host_sema_mode);
+   else
+      nv_compute_emit_g2_channel_prep(p, class_compute, spa, lmem_gpu_addr, 256u);
+
+   nv_qmd_desc_init_pass17_defaults(&d, program_gpu_addr, 0,
+                                    register_count ? register_count : 16,
+                                    sema_gpu_addr,
+                                    sema_payload ? sema_payload : 1u);
+   d.cta_x = cta_x ? cta_x : 32;
+   d.cta_y = 1;
+   d.cta_z = 1;
+   d.grid_x = grid_x ? grid_x : 1;
+   d.grid_y = 1;
+   d.grid_z = 1;
+   d.sass_version = spa;
+   nv_qmd_materialize(&d, qmd, qmd_host);
+
+   if (class_compute)
+      nv_compute_set_object(p, class_compute);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COMPUTE);
+   nv_compute_emit_inline_qmd_launch(p, qmd_gpu_addr, qmd, true);
    nv_compute_emit_g2_post_launch_invalidate(p);
    return 0;
 }

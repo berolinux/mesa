@@ -736,6 +736,54 @@ nv_sph_build_compute_s2r_pass16_multi_sr_exit(struct nv_sph_blob *blob,
    blob->total_bytes = total;
 }
 
+/**
+ * tick146 / pass17: multi-SR SPH refined rank — SR0, 0x01, 0x03, 0x48, 0x49,
+ * 0x4c (pass17 secondary), 0x50.  Drops 0x25 for 0x4c per pass17 SR priority.
+ */
+static inline void
+nv_sph_build_compute_s2r_pass17_multi_sr_exit(struct nv_sph_blob *blob,
+                                              uint32_t imm, uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+   static const uint8_t srs[7] = { 0x00, 0x01, 0x03, 0x48, 0x49, 0x4c, 0x50 };
+   unsigned i;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   if (info.register_count < 8)
+      info.register_count = 8;
+   info.barrier_count = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+#define NV_SPH_S2R_LO(rd, sr)  ((uint32_t)(rd) | (((uint32_t)(sr) & 0xffu) << 20))
+#define NV_SPH_MOV32I_HI(rd)   (0x01000000u | ((uint32_t)(rd) & 0xffu))
+   for (i = 0; i < 7; i++) {
+      s[n++] = NV_SPH_S2R_LO((uint8_t)i, srs[i]);
+      s[n++] = NV_SPH_SASS_S2R_HI_CS;
+   }
+   s[n++] = imm ? imm : 0x57u;
+   s[n++] = NV_SPH_MOV32I_HI(7);
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_S2R_LO
+#undef NV_SPH_MOV32I_HI
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
 /*
  * SASS instruction class bases (must match nv_sass.h; duplicated here so
  * nv_sph.h stays self-contained for meta-shader builders without linking

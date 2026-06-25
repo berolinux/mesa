@@ -831,14 +831,25 @@ nv_mme_emit_channel_prime_upload_pass16(struct nv_push *p)
    return true;
 }
 
+/**
+ * tick146 / pass17: channel prime — pass16 path (scratch + RAM + 0x39e0 probe).
+ * pass17 RE reconfirmed RAM_DATA imm=0 in primary libs; no new static upload
+ * sequence; keep pass16 as production prime until live trace.
+ */
+static inline bool
+nv_mme_emit_channel_prime_upload_pass17(struct nv_push *p)
+{
+   return nv_mme_emit_channel_prime_upload_pass16(p);
+}
+
 /** tick128: channel prime — full MME table upload without CALL (stubs only). */
 static inline bool
 nv_mme_emit_channel_prime_upload_only(struct nv_push *p)
 {
    if (!p)
       return true;
-   /* tick143/145: scratch + RAM; pass16 adds 0x39e0 post-config via pass16 helper */
-   return nv_mme_emit_channel_prime_upload_pass16(p);
+   /* tick143/145/146: scratch + RAM; pass16/17 0x39e0 post-config */
+   return nv_mme_emit_channel_prime_upload_pass17(p);
 }
 
 /**
