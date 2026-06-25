@@ -4674,6 +4674,66 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
           !NV_PASS28_IMPL_G4_CHANNEL_TICK192)
          return -953;
    }
+   /* tick193: pass28 implementation audit */
+   {
+      if (!nv_pass28_implementation_audit_ok())
+         return -954;
+      if (!NV_PASS28_IMPL_AUDIT_TICK193)
+         return -955;
+      if (!NV_PASS28_IMPL_SCAFFOLD_TICK191)
+         return -956;
+      if (!NV_PASS28_IMPL_G0_G4_SYMMETRY_TICK191)
+         return -957;
+      if (!NV_PASS28_IMPL_G2_CHANNEL_TICK191)
+         return -958;
+      if (!NV_PASS28_IMPL_WIRE_COMPLETE)
+         return -959;
+      if (!NV_PASS28_RE_TRACE_SCAFFOLD_TICK193)
+         return -960;
+   }
+   /* tick193: pass29 scaffold + G0-G4 symmetry + G2 launch */
+   {
+      if (!nv_pass29_policy_ok())
+         return -961;
+      if (!NV_PASS29_RE_SCAFFOLD)
+         return -962;
+      if (!NV_PASS29_RE_INHERITS_PASS28)
+         return -963;
+      if (!nv_pass29_g0_g4_symmetry_ok())
+         return -964;
+      if (!NV_PASS29_G0_G4_SYMMETRY_TICK193)
+         return -965;
+      if (!NV_PASS29_CHANNEL_G2_LAUNCH_LADDER)
+         return -966;
+      if (!NV_PASS29_GALLIUM_VULKAN_DISPATCH_TAIL)
+         return -967;
+      {
+         struct nv_push p193;
+         uint32_t b193[256];
+         struct nv_pass21_compute_object o193;
+         memset(b193, 0, sizeof(b193));
+         nv_push_init(&p193, b193, (uint32_t)(sizeof(b193) / 4));
+         memset(&o193, 0, sizeof(o193));
+         o193.program_va = 0x500000ull;
+         o193.const_buf_va[0] = 0x510000ull;
+         o193.const_buf_size[0] = 256;
+         o193.const_buf_valid_mask = 1;
+         o193.shared_mem_size = 0;
+         o193.local_mem_size = 0;
+         o193.register_count = 16;
+         o193.grid_x = 1;
+         o193.cta_x = 32;
+         o193.qmd_sema_addr = 0x220000ull;
+         o193.qmd_sema_payload = 1;
+         o193.spa_version = 0x503;
+         if (nv_pass22_compute_object_build(&o193) != 0)
+            return -968;
+         if (nv_pass29_compute_object_emit_launch(
+                &p193, 0xc5c0u, &o193, 0x400000ull, true, 0x220000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -969;
+      }
+   }
 
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,

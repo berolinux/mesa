@@ -32,10 +32,17 @@
 | G4 NVDEC | pass17 → pass21 → pass23 → pass24 → pass25 → pass26 → pass27 → **pass28** |
 | G4 NVENC | pass17 → pass23 → pass24 → pass27 → **pass28** |
 
+## Implementation audit (tick193)
+
+- `nv_pass28_implementation_audit_ok()` validates all pass28 constants
+- `NV_PASS28_IMPL_WIRE_COMPLETE` = 1
+- `NV_PASS28_RE_TRACE_SCAFFOLD_TICK193` = 1
+- Pass29 scaffold created (inherits pass28 wire)
+
 ## Still pending
 
-1. Pass28 impl audit (tick193)
-2. Full pass28 multi-hour RE (`re_pass28/`)
-3. NIR/MME/silicon blocks unchanged
+1. Full pass28 multi-hour RE (`re_pass28/`)
+2. NIR/MME/silicon blocks unchanged
+3. Pass29 G1/G3/G4 helpers (tick194)
 
 *Pass23 deep + pass24 gpucomp interim remain primary RE measurements.*
