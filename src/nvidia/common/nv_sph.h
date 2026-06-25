@@ -785,6 +785,70 @@ nv_sph_build_compute_s2r_pass17_multi_sr_exit(struct nv_sph_blob *blob,
 }
 
 /*
+ * tick155 / pass21: compute NIR depth scaffold — pass17 multi-SR probe, then
+ * MOV32I + STG store_imm + EXIT (global store bit set).  Bridges s2r smoke
+ * and store_imm smoke into one program the QMD/SPH pipeline can upload as
+ * a single shader object (nir→sass still smoke-level, not full NIR lower).
+ */
+static inline void
+nv_sph_build_compute_s2r_store_imm_pass21(struct nv_sph_blob *blob,
+                                          uint32_t imm_value,
+                                          uint64_t store_addr,
+                                          uint16_t regs)
+{
+   struct nv_sph_info info;
+   uint32_t *s;
+   unsigned n = 0;
+   uint32_t code_off, total;
+   static const uint8_t srs[7] = { 0x00, 0x01, 0x03, 0x48, 0x49, 0x4c, 0x50 };
+   unsigned i;
+   uint32_t imm = imm_value ? imm_value : 0x57u;
+   uint32_t addr_lo, addr_hi;
+
+   if (!blob)
+      return;
+   memset(blob, 0, sizeof(*blob));
+   nv_sph_info_defaults(&info, NV_SPH_TYPE_COMPUTE);
+   info.register_count = regs ? regs : 16;
+   if (info.register_count < 8)
+      info.register_count = 8;
+   info.barrier_count = 1;
+   info.does_global_store = 1;
+   nv_sph_encode(&info, blob->sph);
+
+   s = blob->sass;
+#define NV_SPH_S2R_LO(rd, sr)  ((uint32_t)(rd) | (((uint32_t)(sr) & 0xffu) << 20))
+#define NV_SPH_MOV32I_HI(rd)   (0x01000000u | ((uint32_t)(rd) & 0xffu))
+   for (i = 0; i < 7; i++) {
+      s[n++] = NV_SPH_S2R_LO((uint8_t)i, srs[i]);
+      s[n++] = NV_SPH_SASS_S2R_HI_CS;
+   }
+   /* addr in R2/R3, imm in R1, STG [R2], R1 — mirrors nv_sph_build_compute_store_imm */
+   addr_lo = (uint32_t)(store_addr & 0xffffffffu);
+   addr_hi = (uint32_t)((store_addr >> 32) & 0xffffffffu);
+   s[n++] = addr_lo;
+   s[n++] = NV_SPH_MOV32I_HI(2);
+   s[n++] = addr_hi;
+   s[n++] = NV_SPH_MOV32I_HI(3);
+   s[n++] = imm;
+   s[n++] = NV_SPH_MOV32I_HI(1);
+   s[n++] = (0u) | ((2u & 0xffu) << 8) | ((1u & 0xffu) << 16);
+   s[n++] = NV_SPH_SASS_STG_HI;
+   s[n++] = NV_SASS_EXIT_LO;
+   s[n++] = NV_SASS_EXIT_HI;
+#undef NV_SPH_S2R_LO
+#undef NV_SPH_MOV32I_HI
+   blob->sass_dwords = n;
+
+   code_off = NV_SPH_BYTES;
+   total = code_off + blob->sass_dwords * 4;
+   if (total < NV_SPH_TOTAL_MIN_BYTES)
+      total = NV_SPH_TOTAL_MIN_BYTES;
+   total = (total + NV_SPH_CODE_ALIGN - 1) & ~(NV_SPH_CODE_ALIGN - 1);
+   blob->total_bytes = total;
+}
+
+/*
  * SASS instruction class bases (must match nv_sass.h; duplicated here so
  * nv_sph.h stays self-contained for meta-shader builders without linking
  * the compiler library into every translation unit).

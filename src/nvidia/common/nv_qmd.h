@@ -1651,6 +1651,109 @@ nv_compute_emit_g2_qmd_launch_pass17(struct nv_push *p, uint32_t class_compute,
    return 0;
 }
 
+/*
+ * tick155 / pass21: full G2 compute depth from shader program VA — build
+ * pass17 QMD (qmd sema + invalidate defaults), then emit launch with optional
+ * host sema tail via unified pass21 sema helper.  Program VA points at uploaded
+ * SPH+SASS (nv_sph_build_compute_s2r_store_imm_pass21 or pass17 multi-SR).
+ * Returns 0 on success, -1 on bad args, -2 if QMD encode fails.
+ */
+#define NV_PASS21_COMPUTE_DEFAULT_SPA        0x53u
+#define NV_PASS21_COMPUTE_DEFAULT_REGS       16u
+#define NV_PASS21_COMPUTE_DEFAULT_CTA_X      32u
+#define NV_PASS21_COMPUTE_DEFAULT_GRID_X     1u
+
+static inline int
+nv_qmd_build_pass21_compute_from_program(uint32_t qmd_out[NV_QMD_DWORDS],
+                                         uint64_t program_gpu_addr,
+                                         uint32_t register_count,
+                                         uint8_t sass_version,
+                                         uint64_t qmd_sema_gpu,
+                                         uint32_t qmd_sema_payload,
+                                         uint32_t grid_x, uint32_t cta_x)
+{
+   if (!qmd_out || !program_gpu_addr || !qmd_sema_gpu)
+      return -1;
+   return nv_qmd_build_pass17_qmd_sema_only(
+      qmd_out, program_gpu_addr,
+      register_count ? register_count : NV_PASS21_COMPUTE_DEFAULT_REGS,
+      sass_version ? sass_version : (uint8_t)NV_PASS21_COMPUTE_DEFAULT_SPA,
+      qmd_sema_gpu,
+      qmd_sema_payload ? qmd_sema_payload : 1u,
+      grid_x ? grid_x : NV_PASS21_COMPUTE_DEFAULT_GRID_X,
+      cta_x ? cta_x : NV_PASS21_COMPUTE_DEFAULT_CTA_X);
+}
+
+/**
+ * tick155: encode QMD + emit G2 launch in one call (host sema via pass21 tail).
+ * qmd_gpu_addr is the inline-QMD / PCAS target VA (where qmd_out is copied on
+ * silicon); program_gpu_addr is the SPH+SASS object in shader heap.
+ */
+static inline int
+nv_compute_emit_g2_program_launch_pass21(struct nv_push *p,
+                                         uint32_t class_compute,
+                                         uint32_t qmd_scratch[NV_QMD_DWORDS],
+                                         uint64_t program_gpu_addr,
+                                         uint64_t qmd_gpu_addr,
+                                         uint64_t lmem_gpu_addr,
+                                         uint8_t spa_version,
+                                         uint32_t register_count,
+                                         uint64_t qmd_sema_gpu,
+                                         uint32_t qmd_sema_payload,
+                                         uint32_t grid_x, uint32_t cta_x,
+                                         bool post_wfi,
+                                         uint64_t host_sema_gpu,
+                                         uint32_t host_sema_payload,
+                                         enum nv_host_sema_mode host_sema_mode)
+{
+   int qr;
+
+   if (!p || !qmd_scratch || !program_gpu_addr || !qmd_gpu_addr || !qmd_sema_gpu)
+      return -1;
+   qr = nv_qmd_build_pass21_compute_from_program(
+      qmd_scratch, program_gpu_addr, register_count, spa_version,
+      qmd_sema_gpu, qmd_sema_payload, grid_x, cta_x);
+   if (qr != 0)
+      return -2;
+   if (nv_compute_emit_g2_qmd_launch_pass17(
+          p, class_compute, qmd_scratch, qmd_gpu_addr, lmem_gpu_addr,
+          spa_version, post_wfi, 0, 0,
+          NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+      return -1;
+   if (host_sema_gpu) {
+      if (nv_push_g0_g4_host_sema_tail_pass21(
+             p, false, host_sema_gpu, host_sema_payload,
+             host_sema_mode) != 0)
+         return -1;
+   }
+   return 0;
+}
+
+/**
+ * tick155: G2 sema-only path (qmd sema, no host sema) using pass21 program
+ * builder — mirrors pass19 sema_only ladder without pass17 multi-SR in push.
+ */
+static inline int
+nv_compute_emit_g2_program_qmd_sema_only_pass21(struct nv_push *p,
+                                                uint32_t class_compute,
+                                                uint32_t qmd_scratch[NV_QMD_DWORDS],
+                                                uint64_t program_gpu_addr,
+                                                uint64_t qmd_gpu_addr,
+                                                uint64_t lmem_gpu_addr,
+                                                uint8_t spa_version,
+                                                uint32_t register_count,
+                                                uint64_t qmd_sema_gpu,
+                                                uint32_t qmd_sema_payload,
+                                                uint32_t grid_x, uint32_t cta_x,
+                                                bool post_wfi)
+{
+   return nv_compute_emit_g2_program_launch_pass21(
+      p, class_compute, qmd_scratch, program_gpu_addr, qmd_gpu_addr,
+      lmem_gpu_addr, spa_version, register_count, qmd_sema_gpu,
+      qmd_sema_payload, grid_x, cta_x, post_wfi, 0, 0,
+      NV_PASS21_HOST_SEMA_DEFAULT_MODE);
+}
+
 /** Encode smoke QMD with optional non-1x1x1 grid; returns 0 on success. */
 static inline int
 nv_qmd_build_compute_smoke_grid(uint32_t qmd_out[NV_QMD_DWORDS],

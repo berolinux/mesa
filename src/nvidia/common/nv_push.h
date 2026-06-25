@@ -623,6 +623,93 @@ nv_push_sema_release_mode_pass17(struct nv_push *p, uint64_t sema_gpu_addr,
       nv_push_sema_release_mode(p, sema_gpu_addr, payload, mode);
 }
 
+/*
+ * tick155 / pass21: unified G0–G4 host sema tail polish.
+ * All engines (aux/CE/compute/3D/video) share the same pass17 formal sema
+ * policy when emitting host sema on the GPFIFO/3D sema methods.  Default mode
+ * for channel bringup ladders is BLOB1004 (slot C execute) — matches pass17
+ * first formal row and tick147+ channel sticky default.
+ */
+#define NV_PASS21_HOST_SEMA_DEFAULT_MODE   NV_HOST_SEMA_MODE_BLOB1004_ALIGN4
+#define NV_PASS21_HOST_SEMA_DEFAULT_EXEC   0x1004u
+#define NV_PASS21_HOST_SEMA_DEFAULT_SLOT   NV_HOST_SEMA_SLOT_C
+#define NV_PASS21_G0_G4_ENGINE_COUNT       5u  /* aux, CE, compute, 3D, video */
+
+/** Engine id for G0–G4 sema ladder bookkeeping (not push subchannel). */
+enum nv_pass21_engine_id {
+   NV_PASS21_ENGINE_G0_AUX = 0,
+   NV_PASS21_ENGINE_G1_CE = 1,
+   NV_PASS21_ENGINE_G2_COMPUTE = 2,
+   NV_PASS21_ENGINE_G3_3D = 3,
+   NV_PASS21_ENGINE_G4_VIDEO = 4,
+};
+
+/**
+ * tick155: emit pass17 host sema tail on SUBCH_3D (GPFIFO sema methods),
+ * optionally preceded by WFI on the active engine subchannel.  Used uniformly
+ * by G0–G4 bringup ladders so silicon sticky sema mode is one code path.
+ * Returns 0 on success, -1 if p/sema missing.
+ */
+static inline int
+nv_push_g0_g4_host_sema_tail_pass21(struct nv_push *p,
+                                    bool pre_wfi_on_cur_subch,
+                                    uint64_t host_sema_gpu,
+                                    uint32_t host_sema_payload,
+                                    enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !host_sema_gpu)
+      return -1;
+   if (pre_wfi_on_cur_subch)
+      nv_push_method(p, NVC36F_WFI, 0);
+   nv_push_set_subch(p, NV_PUSH_SUBCH_3D);
+   nv_push_sema_release_mode_pass17(
+      p, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u,
+      host_sema_mode);
+   return 0;
+}
+
+/**
+ * tick155: recommended sema mode order for G0–G4 silicon ladders (pass17
+ * first, then classic BLOB1002/0802/1001, then open/vdpau).  Fills *out with
+ * up to max_out modes; returns count written.  sticky_pref is tried first if
+ * it appears in the canonical order (else pass17 1004 leads).
+ */
+static inline unsigned
+nv_pass21_g0_g4_sema_mode_ladder_fill(enum nv_host_sema_mode out[],
+                                      unsigned max_out,
+                                      enum nv_host_sema_mode sticky_pref)
+{
+   static const enum nv_host_sema_mode k_order[] = {
+      NV_HOST_SEMA_MODE_BLOB1004_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB1002_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB0804_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB0802_ALIGN4,
+      NV_HOST_SEMA_MODE_BLOB_ALIGN4, /* execute 0x1001 */
+      NV_HOST_SEMA_MODE_OPEN_ALIGN4,
+      NV_HOST_SEMA_MODE_VDPAU_ALIGN4,
+   };
+   unsigned n = 0, i;
+   bool sticky_in_order = false;
+
+   if (!out || !max_out)
+      return 0;
+   for (i = 0; i < sizeof(k_order) / sizeof(k_order[0]); i++) {
+      if (k_order[i] == sticky_pref) {
+         sticky_in_order = true;
+         break;
+      }
+   }
+   if (sticky_in_order && n < max_out)
+      out[n++] = sticky_pref;
+   for (i = 0; i < sizeof(k_order) / sizeof(k_order[0]) && n < max_out; i++) {
+      if (sticky_in_order && k_order[i] == sticky_pref)
+         continue;
+      out[n++] = k_order[i];
+   }
+   return n;
+}
+
 /* Host semaphore release (4-byte payload) at GPU sema address */
 static inline void
 nv_push_sema_release(struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload)

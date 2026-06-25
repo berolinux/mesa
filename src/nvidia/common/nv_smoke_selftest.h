@@ -3240,6 +3240,109 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -669;
    }
 
+   /* tick155 / pass21: G0–G4 sema ladder polish + compute NIR depth scaffold */
+   {
+      enum nv_host_sema_mode ladder[8];
+      unsigned ln, li;
+      struct nv_push tp, cp;
+      uint32_t tb[64], cb[512], ti;
+      uint32_t qmd_p21[NV_QMD_DWORDS];
+      struct nv_sph_blob sph21;
+      bool saw_host = false, saw_wfi = false;
+
+      /* pass21 sema ladder: sticky 1004 first, then 6 more = 7 total */
+      ln = nv_pass21_g0_g4_sema_mode_ladder_fill(
+         ladder, 8, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4);
+      if (ln < 7)
+         return -670;
+      if (ladder[0] != NV_HOST_SEMA_MODE_BLOB1004_ALIGN4)
+         return -671;
+      if (nv_host_sema_pass17_slot_for_exec(NV_PASS21_HOST_SEMA_DEFAULT_EXEC) !=
+          NV_PASS21_HOST_SEMA_DEFAULT_SLOT)
+         return -672;
+      if (NV_PASS21_G0_G4_ENGINE_COUNT != 5u)
+         return -673;
+
+      /* sticky non-default first */
+      ln = nv_pass21_g0_g4_sema_mode_ladder_fill(
+         ladder, 8, NV_HOST_SEMA_MODE_BLOB1002_ALIGN4);
+      if (ln < 2 || ladder[0] != NV_HOST_SEMA_MODE_BLOB1002_ALIGN4)
+         return -674;
+
+      /* host sema tail helper: WFI then SEMAPHOREC=0x1004 */
+      memset(tb, 0, sizeof(tb));
+      nv_push_init(&tp, tb, (uint32_t)(sizeof(tb) / 4));
+      nv_push_set_subch(&tp, NV_PUSH_SUBCH_COMPUTE);
+      if (nv_push_g0_g4_host_sema_tail_pass21(
+             &tp, true, 0x710000ull, 0x99u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -675;
+      ti = nv_push_dw_count(&tp);
+      if (ti < 4)
+         return -676;
+      for (li = 0; li + 1 < ti; li++) {
+         uint32_t hdr = tb[li];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_WFI)
+            saw_wfi = true;
+         if (method == NVC36F_SEMAPHOREC && tb[li + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_wfi || !saw_host)
+         return -677;
+      if (nv_push_g0_g4_host_sema_tail_pass21(&tp, false, 0, 1,
+                                              NV_PASS21_HOST_SEMA_DEFAULT_MODE) == 0)
+         return -678; /* must reject null sema */
+
+      /* pass21 SPH: s2r + store_imm depth (global store bit) */
+      nv_sph_build_compute_s2r_store_imm_pass21(&sph21, 0xdeadbeefu,
+                                                0x300000ull, 16);
+      if (nv_sph_smoke_validate_blob(&sph21, NV_SPH_TYPE_COMPUTE) != 0)
+         return -679;
+      if (!(sph21.sph[0] & (1u << 11)))
+         return -680;
+      if (sph21.sass_dwords < 20)
+         return -681;
+
+      /* pass21 QMD from program VA */
+      if (nv_qmd_build_pass21_compute_from_program(
+             qmd_p21, 0x210000ull, 16, 0x53, 0x310000ull, 0x55u, 1, 32) != 0)
+         return -682;
+      if (nv_qmd_build_pass21_compute_from_program(
+             qmd_p21, 0, 16, 0x53, 0x310000ull, 0x55u, 1, 32) == 0)
+         return -683; /* reject null program */
+
+      /* full program launch: qmd sema + host sema tail */
+      memset(cb, 0, sizeof(cb));
+      nv_push_init(&cp, cb, (uint32_t)(sizeof(cb) / 4));
+      if (nv_compute_emit_g2_program_launch_pass21(
+             &cp, 0xc5c0u, qmd_p21, 0x210000ull, 0x800000ull, 0, 0x53, 16,
+             0x310000ull, 0x55u, 1, 32, true, 0x610000ull, 0x66u,
+             NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -684;
+      if (nv_push_dw_count(&cp) <
+          nv_pass20_inline_qmd_launch_min_methods(true) + 4u)
+         return -685;
+
+      /* sema-only program path (no host sema) */
+      memset(cb, 0, sizeof(cb));
+      nv_push_init(&cp, cb, (uint32_t)(sizeof(cb) / 4));
+      if (nv_compute_emit_g2_program_qmd_sema_only_pass21(
+             &cp, 0xc5c0u, qmd_p21, 0x210000ull, 0x800000ull, 0, 0x53, 16,
+             0x310000ull, 0x55u, 1, 32, true) != 0)
+         return -686;
+      if (nv_push_dw_count(&cp) <
+          nv_pass20_inline_qmd_launch_min_methods(true))
+         return -687;
+
+      /* engine id bookkeeping sanity */
+      if ((int)NV_PASS21_ENGINE_G0_AUX != 0 ||
+          (int)NV_PASS21_ENGINE_G4_VIDEO != 4)
+         return -688;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);
