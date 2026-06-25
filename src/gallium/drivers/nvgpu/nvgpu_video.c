@@ -1010,10 +1010,15 @@ nvgpu_enc_get_feedback(struct pipe_video_codec *codec,
                                enc->app_id, &snap) == 0 && snap.valid) {
          bs_sz = snap.bitstream_size_bytes;
          if (metadata) {
-            /* pipe_enc_feedback_metadata fields vary by Mesa version; zeroed above.
-             * Populate only when we have a clear error signal from HW status. */
-            if (snap.hw_error)
-               metadata->encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+            if (snap.hw_error) {
+               metadata->encode_result =
+                  PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+            } else if (bs_sz || snap.total_bit_count || snap.picture_index) {
+               metadata->encode_result =
+                  PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_OK;
+            }
+            if (snap.avg_qp)
+               metadata->average_frame_qp = snap.avg_qp;
          }
       }
    }
