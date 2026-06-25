@@ -3198,6 +3198,48 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -663;
    }
 
+   /* tick154: G4 NVENC pass17 bringup + G2 QMD launch pass17 helper */
+   {
+      struct nv_push ep, gp;
+      uint32_t eb[256], gb[256], en, gi;
+      uint32_t qmd_pre[NV_QMD_DWORDS];
+      bool saw_host = false;
+
+      memset(eb, 0, sizeof(eb));
+      nv_push_init(&ep, eb, (uint32_t)(sizeof(eb) / 4));
+      if (nv_g4_emit_nvenc_bringup_pass17(
+             &ep, NV_VIDEO_CLASS_NVENC_C9B7, 0xa00000ull, 0xb00000ull,
+             0xc00000ull, 0xd00000ull, 64, 64, 0x910000ull, 0x88u, NULL, true,
+             NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
+         return -664;
+      en = nv_push_dw_count(&ep);
+      if (en < 4)
+         return -665;
+      for (gi = 0; gi + 1 < en; gi++) {
+         uint32_t hdr = eb[gi];
+         uint32_t method = (hdr & 0x1fff) << 2;
+         if ((hdr >> 29) != 0)
+            continue;
+         if (method == NVC36F_SEMAPHOREC && eb[gi + 1] == 0x1004u)
+            saw_host = true;
+      }
+      if (!saw_host)
+         return -666;
+
+      if (nv_qmd_build_pass17_qmd_sema_only(qmd_pre, 0x210000ull, 16, 0x53,
+                                            0x310000ull, 0x55u, 1, 32) != 0)
+         return -667;
+      memset(gb, 0, sizeof(gb));
+      nv_push_init(&gp, gb, (uint32_t)(sizeof(gb) / 4));
+      if (nv_compute_emit_g2_qmd_launch_pass17(
+             &gp, 0xc5c0u, qmd_pre, 0x800000ull, 0, 0x53, true,
+             0x610000ull, 0x66u, NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
+         return -668;
+      if (nv_push_dw_count(&gp) <
+          nv_pass20_inline_qmd_launch_min_methods(true) + 2u)
+         return -669;
+   }
+
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,
                                  &diff);

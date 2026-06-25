@@ -4426,10 +4426,21 @@ nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
       if (!map)
          return -ENOMEM;
       nv_push_init(&push, map, need);
-      if (nv_nvenc_emit_h264_smoke_slice(&push, ce, pic_setup_gpu, in_buf_gpu,
-                                         bs_buf_gpu, status_gpu, width, height,
-                                         sema_gpu_addr, sema_payload,
-                                         NULL) != 0) {
+      /* tick154: engine sema only first; pass17 host tail on timeout (NVDEC parity) */
+      if (sema_gpu_addr) {
+         if (nv_g4_emit_nvenc_bringup_pass17(
+                &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+                width, height, sema_gpu_addr, sema_payload, NULL, false,
+                (ch->host_sema_mode_pref >= 0 &&
+                 ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                   ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                   : NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0) {
+            last = -EINVAL;
+            continue;
+         }
+      } else if (nv_nvenc_emit_h264_smoke_slice(
+                    &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+                    width, height, 0, sema_payload, NULL) != 0) {
          last = -EINVAL;
          continue;
       }
@@ -4450,12 +4461,43 @@ nv_channel_nvenc_h264_smoke_slice_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
+
+      /* tick154: engine sema timed out — retry with pass17 host sema tail */
+      if (!sema_gpu_addr || !sema_cpu)
+         continue;
+      if (sema_reset)
+         sema_cpu[0] = 0;
+      map = nv_channel_push_begin(ch, need + 32);
+      if (!map)
+         return -ENOMEM;
+      nv_push_init(&push, map, need + 32);
+      if (nv_g4_emit_nvenc_bringup_pass17(
+             &push, ce, pic_setup_gpu, in_buf_gpu, bs_buf_gpu, status_gpu,
+             width, height, sema_gpu_addr, sema_payload, NULL, true,
+             (ch->host_sema_mode_pref >= 0 &&
+              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                : NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
+         continue;
+      nv_channel_push_advance(ch, nv_push_dw_count(&push));
+      r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
+                                      wait_timeout_ns, check_notifier);
+      if (r == 0) {
+         if (!ch->class_nvenc_bound)
+            ch->class_nvenc_bound = ce;
+         if (class_used_out)
+            *class_used_out = ce;
+         return 0;
+      }
+      last = r;
+      if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
+         return r;
    }
    return last;
 }
 
 /**
- * tick137: NVDEC smoke slice submit — nv_nvdec_emit_smoke_slice + sema wait.
+ * tick137/153: NVDEC smoke slice — pass17 engine sema then host tail on timeout.
  * Tries NVDEC class ladder (prefer caller / bound / CBB0..C8B0.. pass9 alts).
  */
 int
@@ -4538,8 +4580,13 @@ nv_channel_nvdec_smoke_slice_submit(struct nv_channel *ch,
          return -ENOMEM;
 
       nv_push_init(&push, map, need);
-      if (nv_nvdec_emit_smoke_slice(&push, cl, pic, sema_gpu_addr, sema_payload,
-                                    sema_cpu) != 0) {
+      /* tick153: engine sema only first; pass17 host tail on timeout below */
+      if (nv_g4_emit_nvdec_bringup_pass17(
+             &push, cl, pic, sema_gpu_addr, sema_payload, sema_cpu, false,
+             (ch->host_sema_mode_pref >= 0 &&
+              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                : NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0) {
          last = -EINVAL;
          continue;
       }
@@ -4556,101 +4603,22 @@ nv_channel_nvdec_smoke_slice_submit(struct nv_channel *ch,
       last = r;
       if (r == -EAGAIN || r == -EINVAL || r == -ENOSYS)
          return r;
-   }
-   return last;
-}
 
-/**
- * tick137: NVDEC smoke slice submit — nv_nvdec_emit_smoke_slice + sema wait.
- * Tries NVDEC class ladder (prefer caller / bound / CBB0..C8B0.. pass9 alts).
- */
-int
-nv_channel_nvdec_smoke_slice_submit(struct nv_channel *ch,
-                                    uint32_t class_nvdec,
-                                    const struct nv_nvdec_pic_setup *pic,
-                                    uint64_t sema_gpu_addr,
-                                    volatile uint32_t *sema_cpu,
-                                    uint32_t sema_payload,
-                                    bool sema_reset,
-                                    uint64_t wait_timeout_ns,
-                                    bool check_notifier,
-                                    uint32_t *class_used_out)
-{
-   struct nv_push push;
-   uint32_t *map;
-   uint32_t need = 128;
-   uint32_t classes[10];
-   unsigned n = 0, i, t, nt = 0;
-   uint32_t tried[10];
-   int pre, last = -EINVAL;
-   uint32_t cdec;
-   struct nv_nvdec_pic_setup local_pic;
-
-   if (!ch || !sema_gpu_addr)
-      return -EINVAL;
-   if (!sema_payload)
-      sema_payload = 0x42u;
-   if (class_used_out)
-      *class_used_out = 0;
-
-   pre = nv_channel_submit_preflight(ch, NULL);
-   if (pre)
-      return pre;
-
-   cdec = class_nvdec ? class_nvdec : nv_channel_resolve_class_nvdec(ch, 0);
-   if (!cdec)
-      cdec = NV_CH_FALLBACK_NVDEC;
-
-   classes[n++] = cdec;
-   if (ch->class_nvdec_bound && ch->class_nvdec_bound != cdec)
-      classes[n++] = ch->class_nvdec_bound;
-   /* pass9 / pass13 ladder alts (newest-ish first among common 610 classes) */
-   if (cdec != 0xcbb0u)
-      classes[n++] = 0xcbb0u; /* CBB0 */
-   if (cdec != NV_VIDEO_CLASS_NVDEC_C9B0)
-      classes[n++] = NV_VIDEO_CLASS_NVDEC_C9B0;
-   if (cdec != NV_VIDEO_CLASS_NVDEC_C8B0)
-      classes[n++] = NV_VIDEO_CLASS_NVDEC_C8B0;
-   if (cdec != NV_VIDEO_CLASS_NVDEC_HOPPER_C7)
-      classes[n++] = NV_VIDEO_CLASS_NVDEC_HOPPER_C7;
-   if (n > 10)
-      n = 10;
-
-   if (!pic) {
-      memset(&local_pic, 0, sizeof(local_pic));
-      local_pic.app_id = NV_NVDEC_APP_ID_H264;
-      local_pic.execute_flags = 1;
-      pic = &local_pic;
-   }
-
-   for (i = 0; i < n; i++) {
-      int r;
-      uint32_t cl = classes[i];
-      if (!cl)
-         continue;
-      for (t = 0; t < nt; t++)
-         if (tried[t] == cl)
-            break;
-      if (t < nt)
-         continue;
-      if (nt < 10)
-         tried[nt++] = cl;
-
+      /* tick153: engine sema timed out — retry with pass17 host sema tail */
       if (sema_reset && sema_cpu)
          sema_cpu[0] = 0;
-
-      map = nv_channel_push_begin(ch, need);
+      map = nv_channel_push_begin(ch, need + 32);
       if (!map)
          return -ENOMEM;
-
-      nv_push_init(&push, map, need);
-      if (nv_nvdec_emit_smoke_slice(&push, cl, pic, sema_gpu_addr, sema_payload,
-                                    sema_cpu) != 0) {
-         last = -EINVAL;
+      nv_push_init(&push, map, need + 32);
+      if (nv_g4_emit_nvdec_bringup_pass17(
+             &push, cl, pic, sema_gpu_addr, sema_payload, sema_cpu, true,
+             (ch->host_sema_mode_pref >= 0 &&
+              ch->host_sema_mode_pref < (int)NV_HOST_SEMA_MODE_COUNT)
+                ? (enum nv_host_sema_mode)ch->host_sema_mode_pref
+                : NV_HOST_SEMA_MODE_BLOB1004_ALIGN4) != 0)
          continue;
-      }
       nv_channel_push_advance(ch, nv_push_dw_count(&push));
-
       r = nv_channel_submit_wait_sema(ch, sema_cpu, sema_payload,
                                       wait_timeout_ns, check_notifier);
       if (r == 0) {
