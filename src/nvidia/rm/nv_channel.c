@@ -4418,8 +4418,13 @@ nv_channel_g2_bringup_slice_submit(struct nv_channel *ch,
             p22obj.grid_x = grid_x;
             p22obj.cta_x = cta_x;
             if (nv_pass22_compute_object_build(&p22obj) == 0) {
-               /* tick181: pass25 first when pass25 G0–G4 symmetry + policy ok */
-               if (NV_PASS25_RE_SCAFFOLD && nv_pass25_policy_ok() &&
+               /* tick185: pass26 first; tick181: pass25; then pass24/22 */
+               if (NV_PASS26_RE_SCAFFOLD && nv_pass26_policy_ok() &&
+                   nv_pass26_g0_g4_symmetry_ok())
+                  emit_ok = nv_pass26_compute_object_emit_launch(
+                     &push, cc_try, &p22obj, lmem_gpu_addr, true,
+                     sema_gpu_addr, sema_payload, hs_mode);
+               if (emit_ok != 0 && NV_PASS25_RE_SCAFFOLD && nv_pass25_policy_ok() &&
                    nv_pass25_g0_g4_symmetry_ok())
                   emit_ok = nv_pass25_compute_object_emit_launch(
                      &push, cc_try, &p22obj, lmem_gpu_addr, true,
