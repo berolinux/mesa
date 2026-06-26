@@ -33,9 +33,15 @@
 | G4 NVDEC | pass17 → pass21 → pass23 → … → pass29 → **pass30** |
 | G4 NVENC | pass17 → pass23 → pass24 → pass27 → pass28 → pass29 → **pass30** |
 
+## Implementation audit (tick197)
+
+- `nv_pass30_implementation_audit_ok()` validates all pass30 constants
+- `NV_PASS30_IMPL_WIRE_COMPLETE` = 1
+- `NV_PASS30_RE_TRACE_SCAFFOLD_TICK197` = 1
+- Pass31 scaffold created (inherits pass30 wire)
+
 ## Still pending
 
-1. Pass30 G1/G3/G4 helpers (tick196)
-2. Pass30 impl audit (tick197)
-3. Full pass30 multi-hour RE (`re_pass30/`)
-4. NIR/MME/silicon blocks unchanged
+1. Full pass30 multi-hour RE (`re_pass30/`)
+2. NIR/MME/silicon blocks unchanged
+3. Pass31 G1/G3/G4 helpers (tick198)
