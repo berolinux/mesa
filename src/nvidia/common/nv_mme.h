@@ -379,6 +379,17 @@ nv_mme64_append_group(uint32_t *insns, uint32_t insn_count,
    return insn_count + NV_MME64_DWORDS_PER_GROUP;
 }
 
+/* Method addresses in dword units for output selectors */
+#define NV_MME64_MTHD_SET_VERTEX_ID_BASE            (0x1118u >> 2) /* 0x0446 */
+#define NV_MME64_MTHD_SET_GLOBAL_BASE_INSTANCE       (0x1438u >> 2) /* 0x050E */
+#define NV_MME64_MTHD_DRAW_VTX_ARRAY_BEGIN_END_A    (0x0270u >> 2) /* 0x009C */
+#define NV_MME64_MTHD_DRAW_VTX_ARRAY_BEGIN_END_B    (0x0274u >> 2) /* 0x009D */
+#define NV_MME64_MTHD_DRAW_IDX_BUF_BEGIN_END_A      (0x0268u >> 2) /* 0x009A */
+#define NV_MME64_MTHD_DRAW_IDX_BUF_BEGIN_END_B      (0x026cu >> 2) /* 0x009B */
+
+/** True if the GPU supports MME64 (Turing+). Use these builders instead of 32-bit stubs. */
+#define NV_MME64_TURING_SUPPORTED 1
+
 /* --- End of MME64 ISA encoding section --- */
 
 struct nv_mme_program {
@@ -401,6 +412,170 @@ nv_mme_program_init_end_only(struct nv_mme_program *prog, uint32_t slot,
    prog->insns[0] = NV_MME_INSN_END;
    prog->insn_count = 1;
    prog->is_stub_end_only = true;
+}
+
+/* --- MME64 Real Indirect Draw Programs ---
+ *
+ * Build real 96-bit VLIW MME64 programs for indirect draw dispatch.
+ * Each macro reads parameters from the FIFO data queue (LOAD0/LOAD1)
+ * pushed by the host via CALL_MME_MACRO + CALL_MME_DATA, and emits
+ * 3D engine method writes via the output selectors.
+ *
+ * Data flow:
+ *   Host pushes N words via CALL_MME_MACRO(slot)=data0, CALL_MME_DATA(slot)=data1..N
+ *   MME reads them via LOAD0/LOAD1 (2 per instruction group)
+ *   MME emits method writes via Out0/Out1 (2 per group)
+ */
+
+/**
+ * Build a non-indexed indirect draw MME64 program (2 groups, 6 DWORDs).
+ *
+ * Host pushes 4 words via CALL_MME_MACRO + CALL_MME_DATA:
+ *   data0 = firstVertex      (consumed by LOAD0 in group 0)
+ *   data1 = firstInstance     (consumed by LOAD1 in group 0)
+ *   data2 = start vertex      (consumed by LOAD0 in group 1)
+ *   data3 = vertexCount       (consumed by LOAD1 in group 1)
+ *
+ * Group 0 emits:
+ *   SET_VERTEX_ID_BASE(0x1118) = firstVertex
+ *   SET_GLOBAL_BASE_INSTANCE_INDEX(0x1438) = firstInstance
+ *
+ * Group 1 emits + terminates:
+ *   DRAW_VERTEX_ARRAY_BEGIN_END_A(0x0270) = start
+ *   DRAW_VERTEX_ARRAY_BEGIN_END_B(0x0274) = vertexCount
+ */
+static inline void
+nv_mme64_build_draw_indirect(struct nv_mme_program *prog,
+                             uint32_t slot, uint32_t ram_offset)
+{
+   struct nv_mme64_group g;
+   uint32_t n;
+
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+
+   /* Group 0: read firstVertex+firstInstance, emit SET_VERTEX_ID_BASE + SET_GLOBAL_BASE_INSTANCE */
+   g = nv_mme64_encode(
+      false, NV_MME64_PRED_UUUU, NV_MME64_REG_R0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R1, NV_MME64_REG_LOAD0, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_SET_VERTEX_ID_BASE,
+      NV_MME64_OP_ADD, NV_MME64_REG_R2, NV_MME64_REG_LOAD1, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_SET_GLOBAL_BASE_INSTANCE,
+      NV_MME64_OUT_IMMED0, NV_MME64_OUT_ALU0,
+      NV_MME64_OUT_IMMED1, NV_MME64_OUT_ALU1);
+   n = nv_mme64_append_group(prog->insns, 0, NV_MME_MAX_INSNS_PER_MACRO, &g);
+
+   /* Group 1: read start+count, emit DRAW_VERTEX_ARRAY_BEGIN_END_A/B, terminate */
+   g = nv_mme64_encode(
+      true, NV_MME64_PRED_UUUU, NV_MME64_REG_R0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R3, NV_MME64_REG_LOAD0, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_DRAW_VTX_ARRAY_BEGIN_END_A,
+      NV_MME64_OP_ADD, NV_MME64_REG_R4, NV_MME64_REG_LOAD1, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_DRAW_VTX_ARRAY_BEGIN_END_B,
+      NV_MME64_OUT_IMMED0, NV_MME64_OUT_ALU0,
+      NV_MME64_OUT_IMMED1, NV_MME64_OUT_ALU1);
+   n = nv_mme64_append_group(prog->insns, n, NV_MME_MAX_INSNS_PER_MACRO, &g);
+
+   prog->insn_count = n;
+   prog->is_stub_end_only = false; /* REAL program — path C can use this */
+}
+
+/**
+ * Build an indexed indirect draw MME64 program (2 groups, 6 DWORDs).
+ *
+ * Host pushes 4 words via CALL_MME_MACRO + CALL_MME_DATA:
+ *   data0 = baseVertex       (consumed by LOAD0 in group 0)
+ *   data1 = firstInstance     (consumed by LOAD1 in group 0)
+ *   data2 = firstIndex        (consumed by LOAD0 in group 1)
+ *   data3 = indexCount         (consumed by LOAD1 in group 1)
+ *
+ * Group 0 emits:
+ *   SET_VERTEX_ID_BASE(0x1118) = baseVertex
+ *   SET_GLOBAL_BASE_INSTANCE_INDEX(0x1438) = firstInstance
+ *
+ * Group 1 emits + terminates:
+ *   DRAW_INDEX_BUFFER_BEGIN_END_A(0x0268) = firstIndex
+ *   DRAW_INDEX_BUFFER_BEGIN_END_B(0x026c) = indexCount
+ */
+static inline void
+nv_mme64_build_draw_indexed_indirect(struct nv_mme_program *prog,
+                                     uint32_t slot, uint32_t ram_offset)
+{
+   struct nv_mme64_group g;
+   uint32_t n;
+
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+
+   /* Group 0: read baseVertex+firstInstance, emit SET_VERTEX_ID_BASE + SET_GLOBAL_BASE_INSTANCE */
+   g = nv_mme64_encode(
+      false, NV_MME64_PRED_UUUU, NV_MME64_REG_R0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R1, NV_MME64_REG_LOAD0, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_SET_VERTEX_ID_BASE,
+      NV_MME64_OP_ADD, NV_MME64_REG_R2, NV_MME64_REG_LOAD1, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_SET_GLOBAL_BASE_INSTANCE,
+      NV_MME64_OUT_IMMED0, NV_MME64_OUT_ALU0,
+      NV_MME64_OUT_IMMED1, NV_MME64_OUT_ALU1);
+   n = nv_mme64_append_group(prog->insns, 0, NV_MME_MAX_INSNS_PER_MACRO, &g);
+
+   /* Group 1: read firstIndex+indexCount, emit DRAW_INDEX_BUFFER_BEGIN_END_A/B, terminate */
+   g = nv_mme64_encode(
+      true, NV_MME64_PRED_UUUU, NV_MME64_REG_R0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R3, NV_MME64_REG_LOAD0, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_DRAW_IDX_BUF_BEGIN_END_A,
+      NV_MME64_OP_ADD, NV_MME64_REG_R4, NV_MME64_REG_LOAD1, NV_MME64_REG_ZERO,
+      (uint16_t)NV_MME64_MTHD_DRAW_IDX_BUF_BEGIN_END_B,
+      NV_MME64_OUT_IMMED0, NV_MME64_OUT_ALU0,
+      NV_MME64_OUT_IMMED1, NV_MME64_OUT_ALU1);
+   n = nv_mme64_append_group(prog->insns, n, NV_MME_MAX_INSNS_PER_MACRO, &g);
+
+   prog->insn_count = n;
+   prog->is_stub_end_only = false; /* REAL program — path C can use this */
+}
+
+/**
+ * Build a proper MME64 END-only program (1 group = 3 DWORDs).
+ * Replaces the old 32-bit END stub with a correct 96-bit NOP+END group.
+ */
+static inline void
+nv_mme64_build_end_only(struct nv_mme_program *prog,
+                        uint32_t slot, uint32_t ram_offset)
+{
+   struct nv_mme64_group g;
+
+   if (!prog)
+      return;
+   memset(prog, 0, sizeof(*prog));
+   prog->slot = slot;
+   prog->ram_offset = ram_offset;
+   g = nv_mme64_nop(true);
+   prog->insn_count = nv_mme64_append_group(prog->insns, 0,
+                                             NV_MME_MAX_INSNS_PER_MACRO, &g);
+   prog->is_stub_end_only = true;
+}
+
+/**
+ * Build real MME64 indirect draw programs (non-indexed slot 0, indexed slot 1).
+ * These are REAL programs that emit actual 3D method writes.
+ * Returns number of programs filled (2).
+ */
+static inline unsigned
+nv_mme64_build_indirect_draw_programs(struct nv_mme_program progs[NV_MME_SLOT_COUNT])
+{
+   if (!progs)
+      return 0;
+   nv_mme64_build_draw_indirect(&progs[NV_MME_SLOT_DRAW_INDIRECT],
+                                NV_MME_SLOT_DRAW_INDIRECT, 0);
+   nv_mme64_build_draw_indexed_indirect(&progs[NV_MME_SLOT_DRAW_INDEXED_INDIRECT],
+                                        NV_MME_SLOT_DRAW_INDEXED_INDIRECT,
+                                        NV_MME_RAM_SLOT_STRIDE);
+   return NV_MME_SLOT_COUNT;
 }
 
 /**
