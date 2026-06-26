@@ -147,7 +147,239 @@ extern "C" {
 
 /* Instruction RAM layout: each macro gets a dedicated region */
 #define NV_MME_RAM_SLOT_STRIDE               16  /* dwords per macro region */
-#define NV_MME_MAX_INSNS_PER_MACRO           16
+#define NV_MME_MAX_INSNS_PER_MACRO           48  /* 16 groups × 3 DWORDs for MME64 */
+
+/* ======================================================================
+ * MME64 ISA — Turing+ 96-bit VLIW Instruction Encoding
+ *
+ * From open-gpu-doc/MME-MacroMethodExpander/tu104/ (MIT-licensed).
+ * Each instruction group is 96 bits = 3 × 32-bit words, uploaded MSB first.
+ * Contains: 2 ALU operations + 2 output operations + predication + end flag.
+ *
+ * Word ordering for LOAD_MME_INSTRUCTION_RAM:
+ *   word[0] = HIGH (bits 95:64)   — uploaded first
+ *   word[1] = MID  (bits 63:32)
+ *   word[2] = LOW  (bits 31:0)    — uploaded last
+ * ====================================================================== */
+
+#define NV_MME64_DWORDS_PER_GROUP  3
+#define NV_MME64_MAX_GROUPS        16
+
+/* --- ALU Opcodes (5-bit, from open-gpu-doc tu104/op.h) --- */
+#define NV_MME64_OP_ADD       0
+#define NV_MME64_OP_ADDC      1
+#define NV_MME64_OP_SUB       2
+#define NV_MME64_OP_SUBB      3
+#define NV_MME64_OP_MUL       4
+#define NV_MME64_OP_MULH      5
+#define NV_MME64_OP_MULU      6
+#define NV_MME64_OP_EXTENDED  7
+#define NV_MME64_OP_CLZ       8
+#define NV_MME64_OP_SLL       9
+#define NV_MME64_OP_SRL       10
+#define NV_MME64_OP_SRA       11
+#define NV_MME64_OP_AND       12
+#define NV_MME64_OP_NAND      13
+#define NV_MME64_OP_OR        14
+#define NV_MME64_OP_XOR       15
+#define NV_MME64_OP_MERGE     16
+#define NV_MME64_OP_SLT       17
+#define NV_MME64_OP_SLTU      18
+#define NV_MME64_OP_SLE       19
+#define NV_MME64_OP_SLEU      20
+#define NV_MME64_OP_SEQ       21
+#define NV_MME64_OP_STATE     22
+#define NV_MME64_OP_LOOP      23
+#define NV_MME64_OP_JAL       24
+#define NV_MME64_OP_BLT       25
+#define NV_MME64_OP_BLTU      26
+#define NV_MME64_OP_BLE       27
+#define NV_MME64_OP_BLEU      28
+#define NV_MME64_OP_BEQ       29
+#define NV_MME64_OP_DREAD     30
+#define NV_MME64_OP_DWRITE    31
+#define NV_MME64_OP_COUNT     32
+#define NV_MME64_OP_BITS      5
+
+/* --- Registers (5-bit, from open-gpu-doc tu104/reg.h) --- */
+#define NV_MME64_REG_R0        0
+#define NV_MME64_REG_R1        1
+#define NV_MME64_REG_R2        2
+#define NV_MME64_REG_R3        3
+#define NV_MME64_REG_R4        4
+#define NV_MME64_REG_R5        5
+#define NV_MME64_REG_R6        6
+#define NV_MME64_REG_R7        7
+#define NV_MME64_REG_R8        8
+#define NV_MME64_REG_R9        9
+#define NV_MME64_REG_R10       10
+#define NV_MME64_REG_R11       11
+#define NV_MME64_REG_R12       12
+#define NV_MME64_REG_R13       13
+#define NV_MME64_REG_R14       14
+#define NV_MME64_REG_R15       15
+#define NV_MME64_REG_R16       16
+#define NV_MME64_REG_R17       17
+#define NV_MME64_REG_R18       18
+#define NV_MME64_REG_R19       19
+#define NV_MME64_REG_R20       20
+#define NV_MME64_REG_R21       21
+#define NV_MME64_REG_R22       22
+#define NV_MME64_REG_R23       23
+#define NV_MME64_REG_ZERO      24
+#define NV_MME64_REG_IMMED     25
+#define NV_MME64_REG_IMMEDPAIR 26
+#define NV_MME64_REG_IMMED32   27
+#define NV_MME64_REG_LOAD0     28
+#define NV_MME64_REG_LOAD1     29
+#define NV_MME64_REG_COUNT     30
+#define NV_MME64_REG_BITS      5
+
+/* --- Output Selectors (method: 3-bit, emit: 4-bit, from tu104/out.h) --- */
+#define NV_MME64_OUT_NONE       0
+#define NV_MME64_OUT_ALU0       1
+#define NV_MME64_OUT_ALU1       2
+#define NV_MME64_OUT_LOAD0      3
+#define NV_MME64_OUT_LOAD1      4
+#define NV_MME64_OUT_IMMED0     5
+#define NV_MME64_OUT_IMMED1     6
+#define NV_MME64_OUT_RESERVED   7
+#define NV_MME64_OUT_IMMEDHIGH0 8
+#define NV_MME64_OUT_IMMEDHIGH1 9
+#define NV_MME64_OUT_IMMED32_0  10
+#define NV_MME64_OUT_METHOD_BITS 3
+#define NV_MME64_OUT_EMIT_BITS   4
+
+/* --- Predicate Modes (4-bit, from tu104/pred.h) --- */
+#define NV_MME64_PRED_UUUU  0   /* unconditional all */
+#define NV_MME64_PRED_TTTT  1   /* all if true */
+#define NV_MME64_PRED_FFFF  2   /* all if false */
+#define NV_MME64_PRED_TTUU  3   /* ALUs if true */
+#define NV_MME64_PRED_FFUU  4   /* ALUs if false */
+#define NV_MME64_PRED_TFUU  5   /* ALU0 if true, ALU1 if false */
+#define NV_MME64_PRED_TUUU  6   /* ALU0 if true */
+#define NV_MME64_PRED_FUUU  7   /* ALU0 if false */
+#define NV_MME64_PRED_UUTT  8   /* outputs if true */
+#define NV_MME64_PRED_UUTF  9   /* out0 if true, out1 if false */
+#define NV_MME64_PRED_UUTU  10  /* out0 if true */
+#define NV_MME64_PRED_UUFT  11  /* out0 if false, out1 if true */
+#define NV_MME64_PRED_UUFF  12  /* outputs if false */
+#define NV_MME64_PRED_UUFU  13  /* out0 if false */
+#define NV_MME64_PRED_UUUT  14  /* out1 if true */
+#define NV_MME64_PRED_UUUF  15  /* out1 if false */
+#define NV_MME64_PRED_BITS  4
+
+/* --- 96-bit Instruction Group Bit Layout (from tu104/MME64Group_init.cpp) ---
+ *
+ * | Field        | Bits   | Width | Description                    |
+ * |--------------|--------|-------|--------------------------------|
+ * | endNext      | 0      | 1     | Terminate after this group     |
+ * | predMode     | 4:1    | 4     | Predicate mode                 |
+ * | pred         | 9:5    | 5     | Predicate register             |
+ * | ALU0.op      | 14:10  | 5     | First ALU opcode               |
+ * | ALU0.dst     | 19:15  | 5     | First ALU dest register        |
+ * | ALU0.src0    | 24:20  | 5     | First ALU source 0             |
+ * | ALU0.src1    | 29:25  | 5     | First ALU source 1             |
+ * | ALU0.immed   | 45:30  | 16    | First immediate                |
+ * | ALU1.op      | 50:46  | 5     | Second ALU opcode              |
+ * | ALU1.dst     | 55:51  | 5     | Second ALU dest register       |
+ * | ALU1.src0    | 60:56  | 5     | Second ALU source 0            |
+ * | ALU1.src1    | 65:61  | 5     | Second ALU source 1            |
+ * | ALU1.immed   | 81:66  | 16    | Second immediate               |
+ * | Out0.method  | 84:82  | 3     | Output 0 method select         |
+ * | Out0.emit    | 88:85  | 4     | Output 0 emit select           |
+ * | Out1.method  | 91:89  | 3     | Output 1 method select         |
+ * | Out1.emit    | 95:92  | 4     | Output 1 emit select           |
+ */
+
+struct nv_mme64_group {
+   uint32_t w[3]; /* w[0]=HIGH(95:64), w[1]=MID(63:32), w[2]=LOW(31:0) */
+};
+
+/* Insert a value at bit position [hi:lo] in the 96-bit group.
+ * Field must not exceed 32 bits. Handles cross-word boundaries. */
+static inline void
+nv_mme64_insert(struct nv_mme64_group *g, unsigned hi, unsigned lo,
+                uint32_t val)
+{
+   unsigned width = hi - lo + 1;
+   uint32_t mask = (width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u);
+   unsigned lo_word, lo_bit, hi_word, bits_lo;
+
+   val &= mask;
+   lo_word = 2u - (lo / 32u);
+   lo_bit  = lo % 32u;
+   hi_word = 2u - (hi / 32u);
+
+   if (lo_word == hi_word) {
+      g->w[lo_word] |= (val << lo_bit);
+   } else {
+      bits_lo = 32u - lo_bit;
+      g->w[lo_word] |= (val << lo_bit);
+      g->w[hi_word] |= (val >> bits_lo);
+   }
+}
+
+/* Encode one complete MME64 instruction group into 3 DWORDs. */
+static inline struct nv_mme64_group
+nv_mme64_encode(bool end_next, uint32_t pred_mode, uint32_t pred_reg,
+                /* ALU0 */ uint32_t alu0_op, uint32_t alu0_dst,
+                uint32_t alu0_src0, uint32_t alu0_src1, uint16_t alu0_imm,
+                /* ALU1 */ uint32_t alu1_op, uint32_t alu1_dst,
+                uint32_t alu1_src0, uint32_t alu1_src1, uint16_t alu1_imm,
+                /* Out0 */ uint32_t out0_method, uint32_t out0_emit,
+                /* Out1 */ uint32_t out1_method, uint32_t out1_emit)
+{
+   struct nv_mme64_group g;
+   memset(&g, 0, sizeof(g));
+
+   nv_mme64_insert(&g,  0,  0, end_next ? 1u : 0u);
+   nv_mme64_insert(&g,  4,  1, pred_mode);
+   nv_mme64_insert(&g,  9,  5, pred_reg);
+   nv_mme64_insert(&g, 14, 10, alu0_op);
+   nv_mme64_insert(&g, 19, 15, alu0_dst);
+   nv_mme64_insert(&g, 24, 20, alu0_src0);
+   nv_mme64_insert(&g, 29, 25, alu0_src1);
+   nv_mme64_insert(&g, 45, 30, (uint32_t)alu0_imm);
+   nv_mme64_insert(&g, 50, 46, alu1_op);
+   nv_mme64_insert(&g, 55, 51, alu1_dst);
+   nv_mme64_insert(&g, 60, 56, alu1_src0);
+   nv_mme64_insert(&g, 65, 61, alu1_src1);
+   nv_mme64_insert(&g, 81, 66, (uint32_t)alu1_imm);
+   nv_mme64_insert(&g, 84, 82, out0_method);
+   nv_mme64_insert(&g, 88, 85, out0_emit);
+   nv_mme64_insert(&g, 91, 89, out1_method);
+   nv_mme64_insert(&g, 95, 92, out1_emit);
+   return g;
+}
+
+/* Convenience: NOP group (ADD ZERO,ZERO,ZERO on both ALUs, no outputs). */
+static inline struct nv_mme64_group
+nv_mme64_nop(bool end_next)
+{
+   return nv_mme64_encode(
+      end_next, NV_MME64_PRED_UUUU, NV_MME64_REG_R0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R0, NV_MME64_REG_ZERO, NV_MME64_REG_ZERO, 0,
+      NV_MME64_OP_ADD, NV_MME64_REG_R0, NV_MME64_REG_ZERO, NV_MME64_REG_ZERO, 0,
+      NV_MME64_OUT_NONE, NV_MME64_OUT_NONE,
+      NV_MME64_OUT_NONE, NV_MME64_OUT_NONE);
+}
+
+/* Append an instruction group's 3 DWORDs to a program's insn array.
+ * Returns new insn_count, or 0 if overflow. */
+static inline uint32_t
+nv_mme64_append_group(uint32_t *insns, uint32_t insn_count,
+                      uint32_t max_insns, const struct nv_mme64_group *g)
+{
+   if (insn_count + NV_MME64_DWORDS_PER_GROUP > max_insns)
+      return 0;
+   insns[insn_count + 0] = g->w[0]; /* HIGH — uploaded first */
+   insns[insn_count + 1] = g->w[1]; /* MID */
+   insns[insn_count + 2] = g->w[2]; /* LOW — uploaded last */
+   return insn_count + NV_MME64_DWORDS_PER_GROUP;
+}
+
+/* --- End of MME64 ISA encoding section --- */
 
 struct nv_mme_program {
    uint32_t slot;                         /* macro index / start-address slot */
