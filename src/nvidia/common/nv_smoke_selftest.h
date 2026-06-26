@@ -4734,6 +4734,37 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
             return -969;
       }
    }
+   /* tick194: pass29 G1/G3/G4 helpers */
+   {
+      struct nv_push p194;
+      uint32_t b194[128];
+      memset(b194, 0, sizeof(b194));
+      nv_push_init(&p194, b194, (uint32_t)(sizeof(b194) / 4));
+      if (nv_g1_emit_copy_then_host_sema_pass29(
+             &p194, 0xc5b5u, 0x1000ull, 0x2000ull, 64u, false, true,
+             0x6a0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -970;
+      if (nv_push_dw_count(&p194) < 8u)
+         return -971;
+   }
+   {
+      struct nv_push p194g3;
+      uint32_t b194g3[128];
+      memset(b194g3, 0, sizeof(b194g3));
+      nv_push_init(&p194g3, b194g3, (uint32_t)(sizeof(b194g3) / 4));
+      if (nv_3d_emit_g3_barrier_all_pass29(
+             &p194g3, 0x6b0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+         return -972;
+      if (nv_3d_emit_g3_inv_wfi_host_sema_pass29(
+             &p194g3, 0x6b0000ull, 1u, NV_PASS21_HOST_SEMA_DEFAULT_MODE,
+             true) != 0)
+         return -973;
+   }
+   if (!NV_PASS29_IMPL_G1_G3_G4_TICK194 ||
+       !NV_PASS29_IMPL_G1_CHANNEL_TICK194 ||
+       !NV_PASS29_IMPL_G3_CHANNEL_TICK194 ||
+       !NV_PASS29_IMPL_G4_CHANNEL_TICK194)
+      return -974;
 
    if (trace_push && trace_dwords) {
       r = nv_trace_compare_bytes(buf, n * 4u, trace_push, trace_dwords * 4u,

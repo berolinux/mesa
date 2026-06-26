@@ -4378,6 +4378,43 @@ nv_g4_emit_nvenc_bringup_pass28(struct nv_push *p, uint32_t class_nvenc,
                                           add_host_sema_tail, host_sema_mode);
 }
 
+/**
+ * tick194 / pass29: G4 NVDEC bringup with pass29 host sema tail.
+ */
+static inline int
+nv_g4_emit_nvdec_bringup_pass29(struct nv_push *p, uint32_t class_nvdec,
+                                const struct nv_nvdec_pic_setup *pic,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass29_policy_ok() && NV_PASS29_RE_INHERITS_PASS28)
+      return -1;
+   return nv_g4_emit_nvdec_bringup_pass28(p, class_nvdec, pic, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
+
+static inline int
+nv_g4_emit_nvenc_bringup_pass29(struct nv_push *p, uint32_t class_nvenc,
+                                uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                                uint64_t bitstream_gpu, uint64_t status_gpu,
+                                uint32_t width, uint32_t height,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass29_policy_ok() && NV_PASS29_RE_INHERITS_PASS28)
+      return -1;
+   return nv_g4_emit_nvenc_bringup_pass28(p, class_nvenc, pic_setup_gpu,
+                                          input_yuv_gpu, bitstream_gpu,
+                                          status_gpu, width, height, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
+
 #ifdef __cplusplus
 }
 #endif

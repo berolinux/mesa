@@ -269,6 +269,11 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS29_RE_PATH_C_STILL_GATED          NV_PASS28_RE_PATH_C_STILL_GATED
 #define NV_PASS29_RE_FULL_DISASM_PENDING         1
 #define NV_PASS29_IMPL_INHERITS_PASS28_WIRE      NV_PASS28_IMPL_WIRE_COMPLETE
+/* tick194: pass29 G1/G3/G4 bringup helpers wired */
+#define NV_PASS29_IMPL_G1_G3_G4_TICK194          1
+#define NV_PASS29_IMPL_G1_CHANNEL_TICK194        1
+#define NV_PASS29_IMPL_G3_CHANNEL_TICK194        1
+#define NV_PASS29_IMPL_G4_CHANNEL_TICK194        1
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
