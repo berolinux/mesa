@@ -1680,6 +1680,43 @@ nv_pass29_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
 #define NV_PASS29_CHANNEL_G2_LAUNCH_LADDER     1
 #define NV_PASS29_GALLIUM_VULKAN_DISPATCH_TAIL 1
 
+/**
+ * tick195 / pass30: compute object emit + dispatch tail — inherits pass29.
+ */
+static inline int
+nv_pass30_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
+                                     const struct nv_pass21_compute_object *obj,
+                                     uint64_t lmem_gpu, bool post_inv,
+                                     uint64_t host_sema_gpu,
+                                     uint32_t host_sema_payload,
+                                     enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass30_policy_ok())
+      return -1;
+   if (!nv_pass30_g0_g4_symmetry_ok())
+      return -1;
+   return nv_pass29_compute_object_emit_launch(p, class_compute, obj,
+                                               lmem_gpu, post_inv,
+                                               host_sema_gpu, host_sema_payload,
+                                               host_sema_mode);
+}
+
+static inline int
+nv_pass30_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
+                                               uint64_t host_sema_gpu,
+                                               uint32_t host_sema_payload,
+                                               enum nv_host_sema_mode host_sema_mode,
+                                               bool pre_wfi)
+{
+   if (!nv_pass30_policy_ok())
+      return 0;
+   return nv_pass29_emit_compute_dispatch_host_sema_tail(
+      p, host_sema_gpu, host_sema_payload, host_sema_mode, pre_wfi);
+}
+
+#define NV_PASS30_CHANNEL_G2_LAUNCH_LADDER     1
+#define NV_PASS30_GALLIUM_VULKAN_DISPATCH_TAIL 1
+
 #ifdef __cplusplus
 }
 #endif

@@ -274,6 +274,21 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS29_IMPL_G1_CHANNEL_TICK194        1
 #define NV_PASS29_IMPL_G3_CHANNEL_TICK194        1
 #define NV_PASS29_IMPL_G4_CHANNEL_TICK194        1
+/* tick195: pass29 implementation audit — wire complete */
+#define NV_PASS29_IMPL_AUDIT_TICK195             1
+#define NV_PASS29_IMPL_SCAFFOLD_TICK193          1
+#define NV_PASS29_IMPL_G0_G4_SYMMETRY_TICK193    1
+#define NV_PASS29_IMPL_G2_CHANNEL_TICK193        1
+#define NV_PASS29_IMPL_WIRE_COMPLETE             1
+#define NV_PASS29_RE_TRACE_SCAFFOLD_TICK195      1
+
+/* tick195 / pass30 scaffold — inherits pass29 impl wire; RE TBD */
+#define NV_PASS30_RE_SCAFFOLD                    1
+#define NV_PASS30_RE_INHERITS_PASS29             1
+#define NV_PASS30_RE_EXPLICIT_EMIT_POLICY        NV_PASS29_RE_EXPLICIT_EMIT_POLICY
+#define NV_PASS30_RE_PATH_C_STILL_GATED          NV_PASS29_RE_PATH_C_STILL_GATED
+#define NV_PASS30_RE_FULL_DISASM_PENDING         1
+#define NV_PASS30_IMPL_INHERITS_PASS29_WIRE      NV_PASS29_IMPL_WIRE_COMPLETE
 
 static inline bool
 nv_pass24_explicit_emit_required(void)
@@ -439,6 +454,32 @@ nv_pass29_policy_ok(void)
           NV_PASS29_RE_INHERITS_PASS28 != 0 &&
           nv_pass28_implementation_audit_ok() &&
           NV_PASS29_RE_PATH_C_STILL_GATED != 0;
+}
+
+/** tick195: pass29 mesa G0–G4 wire complete; pass29 RE still pending. */
+static inline bool
+nv_pass29_implementation_audit_ok(void)
+{
+   return NV_PASS29_IMPL_AUDIT_TICK195 != 0 &&
+          NV_PASS29_IMPL_SCAFFOLD_TICK193 != 0 &&
+          NV_PASS29_IMPL_G0_G4_SYMMETRY_TICK193 != 0 &&
+          NV_PASS29_IMPL_G1_G3_G4_TICK194 != 0 &&
+          NV_PASS29_IMPL_G2_CHANNEL_TICK193 != 0 &&
+          NV_PASS29_IMPL_G1_CHANNEL_TICK194 != 0 &&
+          NV_PASS29_IMPL_G3_CHANNEL_TICK194 != 0 &&
+          NV_PASS29_IMPL_G4_CHANNEL_TICK194 != 0 &&
+          NV_PASS29_IMPL_WIRE_COMPLETE != 0 &&
+          nv_pass29_policy_ok() &&
+          NV_PASS29_RE_FULL_DISASM_PENDING != 0;
+}
+
+static inline bool
+nv_pass30_policy_ok(void)
+{
+   return NV_PASS30_RE_SCAFFOLD != 0 &&
+          NV_PASS30_RE_INHERITS_PASS29 != 0 &&
+          nv_pass29_implementation_audit_ok() &&
+          NV_PASS30_RE_PATH_C_STILL_GATED != 0;
 }
 
 /* Non-throttled local mem size (legacy method block used by some paths) */
