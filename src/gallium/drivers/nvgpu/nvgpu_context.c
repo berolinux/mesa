@@ -596,7 +596,10 @@ nvgpu_emit_vertex_state(struct nvgpu_context *ctx, struct nv_push *push)
       addr = (res ? res->gpu_offset : 0) + vb->buffer_offset;
       size = vb->buffer.resource->width0 > vb->buffer_offset
              ? (uint32_t)(vb->buffer.resource->width0 - vb->buffer_offset) : 0;
-      stride = 12; /* default; refined from velems when available */
+      /* tick203: compute stride from vertex elements referencing this stream */
+      stride = 12;
+      if (vel && vel->num_elements)
+         stride = nv_3d_compute_vertex_stride(vel->ve, vel->num_elements, i);
       nv_3d_set_vertex_stream(push, i, addr, size, stride);
       stream_emitted[i] = true;
       if (i > max_stream)
@@ -618,7 +621,10 @@ nvgpu_emit_vertex_state(struct nvgpu_context *ctx, struct nv_push *push)
             uint64_t addr = (res ? res->gpu_offset : 0) + vb->buffer_offset;
             uint32_t size = vb->buffer.resource->width0 > vb->buffer_offset
                ? (uint32_t)(vb->buffer.resource->width0 - vb->buffer_offset) : 0;
-            uint32_t stride = 12;
+            /* tick203: compute stride from vertex elements */
+            uint32_t stride = nv_3d_compute_vertex_stride(vel->ve,
+                                                          vel->num_elements,
+                                                          stream);
             nv_3d_set_vertex_stream(push, stream, addr, size, stride);
             stream_emitted[stream] = true;
          }
@@ -733,6 +739,22 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
                                a_func, a_src, a_dst, cm,
                                depth_en, depth_wr, depth_fn, stencil_en,
                                cull, front_ccw, fill, smooth);
+
+   /* tick203: per-target independent blend using SET_BLEND_PER_TARGET_* */
+   if (blend && blend->independent_blend_enable) {
+      nv_push_method(push, NVC597_SET_BLEND_STATE_PER_TARGET, 1);
+      unsigned nr = ctx->fb.nr_cbufs;
+      if (nr > 8) nr = 8;
+      for (unsigned j = 0; j < nr; j++) {
+         const struct pipe_rt_blend_state *rt = &blend->rt[j];
+         nv_3d_emit_blend_per_target(push, j,
+            rt->blend_enable,
+            rt->rgb_func, rt->rgb_src_factor, rt->rgb_dst_factor,
+            rt->alpha_func, rt->alpha_src_factor, rt->alpha_dst_factor);
+         nv_push_method(push, NVC597_SET_CT_WRITE(j), rt->colormask & 0xf);
+      }
+   }
+
    if (zsa && stencil_en) {
       const struct pipe_stencil_state *sf = &zsa->stencil[0];
       const struct pipe_stencil_state *sb = &zsa->stencil[1];
@@ -750,6 +772,11 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
          two_sided ? sb->zfail_op : sf->zfail_op,
          two_sided ? sb->zpass_op : sf->zpass_op);
    }
+   /* tick203: depth bounds test from ZSA state */
+   if (zsa && zsa->depth_bounds_test)
+      nv_3d_emit_depth_bounds(push, true,
+                              zsa->depth_bounds_min, zsa->depth_bounds_max);
+
    if (rs) {
       if (rs->offset_tri)
          nv_3d_emit_depth_bias(push, true, rs->offset_units, rs->offset_clamp,
@@ -1616,7 +1643,8 @@ nvgpu_bind_sampler_states(struct pipe_context *pctx,
 {
    struct nvgpu_context *ctx = nvgpu_context(pctx);
    unsigned i;
-   if (shader != MESA_SHADER_FRAGMENT)
+   /* tick203: accept all shader stages, not just fragment */
+   if (shader >= NVGPU_SHADER_STAGES)
       return;
    for (i = 0; i < num; i++) {
       unsigned slot = start + i;

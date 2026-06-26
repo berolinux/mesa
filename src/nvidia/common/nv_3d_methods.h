@@ -2535,21 +2535,198 @@ nv_3d_ogl_cmp_func(unsigned pipe_func)
    return pipe_func < 8 ? tbl[pipe_func] : NVC597_SET_DEPTH_FUNC_V_OGL_LESS;
 }
 
-#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR  0x4306
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR       0x4306
+#define NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_ONE_MINUS_DST_COLOR 0x4307
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_COLOR    0x4300
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_COLOR 0x4301
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_DST_ALPHA    0x4304
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_ALPHA 0x4305
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA_SATURATE  0x4308
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_COLOR 0xC001
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_COLOR 0xC002
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_ALPHA 0xC003
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_ALPHA 0xC004
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC1COLOR    0xC900
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_INVSRC1COLOR 0xC901
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC1ALPHA    0xC902
+#define NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_INVSRC1ALPHA 0xC903
 
-/** Map pipe_blendfactor (common subset) to OGL blend coeff. */
+/* Blend equation OGL constants from clc597.h */
+#define NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_SUBTRACT         0x800A
+#define NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_REVERSE_SUBTRACT 0x800B
+#define NVC597_SET_BLEND_COLOR_OP_V_OGL_MIN                   0x8007
+#define NVC597_SET_BLEND_COLOR_OP_V_OGL_MAX                   0x8008
+
+/* Per-target blend registers (clc597.h 0x1e00 + j*32) */
+#define NVC597_SET_BLEND_STATE_PER_TARGET                     0x12e4
+#define NVC597_SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(j)     (0x1e00 + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_COLOR_OP(j)               (0x1e04 + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF(j)     (0x1e08 + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_COLOR_DEST_COEFF(j)       (0x1e0c + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_ALPHA_OP(j)               (0x1e10 + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_ALPHA_SOURCE_COEFF(j)     (0x1e14 + (j) * 32)
+#define NVC597_SET_BLEND_PER_TARGET_ALPHA_DEST_COEFF(j)       (0x1e18 + (j) * 32)
+
+/**
+ * Map pipe_blendfactor (pipe/p_defines.h enum) to OGL blend coefficient.
+ * Full coverage of all PIPE_BLENDFACTOR_* values.
+ */
 static inline uint32_t
 nv_3d_ogl_blend_factor(unsigned pipe_factor, bool is_alpha)
 {
    (void)is_alpha;
    switch (pipe_factor) {
-   case 1:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;   /* ONE */
-   case 0:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ZERO;  /* ZERO */
-   case 2:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA;
-   case 3:  return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA;
-   case 4:  return NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR;
-   default: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;
+   case 0x00: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ZERO;  /* ZERO */
+   case 0x01: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;   /* ONE */
+   case 0x02: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_COLOR;
+   case 0x03: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_COLOR;
+   case 0x04: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA;
+   case 0x05: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA;
+   case 0x06: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_DST_ALPHA;
+   case 0x07: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_ALPHA;
+   case 0x08: return NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_DST_COLOR;
+   case 0x09: return NVC597_SET_BLEND_COLOR_DEST_COEFF_V_OGL_ONE_MINUS_DST_COLOR;
+   case 0x0A: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA_SATURATE;
+   case 0x0D: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_COLOR;
+   case 0x0E: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_COLOR;
+   case 0x0F: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_ALPHA;
+   case 0x10: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_ALPHA;
+   case 0x11: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC1COLOR;
+   case 0x12: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_INVSRC1COLOR;
+   case 0x13: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_SRC1ALPHA;
+   case 0x14: return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_INVSRC1ALPHA;
+   default:   return NVC597_SET_BLEND_COLOR_SOURCE_COEFF_V_OGL_ONE;
    }
+}
+
+/** Map pipe_blend_func (PIPE_BLEND_*) to OGL blend equation. */
+static inline uint32_t
+nv_3d_ogl_blend_equation(unsigned pipe_eq)
+{
+   switch (pipe_eq) {
+   case 0: return NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD;
+   case 1: return NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_SUBTRACT;
+   case 2: return NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_REVERSE_SUBTRACT;
+   case 3: return NVC597_SET_BLEND_COLOR_OP_V_OGL_MIN;
+   case 4: return NVC597_SET_BLEND_COLOR_OP_V_OGL_MAX;
+   default: return NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD;
+   }
+}
+
+/**
+ * Emit per-target independent blend state for one RT.
+ * Uses SET_BLEND_PER_TARGET_* registers (clc597.h 0x1e00 + j*32).
+ */
+static inline void
+nv_3d_emit_blend_per_target(struct nv_push *p, unsigned target,
+                            bool enable,
+                            unsigned rgb_func, unsigned rgb_src, unsigned rgb_dst,
+                            unsigned a_func, unsigned a_src, unsigned a_dst)
+{
+   nv_push_method(p, NVC597_SET_BLEND(target & 7u), enable ? 1 : 0);
+   if (!enable)
+      return;
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(target & 7u), 1);
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_COLOR_OP(target & 7u),
+                  nv_3d_ogl_blend_equation(rgb_func));
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF(target & 7u),
+                  nv_3d_ogl_blend_factor(rgb_src, false));
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_COLOR_DEST_COEFF(target & 7u),
+                  nv_3d_ogl_blend_factor(rgb_dst, false));
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_ALPHA_OP(target & 7u),
+                  nv_3d_ogl_blend_equation(a_func));
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_ALPHA_SOURCE_COEFF(target & 7u),
+                  nv_3d_ogl_blend_factor(a_src, true));
+   nv_push_method(p, NVC597_SET_BLEND_PER_TARGET_ALPHA_DEST_COEFF(target & 7u),
+                  nv_3d_ogl_blend_factor(a_dst, true));
+}
+
+/**
+ * Compute stride for a vertex stream from the pipe_vertex_element array.
+ * Finds the maximum (src_offset + format_size) for all elements using this stream.
+ */
+static inline uint32_t
+nv_3d_compute_vertex_stride(const void *velems_array, unsigned num_elements,
+                            unsigned stream_index)
+{
+   const uint8_t *p = (const uint8_t *)velems_array;
+   uint32_t max_end = 0;
+   unsigned i;
+   /* pipe_vertex_element: { uint32_t src_offset; uint8_t vertex_buffer_index;
+    *   uint8_t instance_divisor_is_one, instance_divisor_is_fetched; uint8_t pad;
+    *   uint32_t instance_divisor; enum pipe_format src_format; } */
+   for (i = 0; i < num_elements; i++) {
+      uint32_t src_off;
+      uint8_t vbi;
+      uint32_t fmt;
+      uint32_t fmt_size;
+      memcpy(&src_off, p + i * 16, 4);  /* src_offset at byte 0 */
+      vbi = p[i * 16 + 4];              /* vertex_buffer_index at byte 4 */
+      memcpy(&fmt, p + i * 16 + 12, 4); /* src_format at byte 12 */
+      if (vbi != stream_index)
+         continue;
+      /* Estimate format size from component width code */
+      switch (fmt) {
+      /* Single component formats */
+      case 51: /* R32_FLOAT */ case 52: /* R32_UNORM */ case 53: /* R32_USCALED */
+      case 54: /* R32_SNORM */ case 55: /* R32_SSCALED */
+      case 56: /* R32_UINT */  case 57: /* R32_SINT */   case 58: /* R32_FIXED */
+         fmt_size = 4; break;
+      /* Two component formats */
+      case 38: /* R32G32_FLOAT */ case 39: /* R32G32_UNORM */
+      case 44: /* R32G32_UINT */  case 45: /* R32G32_SINT */
+      case 62: /* R16G16_FLOAT */ case 63: /* R16G16_UNORM */
+      case 64: /* R16G16_SNORM */ case 66: /* R16G16_USCALED */
+      case 67: /* R16G16_SSCALED */
+      case 68: /* R16G16_UINT */  case 69: /* R16G16_SINT */
+         fmt_size = (fmt >= 62 && fmt <= 69) ? 4 : 8; break;
+      /* Three component formats */
+      case 30: /* R32G32B32_FLOAT */ case 31: /* R32G32B32_UNORM */
+      case 36: /* R32G32B32_UINT */  case 37: /* R32G32B32_SINT */
+         fmt_size = 12; break;
+      /* Four component formats */
+      case 23: /* R32G32B32A32_FLOAT */ case 24: /* R32G32B32A32_UNORM */
+      case 28: /* R32G32B32A32_UINT */  case 29: /* R32G32B32A32_SINT */
+         fmt_size = 16; break;
+      /* 16-bit four component */
+      case 73: /* R16G16B16A16_FLOAT */ case 74: /* R16G16B16A16_UNORM */
+      case 75: /* R16G16B16A16_SNORM */
+      case 78: /* R16G16B16A16_UINT */  case 79: /* R16G16B16A16_SINT */
+         fmt_size = 8; break;
+      /* 8-bit four component */
+      case 105: /* R8G8B8A8_UNORM */ case 106: /* R8G8B8A8_SNORM */
+      case 108: /* R8G8B8A8_USCALED */
+      case 109: /* R8G8B8A8_SSCALED */
+      case 110: /* R8G8B8A8_UINT */   case 111: /* R8G8B8A8_SINT */
+      case 1:   /* B8G8R8A8_UNORM */  case 2:   /* B8G8R8X8_UNORM */
+         fmt_size = 4; break;
+      /* 8-bit two/one component */
+      case 116: /* R8G8_UNORM */   case 117: /* R8G8_SNORM */
+      case 120: /* R8G8_UINT */    case 121: /* R8G8_SINT */
+         fmt_size = 2; break;
+      case 125: /* R8_UNORM */     case 126: /* R8_SNORM */
+      case 128: /* R8_UINT */      case 129: /* R8_SINT */
+         fmt_size = 1; break;
+      /* 10/10/10/2 */
+      case 152: /* R10G10B10A2_UNORM */ case 153: /* R10G10B10A2_SNORM */
+      case 155: /* R10G10B10A2_USCALED */
+      case 156: /* R10G10B10A2_UINT */
+         fmt_size = 4; break;
+      /* 16-bit single/double component */
+      case 83: /* R16_FLOAT */ case 84: /* R16_UNORM */
+      case 85: /* R16_SNORM */
+      case 88: /* R16_UINT */  case 89: /* R16_SINT */
+         fmt_size = 2; break;
+      /* 11/11/10 float */
+      case 160: /* R11G11B10_FLOAT */
+         fmt_size = 4; break;
+      default:
+         fmt_size = 4; break; /* conservative default */
+      }
+      if (src_off + fmt_size > max_end)
+         max_end = src_off + fmt_size;
+   }
+   return max_end ? max_end : 12; /* fallback to 12 bytes if no elements found */
 }
 
 /**
@@ -2973,18 +3150,18 @@ nv_3d_emit_blend_zsa_raster(struct nv_push *p,
    nv_push_method(p, NVC597_SET_BLEND(0), blend_enable ? 1 : 0);
    if (blend_enable) {
       nv_push_method(p, NVC597_SET_BLEND_SEPARATE_FOR_ALPHA, 1);
-      nv_push_method(p, NVC597_SET_BLEND_COLOR_OP, NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD);
+      nv_push_method(p, NVC597_SET_BLEND_COLOR_OP,
+                     nv_3d_ogl_blend_equation(rgb_func));
       nv_push_method(p, NVC597_SET_BLEND_COLOR_SOURCE_COEFF,
                      nv_3d_ogl_blend_factor(rgb_src, false));
       nv_push_method(p, NVC597_SET_BLEND_COLOR_DEST_COEFF,
                      nv_3d_ogl_blend_factor(rgb_dst, false));
-      nv_push_method(p, NVC597_SET_BLEND_ALPHA_OP, NVC597_SET_BLEND_COLOR_OP_V_OGL_FUNC_ADD);
+      nv_push_method(p, NVC597_SET_BLEND_ALPHA_OP,
+                     nv_3d_ogl_blend_equation(alpha_func));
       nv_push_method(p, NVC597_SET_BLEND_ALPHA_SOURCE_COEFF,
                      nv_3d_ogl_blend_factor(alpha_src, true));
       nv_push_method(p, NVC597_SET_BLEND_ALPHA_DEST_COEFF,
                      nv_3d_ogl_blend_factor(alpha_dst, true));
-      (void)rgb_func;
-      (void)alpha_func;
    }
 
    /* CT write mask: low 4 bits RGBA */
