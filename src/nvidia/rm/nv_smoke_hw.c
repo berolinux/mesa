@@ -9,6 +9,7 @@
 #include "nv_rm.h"
 #include "nv_shader.h"
 #include "nv_3d_methods.h"
+#include "nv_qmd.h"
 #include "nv_video_methods.h"
 
 #include <errno.h>
@@ -245,7 +246,8 @@ smoke_alloc_mapped_bo(struct nv_rm_device *rm, uint64_t size, uint64_t align,
       return NULL;
 
    (void)nv_rm_device_ensure_vaspace(rm);
-   if (prefer_vram && nv_device_info_prefer_sysmem_alloc(&rm->info))
+   if (prefer_vram && nv_rm_device_info(rm) &&
+       nv_device_info_prefer_sysmem_alloc(nv_rm_device_info(rm)))
       first_vram = false;
 
    for (pass = 0; pass < 2; pass++) {

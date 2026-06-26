@@ -131,6 +131,13 @@ extern "C" {
 #define NV_PASS23_CHAIN_MME_RAM_UPLOAD_FORWARD_OK 0
 #define NV_PASS23_CHAIN_INLINE_PCAS_5STEP_OK     0  /* span ~96KB noise only */
 
+/* Forward declarations — full definitions later in this header or in nv_3d_methods.h */
+static inline bool nv_pass22_explicit_emit_required(void);
+static inline void nv_push_host_semaphore_release_wfi_mode_ex(
+   struct nv_push *p, uint64_t sema_gpu_addr, uint32_t payload, bool with_wfi,
+   enum nv_host_sema_mode mode, int sema_emit);
+static inline int nv_host_sema_emit_pref_normalize(int emit_pref);
+
 static inline bool
 nv_pass23_explicit_emit_required(void)
 {
@@ -146,6 +153,7 @@ nv_pass23_deep_disasm_complete(void)
           NV_PASS23_RE_PATH_C_STILL_GATED != 0;
 }
 
+#define NV_PASS23_RE_INHERITS_PASS22         1
 #define NV_PASS23_RE_G0_G4_SYMMETRY_TICK171  1
 #define NV_PASS23_RE_TRACE_SCAFFOLD_TICK172  1
 #define NV_PASS23_RE_FULL_DISASM_PENDING     0  /* tick175: pass23 deep RE done */
@@ -309,6 +317,12 @@ nv_pass23_deep_disasm_complete(void)
 #define NV_PASS31_RE_PATH_C_STILL_GATED          NV_PASS30_RE_PATH_C_STILL_GATED
 #define NV_PASS31_RE_FULL_DISASM_PENDING         1
 #define NV_PASS31_IMPL_INHERITS_PASS30_WIRE      NV_PASS30_IMPL_WIRE_COMPLETE
+
+/* tick198: pass31 G1/G3/G4 bringup */
+#define NV_PASS31_IMPL_G1_G3_G4_TICK198          1
+#define NV_PASS31_IMPL_G1_CHANNEL_TICK198        1
+#define NV_PASS31_IMPL_G3_CHANNEL_TICK198        1
+#define NV_PASS31_IMPL_G4_CHANNEL_TICK198        1
 
 static inline bool
 nv_pass24_explicit_emit_required(void)

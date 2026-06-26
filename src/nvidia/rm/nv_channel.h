@@ -16,6 +16,7 @@
 #define NV_CHANNEL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "nv_device_info.h"

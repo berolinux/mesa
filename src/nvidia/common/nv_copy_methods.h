@@ -1459,6 +1459,37 @@ nv_g1_emit_copy_then_host_sema_pass30(struct nv_push *p, uint32_t class_copy,
       host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
 }
 
+/**
+ * tick198 / pass31: G1 CE copy + pass31 host sema.
+ */
+static inline int
+nv_g1_emit_copy_then_host_sema_pass31(struct nv_push *p, uint32_t class_copy,
+                                      uint64_t src_gpu_addr,
+                                      uint64_t dst_gpu_addr,
+                                      uint32_t size_bytes,
+                                      bool pipelined,
+                                      bool pre_wfi_on_ce,
+                                      uint64_t host_sema_gpu,
+                                      uint32_t host_sema_payload,
+                                      enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p || !src_gpu_addr || !dst_gpu_addr || !size_bytes || !host_sema_gpu)
+      return -1;
+   if (class_copy)
+      nv_copy_set_object(p, class_copy);
+   else
+      nv_push_set_subch(p, NV_PUSH_SUBCH_COPY);
+   if (pipelined)
+      nv_copy_emit_buffer_copy_with_sema_pipelined(p, src_gpu_addr, dst_gpu_addr,
+                                                   size_bytes, 0, 0);
+   else
+      nv_copy_emit_buffer_copy_with_sema(p, src_gpu_addr, dst_gpu_addr,
+                                         size_bytes, 0, 0);
+   return nv_push_g0_g4_host_sema_tail_pass31(
+      p, pre_wfi_on_ce, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
 #ifdef __cplusplus
 }
 #endif

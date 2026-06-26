@@ -4,6 +4,7 @@
  */
 
 #include "nv_device_info.h"
+#include "nv_qmd.h"
 #include "nv_video_methods.h"
 
 #include <stdio.h>

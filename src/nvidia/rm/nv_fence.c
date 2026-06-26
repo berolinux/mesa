@@ -7,6 +7,7 @@
 
 #include "nv_fence.h"
 
+#include "nv_qmd.h"
 #include "nv_3d_methods.h"
 #include "nv_copy_methods.h"
 #include "nv_rm.h"

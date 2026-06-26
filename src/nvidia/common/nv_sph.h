@@ -1381,6 +1381,11 @@ nv_pass24_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
                                                host_sema_mode);
 }
 
+/* Forward declaration — full definition follows below */
+static inline int nv_pass22_nir_depth_ladder_build_all(
+   struct nv_pass21_compute_object *scratch, uint64_t program_gpu,
+   uint64_t qmd_gpu, uint64_t qmd_sema_gpu, uint64_t store_gpu);
+
 static inline int
 nv_pass24_nir_depth_ladder_build_all(struct nv_pass21_compute_object *scratch,
                                      uint64_t program_gpu, uint64_t qmd_gpu,
@@ -1611,7 +1616,7 @@ nv_pass27_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
  */
 static inline int
 nv_pass28_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
-                                     const struct nv_pass21_compute_object *obj,
+                                     struct nv_pass21_compute_object *obj,
                                      uint64_t lmem_gpu, bool post_inv,
                                      uint64_t host_sema_gpu,
                                      uint32_t host_sema_payload,
@@ -1648,7 +1653,7 @@ nv_pass28_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
  */
 static inline int
 nv_pass29_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
-                                     const struct nv_pass21_compute_object *obj,
+                                     struct nv_pass21_compute_object *obj,
                                      uint64_t lmem_gpu, bool post_inv,
                                      uint64_t host_sema_gpu,
                                      uint32_t host_sema_payload,
@@ -1685,7 +1690,7 @@ nv_pass29_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
  */
 static inline int
 nv_pass30_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
-                                     const struct nv_pass21_compute_object *obj,
+                                     struct nv_pass21_compute_object *obj,
                                      uint64_t lmem_gpu, bool post_inv,
                                      uint64_t host_sema_gpu,
                                      uint32_t host_sema_payload,
@@ -1722,7 +1727,7 @@ nv_pass30_emit_compute_dispatch_host_sema_tail(struct nv_push *p,
  */
 static inline int
 nv_pass31_compute_object_emit_launch(struct nv_push *p, uint32_t class_compute,
-                                     const struct nv_pass21_compute_object *obj,
+                                     struct nv_pass21_compute_object *obj,
                                      uint64_t lmem_gpu, bool post_inv,
                                      uint64_t host_sema_gpu,
                                      uint32_t host_sema_payload,

@@ -4074,8 +4074,7 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          return -818;
       if (!NV_PASS22_RE_EXPLICIT_EMIT_POLICY)
          return -819;
-      if (NV_PASS22_NIR_COMPUTE_DEFAULT_KIND != 3 &&
-          NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
+      if (NV_PASS22_NIR_DEFAULT_KIND != NV_PASS21_CS_S2R_STORE_IMM)
          return -820;
       /* pass22 barrier with sema matches Vulkan heavy barrier + optional sema shape */
       {
@@ -4714,16 +4713,14 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          memset(b193, 0, sizeof(b193));
          nv_push_init(&p193, b193, (uint32_t)(sizeof(b193) / 4));
          memset(&o193, 0, sizeof(o193));
-         o193.program_va = 0x500000ull;
-         o193.const_buf_va[0] = 0x510000ull;
-         o193.const_buf_size[0] = 256;
-         o193.const_buf_valid_mask = 1;
-         o193.shared_mem_size = 0;
-         o193.local_mem_size = 0;
+         o193.program_gpu_addr = 0x500000ull;
+         o193.store_gpu_addr = 0x510000ull;
+         o193.imm_value = 0x62u;
+         o193.shader_kind = NV_PASS21_CS_S2R_STORE_IMM;
          o193.register_count = 16;
          o193.grid_x = 1;
          o193.cta_x = 32;
-         o193.qmd_sema_addr = 0x220000ull;
+         o193.qmd_sema_gpu = 0x220000ull;
          o193.qmd_sema_payload = 1;
          o193.spa_version = 0x503;
          if (nv_pass22_compute_object_build(&o193) != 0)
@@ -4805,16 +4802,14 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          memset(b195, 0, sizeof(b195));
          nv_push_init(&p195, b195, (uint32_t)(sizeof(b195) / 4));
          memset(&o195, 0, sizeof(o195));
-         o195.program_va = 0x600000ull;
-         o195.const_buf_va[0] = 0x610000ull;
-         o195.const_buf_size[0] = 256;
-         o195.const_buf_valid_mask = 1;
-         o195.shared_mem_size = 0;
-         o195.local_mem_size = 0;
+         o195.program_gpu_addr = 0x600000ull;
+         o195.store_gpu_addr = 0x610000ull;
+         o195.imm_value = 0x62u;
+         o195.shader_kind = NV_PASS21_CS_S2R_STORE_IMM;
          o195.register_count = 16;
          o195.grid_x = 1;
          o195.cta_x = 32;
-         o195.qmd_sema_addr = 0x230000ull;
+         o195.qmd_sema_gpu = 0x230000ull;
          o195.qmd_sema_payload = 1;
          o195.spa_version = 0x503;
          if (nv_pass22_compute_object_build(&o195) != 0)
@@ -4896,16 +4891,14 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
          memset(b197, 0, sizeof(b197));
          nv_push_init(&p197, b197, (uint32_t)(sizeof(b197) / 4));
          memset(&o197, 0, sizeof(o197));
-         o197.program_va = 0x700000ull;
-         o197.const_buf_va[0] = 0x710000ull;
-         o197.const_buf_size[0] = 256;
-         o197.const_buf_valid_mask = 1;
-         o197.shared_mem_size = 0;
-         o197.local_mem_size = 0;
+         o197.program_gpu_addr = 0x700000ull;
+         o197.store_gpu_addr = 0x710000ull;
+         o197.imm_value = 0x62u;
+         o197.shader_kind = NV_PASS21_CS_S2R_STORE_IMM;
          o197.register_count = 16;
          o197.grid_x = 1;
          o197.cta_x = 32;
-         o197.qmd_sema_addr = 0x240000ull;
+         o197.qmd_sema_gpu = 0x240000ull;
          o197.qmd_sema_payload = 1;
          o197.spa_version = 0x503;
          if (nv_pass22_compute_object_build(&o197) != 0)
@@ -4914,6 +4907,29 @@ nv_smoke_selftest_g3_3d_sema_push(const uint32_t *trace_push,
                 &p197, 0xc5c0u, &o197, 0x400000ull, true, 0x240000ull, 1u,
                 NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
             return -1011;
+      }
+   }
+   /* tick198: pass31 G1/G3/G4 bringup helpers + channel retry ladder */
+   {
+      if (!NV_PASS31_IMPL_G1_G3_G4_TICK198)
+         return -1012;
+      if (!NV_PASS31_IMPL_G1_CHANNEL_TICK198)
+         return -1013;
+      if (!NV_PASS31_IMPL_G3_CHANNEL_TICK198)
+         return -1014;
+      if (!NV_PASS31_IMPL_G4_CHANNEL_TICK198)
+         return -1015;
+      /* Smoke: pass31 G1 CE copy helper callable */
+      {
+         struct nv_push p198;
+         uint32_t b198[128];
+         memset(b198, 0, sizeof(b198));
+         nv_push_init(&p198, b198, (uint32_t)(sizeof(b198) / 4));
+         if (nv_g1_emit_copy_then_host_sema_pass31(
+                &p198, 0xc5b5u, 0x100000ull, 0x200000ull, 4096,
+                false, true, 0x300000ull, 1u,
+                NV_PASS21_HOST_SEMA_DEFAULT_MODE) != 0)
+            return -1016;
       }
    }
 

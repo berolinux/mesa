@@ -19,6 +19,9 @@
 extern "C" {
 #endif
 
+/* Forward declaration — full definition in nv_qmd.h */
+static inline bool nv_pass22_explicit_emit_required(void);
+
 /* --- Method addresses (byte offsets) --- */
 #define NVC597_SET_OBJECT                       0x0000
 #define NVC597_NO_OPERATION                     0x0100
@@ -4667,6 +4670,44 @@ nv_3d_emit_g3_inv_wfi_host_sema_pass30(struct nv_push *p,
    nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
                                                true, true);
    return nv_push_g0_g4_host_sema_tail_pass30(
+      p, pre_wfi_on_3d, sema_gpu_addr,
+      sema_payload ? sema_payload : 1u, sema_mode);
+}
+
+/**
+ * tick198 / pass31: G3 full barrier + pass31 host sema tail.
+ */
+static inline int
+nv_3d_emit_g3_barrier_all_pass31(struct nv_push *p,
+                                 uint64_t host_sema_gpu,
+                                 uint32_t host_sema_payload,
+                                 enum nv_host_sema_mode host_sema_mode)
+{
+   if (!p)
+      return -1;
+   nv_3d_emit_g3_barrier_all_pass21(p);
+   if (!host_sema_gpu)
+      return 0;
+   return nv_push_g0_g4_host_sema_tail_pass31(
+      p, false, host_sema_gpu,
+      host_sema_payload ? host_sema_payload : 1u, host_sema_mode);
+}
+
+/**
+ * tick198 / pass31: G3 inv ladder + WFI + pass31 host sema.
+ */
+static inline int
+nv_3d_emit_g3_inv_wfi_host_sema_pass31(struct nv_push *p,
+                                       uint64_t sema_gpu_addr,
+                                       uint32_t sema_payload,
+                                       enum nv_host_sema_mode sema_mode,
+                                       bool pre_wfi_on_3d)
+{
+   if (!p || !sema_gpu_addr)
+      return -1;
+   nv_3d_emit_g3_inv_nvc597_full_ladder_pass19(p, true, true, true, true, true,
+                                               true, true);
+   return nv_push_g0_g4_host_sema_tail_pass31(
       p, pre_wfi_on_3d, sema_gpu_addr,
       sema_payload ? sema_payload : 1u, sema_mode);
 }

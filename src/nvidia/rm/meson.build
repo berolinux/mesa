@@ -15,6 +15,7 @@ libnvidia_rm = static_library(
   include_directories : [
     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux,
     include_directories('../common'),
+    include_directories('../compiler'),
   ],
   c_args : [no_override_init_args, nv_rm_c_args],
   dependencies : [nv_rm_deps, idep_mesautil],

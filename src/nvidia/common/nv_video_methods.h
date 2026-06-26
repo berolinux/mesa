@@ -23,6 +23,8 @@
 #include <time.h>
 
 #include "nv_push.h"
+#include "nv_qmd.h"
+#include "nv_sph.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -4446,6 +4448,43 @@ nv_g4_emit_nvenc_bringup_pass30(struct nv_push *p, uint32_t class_nvenc,
    if (!nv_pass30_policy_ok() && NV_PASS30_RE_INHERITS_PASS29)
       return -1;
    return nv_g4_emit_nvenc_bringup_pass29(p, class_nvenc, pic_setup_gpu,
+                                          input_yuv_gpu, bitstream_gpu,
+                                          status_gpu, width, height, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
+
+/**
+ * tick198 / pass31: G4 NVDEC bringup with pass31 host sema tail.
+ */
+static inline int
+nv_g4_emit_nvdec_bringup_pass31(struct nv_push *p, uint32_t class_nvdec,
+                                const struct nv_nvdec_pic_setup *pic,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass31_policy_ok() && NV_PASS31_RE_INHERITS_PASS30)
+      return -1;
+   return nv_g4_emit_nvdec_bringup_pass30(p, class_nvdec, pic, sema_gpu,
+                                          sema_payload, status_cpu,
+                                          add_host_sema_tail, host_sema_mode);
+}
+
+static inline int
+nv_g4_emit_nvenc_bringup_pass31(struct nv_push *p, uint32_t class_nvenc,
+                                uint64_t pic_setup_gpu, uint64_t input_yuv_gpu,
+                                uint64_t bitstream_gpu, uint64_t status_gpu,
+                                uint32_t width, uint32_t height,
+                                uint64_t sema_gpu, uint32_t sema_payload,
+                                volatile uint32_t *status_cpu,
+                                bool add_host_sema_tail,
+                                enum nv_host_sema_mode host_sema_mode)
+{
+   if (!nv_pass31_policy_ok() && NV_PASS31_RE_INHERITS_PASS30)
+      return -1;
+   return nv_g4_emit_nvenc_bringup_pass30(p, class_nvenc, pic_setup_gpu,
                                           input_yuv_gpu, bitstream_gpu,
                                           status_gpu, width, height, sema_gpu,
                                           sema_payload, status_cpu,

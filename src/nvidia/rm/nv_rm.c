@@ -18,6 +18,18 @@
 
 #include "nv_rm.h"
 
+/* NVOS32 memory type hints from open-gpu-kernel-modules nvos.h */
+#ifndef NVOS32_TYPE_IMAGE
+#define NVOS32_TYPE_IMAGE          0
+#define NVOS32_TYPE_DEPTH          1
+#define NVOS32_TYPE_TEXTURE        2
+#define NVOS32_TYPE_VIDEO          3
+#define NVOS32_TYPE_DMA            6
+#define NVOS32_TYPE_SHADER_PROGRAM 11
+#define NVOS32_TYPE_NOTIFIER       13
+#define NVOS32_TYPE_STENCIL        16
+#endif
+
 #if defined(HAVE_LIBDRM_NVIDIA)
 #include "nvidia.h"
 #include "nvidia_rm.h"
