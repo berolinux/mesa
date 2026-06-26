@@ -5058,6 +5058,50 @@ nv_smoke_selftest_host(void)
       }
    }
 
+   /* tick199: Format table smoke tests — verify key PIPE_FORMAT mappings */
+   {
+      /* RT format: B8G8R8A8_UNORM → A8R8G8B8 (0xCF) */
+      if (nv_pipe_to_rt_format(PIPE_FORMAT_B8G8R8A8_UNORM) != 0xCF)
+         return -1017;
+      /* RT format: R8G8B8A8_UNORM → A8B8G8R8 (0xD5) */
+      if (nv_pipe_to_rt_format(PIPE_FORMAT_R8G8B8A8_UNORM) != 0xD5)
+         return -1018;
+      /* RT format: RF32_GF32_BF32_AF32 (0xC0) */
+      if (nv_pipe_to_rt_format(PIPE_FORMAT_R32G32B32A32_FLOAT) != 0xC0)
+         return -1019;
+      /* ZT format: Z24_UNORM_S8_UINT → S8Z24 (0x16) */
+      if (nv_pipe_to_zt_format(PIPE_FORMAT_Z24_UNORM_S8_UINT) != 0x16)
+         return -1020;
+      /* ZT format: Z32_FLOAT → ZF32 (0x0A) */
+      if (nv_pipe_to_zt_format(PIPE_FORMAT_Z32_FLOAT) != 0x0A)
+         return -1021;
+      /* Vertex format: R32G32B32A32_FLOAT → bits=0x01, type=FLOAT(7) */
+      {
+         uint32_t vf = nv_pipe_to_vtx_format(PIPE_FORMAT_R32G32B32A32_FLOAT);
+         if (NV_VTX_UNPACK_BITS(vf) != 0x01 || NV_VTX_UNPACK_TYPE(vf) != 7)
+            return -1022;
+      }
+      /* Vertex format: R8G8B8A8_UNORM → bits=0x0A, type=UNORM(2) */
+      {
+         uint32_t vf = nv_pipe_to_vtx_format(PIPE_FORMAT_R8G8B8A8_UNORM);
+         if (NV_VTX_UNPACK_BITS(vf) != 0x0A || NV_VTX_UNPACK_TYPE(vf) != 2)
+            return -1023;
+      }
+      /* R11G11B10_FLOAT render target → BF10GF11RF11 (0xE0) */
+      if (nv_pipe_to_rt_format(PIPE_FORMAT_R11G11B10_FLOAT) != 0xE0)
+         return -1024;
+      /* nv_format_is_* queries */
+      if (!nv_format_is_color_renderable(PIPE_FORMAT_B8G8R8A8_UNORM))
+         return -1025;
+      if (!nv_format_is_depth_stencil(PIPE_FORMAT_Z32_FLOAT))
+         return -1026;
+      if (!nv_format_is_vertex_format(PIPE_FORMAT_R32G32B32_FLOAT))
+         return -1027;
+      /* DISABLED for unsupported format (DXT1 has no RT) */
+      if (nv_format_is_color_renderable(PIPE_FORMAT_DXT1_RGB))
+         return -1028;
+   }
+
    return 0;
 }
 

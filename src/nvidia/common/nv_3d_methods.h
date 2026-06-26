@@ -547,41 +547,23 @@ nv_3d_topology_from_pipe_prim(unsigned pipe_prim)
    }
 }
 
-/* Map common pipe_format enum values to NVC597 colour target formats.
- * pipe_format numbers match Mesa's pipe/p_format.h for the common cases. */
+/* Map pipe_format enum to NVC597 colour target / depth-stencil formats.
+ * Comprehensive table lives in nv_formats.h; these are thin wrappers that
+ * also supply a fallback for unknown formats. */
+#include "nv_formats.h"
+
 static inline uint32_t
-nv_3d_color_format_from_pipe(unsigned pipe_fmt)
+nv_3d_color_format_from_pipe(enum pipe_format pipe_fmt)
 {
-   /* Use numeric values for the most common formats without requiring pipe headers
-    * in all translation units; callers can also pass explicit NVC597 format values. */
-   switch ((unsigned)pipe_fmt) {
-   case 1:  /* PIPE_FORMAT_B8G8R8A8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_B8G8R8A8;
-   case 2:  /* PIPE_FORMAT_B8G8R8X8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_X8B8G8R8;
-   case 3:  /* PIPE_FORMAT_A8R8G8B8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_A8R8G8B8;
-   case 4:  /* PIPE_FORMAT_X8R8G8B8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_A8R8G8B8;
-   case 5:  /* PIPE_FORMAT_B5G6R5_UNORM */   return NVC597_SET_COLOR_TARGET_FORMAT_V_R5G6B5;
-   case 9:  /* PIPE_FORMAT_R8G8B8A8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
-   case 10: /* PIPE_FORMAT_R8G8B8X8_UNORM */ return NVC597_SET_COLOR_TARGET_FORMAT_V_X8B8G8R8;
-   case 31: /* PIPE_FORMAT_R32_FLOAT */      return NVC597_SET_COLOR_TARGET_FORMAT_V_R32;
-   case 38: /* PIPE_FORMAT_R16G16B16A16_FLOAT */ return NVC597_SET_COLOR_TARGET_FORMAT_V_RF16_GF16_BF16_AF16;
-   case 39: /* PIPE_FORMAT_R32G32B32A32_FLOAT */ return NVC597_SET_COLOR_TARGET_FORMAT_V_RF32_GF32_BF32_AF32;
-   default: return NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
-   }
+   uint32_t nv_fmt = nv_pipe_to_rt_format(pipe_fmt);
+   return nv_fmt ? nv_fmt : NVC597_SET_COLOR_TARGET_FORMAT_V_A8B8G8R8;
 }
 
 static inline uint32_t
-nv_3d_zt_format_from_pipe(unsigned pipe_fmt)
+nv_3d_zt_format_from_pipe(enum pipe_format pipe_fmt)
 {
-   switch ((unsigned)pipe_fmt) {
-   case 42: /* PIPE_FORMAT_Z16_UNORM */           return NVC597_SET_ZT_FORMAT_V_Z16;
-   case 43: /* PIPE_FORMAT_Z32_FLOAT */           return NVC597_SET_ZT_FORMAT_V_ZF32;
-   case 44: /* PIPE_FORMAT_Z24_UNORM_S8_UINT */   return NVC597_SET_ZT_FORMAT_V_Z24S8;
-   case 45: /* PIPE_FORMAT_Z24X8_UNORM */         return NVC597_SET_ZT_FORMAT_V_X8Z24;
-   case 46: /* PIPE_FORMAT_S8_UINT_Z24_UNORM */   return NVC597_SET_ZT_FORMAT_V_S8Z24;
-   case 47: /* PIPE_FORMAT_S8_UINT */             return NVC597_SET_ZT_FORMAT_V_S8;
-   case 48: /* PIPE_FORMAT_Z32_FLOAT_S8X24_UINT */ return NVC597_SET_ZT_FORMAT_V_ZF32_X24S8;
-   default: return NVC597_SET_ZT_FORMAT_V_Z24S8;
-   }
+   uint32_t nv_fmt = nv_pipe_to_zt_format(pipe_fmt);
+   return nv_fmt ? nv_fmt : NVC597_SET_ZT_FORMAT_V_Z24S8;
 }
 
 static inline void
@@ -795,6 +777,34 @@ nv_3d_set_vertex_attribute(struct nv_push *p, unsigned i,
                 ((offset & 0x3fff) << NVC597_SET_VERTEX_ATTRIBUTE_A_OFFSET_SHIFT) |
                 ((component_format & 0x3f) << NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_SHIFT);
    nv_push_method(p, NVC597_SET_VERTEX_ATTRIBUTE_A(i), v);
+}
+
+/**
+ * tick199: Set vertex attribute i from a pipe_format enum.
+ * Uses nv_formats.h to decompose into component bits + numerical type.
+ * Returns true if the format was supported, false if not.
+ */
+static inline bool
+nv_3d_set_vertex_attribute_pipe(struct nv_push *p, unsigned i,
+                                unsigned stream, unsigned byte_offset,
+                                enum pipe_format fmt, bool active)
+{
+   uint32_t packed = nv_pipe_to_vtx_format(fmt);
+   uint32_t bits, type, v;
+
+   if (!packed)
+      return false;
+
+   bits = NV_VTX_UNPACK_BITS(packed);
+   type = NV_VTX_UNPACK_TYPE(packed);
+
+   v = (stream & 0x1f) |
+       (active ? 0 : NVC597_SET_VERTEX_ATTRIBUTE_A_SOURCE_INACTIVE) |
+       ((byte_offset & 0x3fff) << NVC597_SET_VERTEX_ATTRIBUTE_A_OFFSET_SHIFT) |
+       ((bits & 0x3f) << NVC597_SET_VERTEX_ATTRIBUTE_A_COMPONENT_BIT_WIDTHS_SHIFT) |
+       ((type & 0x7) << 27);
+   nv_push_method(p, NVC597_SET_VERTEX_ATTRIBUTE_A(i), v);
+   return true;
 }
 
 /** Index buffer setup: address, size, index element size (1/2/4). */
