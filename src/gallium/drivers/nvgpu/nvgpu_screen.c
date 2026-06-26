@@ -17,6 +17,8 @@
 #include "nv_device_info.h"
 #include "nv_fence.h"
 
+#include "nv_formats.h"
+
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
@@ -243,14 +245,13 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
                           unsigned storage_sample_count,
                           unsigned usage)
 {
-   const struct util_format_description *desc;
-
    (void)pscreen;
    (void)target;
 
    if (format == PIPE_FORMAT_NONE)
-      return usage & PIPE_BIND_RENDER_TARGET;
+      return !!(usage & PIPE_BIND_RENDER_TARGET);
 
+   /* MSAA: only power-of-two sample counts up to 8 */
    if (sample_count > 1) {
       if (sample_count != 2 && sample_count != 4 && sample_count != 8)
          return false;
@@ -259,50 +260,71 @@ nvgpu_is_format_supported(struct pipe_screen *pscreen,
    if (MAX2(1, sample_count) != MAX2(1, storage_sample_count))
       return false;
 
-   desc = util_format_description(format);
-   if (!desc)
+   if (!util_format_description(format))
       return false;
 
+   /* Render target: check against the complete NVC597 RT format table */
    if (usage & PIPE_BIND_RENDER_TARGET) {
-      if (!util_format_is_rgba8_variant(desc) &&
-          format != PIPE_FORMAT_B8G8R8A8_UNORM &&
-          format != PIPE_FORMAT_B8G8R8X8_UNORM &&
-          format != PIPE_FORMAT_R16G16B16A16_FLOAT &&
-          format != PIPE_FORMAT_R32G32B32A32_FLOAT &&
-          format != PIPE_FORMAT_R10G10B10A2_UNORM &&
-          format != PIPE_FORMAT_R11G11B10_FLOAT &&
-          format != PIPE_FORMAT_R16_UNORM &&
-          format != PIPE_FORMAT_R16G16_UNORM &&
-          format != PIPE_FORMAT_R16G16B16A16_UNORM &&
-          format != PIPE_FORMAT_R32_FLOAT &&
-          format != PIPE_FORMAT_R32G32_FLOAT &&
-          !util_format_is_srgb(format))
+      if (!nv_format_is_color_renderable(format))
          return false;
    }
 
+   /* Blending: integer formats cannot blend */
+   if (usage & PIPE_BIND_BLENDABLE) {
+      if (!nv_format_is_blendable(format))
+         return false;
+   }
+
+   /* Depth/stencil: check against the ZT format table */
    if (usage & PIPE_BIND_DEPTH_STENCIL) {
-      if (format != PIPE_FORMAT_Z24_UNORM_S8_UINT &&
-          format != PIPE_FORMAT_Z24X8_UNORM &&
-          format != PIPE_FORMAT_Z32_FLOAT &&
-          format != PIPE_FORMAT_Z32_FLOAT_S8X24_UINT &&
-          format != PIPE_FORMAT_Z16_UNORM &&
-          format != PIPE_FORMAT_S8_UINT)
+      if (!nv_format_is_depth_stencil(format))
          return false;
    }
 
-   if (usage & (PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_VERTEX_BUFFER |
-                PIPE_BIND_INDEX_BUFFER | PIPE_BIND_CONSTANT_BUFFER |
-                PIPE_BIND_SHADER_BUFFER | PIPE_BIND_SHADER_IMAGE |
-                PIPE_BIND_STREAM_OUTPUT | PIPE_BIND_DISPLAY_TARGET |
-                PIPE_BIND_SCANOUT | PIPE_BIND_SHARED | PIPE_BIND_LINEAR))
-      return true;
+   /* Sampler view: use the comprehensive texturable format query */
+   if (usage & PIPE_BIND_SAMPLER_VIEW) {
+      if (!nv_format_is_texturable(format))
+         return false;
+   }
 
-   if (usage & PIPE_BIND_RENDER_TARGET)
-      return true;
-   if (usage & PIPE_BIND_DEPTH_STENCIL)
-      return true;
+   /* Vertex buffer: check against vertex attribute format table */
+   if (usage & PIPE_BIND_VERTEX_BUFFER) {
+      if (!nv_format_is_vertex_format(format))
+         return false;
+   }
 
-   return !!(usage & PIPE_BIND_SAMPLER_VIEW);
+   /* Index buffer: only 8, 16, 32-bit unsigned */
+   if (usage & PIPE_BIND_INDEX_BUFFER) {
+      if (format != PIPE_FORMAT_R8_UINT &&
+          format != PIPE_FORMAT_R16_UINT &&
+          format != PIPE_FORMAT_R32_UINT)
+         return false;
+   }
+
+   /* Shader image / storage: same as texturable + renderable for typed */
+   if (usage & PIPE_BIND_SHADER_IMAGE) {
+      if (!nv_format_is_texturable(format))
+         return false;
+   }
+
+   /* Display/scanout: limited to common display formats */
+   if (usage & (PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SCANOUT)) {
+      switch (format) {
+      case PIPE_FORMAT_B8G8R8A8_UNORM:
+      case PIPE_FORMAT_B8G8R8X8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_R8G8B8X8_UNORM:
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      case PIPE_FORMAT_R16G16B16A16_FLOAT:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   /* Constant buffer / shader buffer / stream output / shared / linear:
+    * these are format-independent binds; accept if format is valid. */
+   return true;
 }
 
 /* Fence: opaque handle is nv_fence*; wait on latest seq in the fence object. */

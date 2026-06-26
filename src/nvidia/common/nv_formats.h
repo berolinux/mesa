@@ -508,6 +508,150 @@ nv_format_is_vertex_format(enum pipe_format fmt)
    return nv_pipe_to_vtx_format(fmt) != 0;
 }
 
+/**
+ * Check if a pipe format is texturable (sampler view) on NVC597.
+ *
+ * Turing can sample from any format that has an RT, ZT, or vertex encoding,
+ * plus compressed formats (BC/DXT/ETC/ASTC) handled via TIC COMPONENTS fields.
+ * This conservative check covers the common texturable set.
+ */
+static inline bool
+nv_format_is_texturable(enum pipe_format fmt)
+{
+   /* Anything renderable or depth-testable is texturable */
+   if (nv_pipe_to_rt_format(fmt) != NV_RT_FORMAT_DISABLED)
+      return true;
+   if (nv_pipe_to_zt_format(fmt) != 0)
+      return true;
+
+   /* Compressed texture formats: DXT/BC/ETC/ASTC are handled by TIC
+    * COMPONENTS encoding; allow all standard compressed formats. */
+   switch (fmt) {
+   case PIPE_FORMAT_DXT1_RGB:
+   case PIPE_FORMAT_DXT1_RGBA:
+   case PIPE_FORMAT_DXT1_SRGB:
+   case PIPE_FORMAT_DXT1_SRGBA:
+   case PIPE_FORMAT_DXT3_RGBA:
+   case PIPE_FORMAT_DXT3_SRGBA:
+   case PIPE_FORMAT_DXT5_RGBA:
+   case PIPE_FORMAT_DXT5_SRGBA:
+   case PIPE_FORMAT_RGTC1_UNORM:
+   case PIPE_FORMAT_RGTC1_SNORM:
+   case PIPE_FORMAT_RGTC2_UNORM:
+   case PIPE_FORMAT_RGTC2_SNORM:
+   case PIPE_FORMAT_BPTC_RGBA_UNORM:
+   case PIPE_FORMAT_BPTC_SRGBA:
+   case PIPE_FORMAT_BPTC_RGB_FLOAT:
+   case PIPE_FORMAT_BPTC_RGB_UFLOAT:
+   case PIPE_FORMAT_ETC2_RGB8:
+   case PIPE_FORMAT_ETC2_SRGB8:
+   case PIPE_FORMAT_ETC2_RGB8A1:
+   case PIPE_FORMAT_ETC2_SRGB8A1:
+   case PIPE_FORMAT_ETC2_RGBA8:
+   case PIPE_FORMAT_ETC2_SRGBA8:
+   case PIPE_FORMAT_ETC2_R11_UNORM:
+   case PIPE_FORMAT_ETC2_R11_SNORM:
+   case PIPE_FORMAT_ETC2_RG11_UNORM:
+   case PIPE_FORMAT_ETC2_RG11_SNORM:
+   case PIPE_FORMAT_ASTC_4x4:
+   case PIPE_FORMAT_ASTC_5x4:
+   case PIPE_FORMAT_ASTC_5x5:
+   case PIPE_FORMAT_ASTC_6x5:
+   case PIPE_FORMAT_ASTC_6x6:
+   case PIPE_FORMAT_ASTC_8x5:
+   case PIPE_FORMAT_ASTC_8x6:
+   case PIPE_FORMAT_ASTC_8x8:
+   case PIPE_FORMAT_ASTC_10x5:
+   case PIPE_FORMAT_ASTC_10x6:
+   case PIPE_FORMAT_ASTC_10x8:
+   case PIPE_FORMAT_ASTC_10x10:
+   case PIPE_FORMAT_ASTC_12x10:
+   case PIPE_FORMAT_ASTC_12x12:
+   case PIPE_FORMAT_ASTC_4x4_SRGB:
+   case PIPE_FORMAT_ASTC_5x4_SRGB:
+   case PIPE_FORMAT_ASTC_5x5_SRGB:
+   case PIPE_FORMAT_ASTC_6x5_SRGB:
+   case PIPE_FORMAT_ASTC_6x6_SRGB:
+   case PIPE_FORMAT_ASTC_8x5_SRGB:
+   case PIPE_FORMAT_ASTC_8x6_SRGB:
+   case PIPE_FORMAT_ASTC_8x8_SRGB:
+   case PIPE_FORMAT_ASTC_10x5_SRGB:
+   case PIPE_FORMAT_ASTC_10x6_SRGB:
+   case PIPE_FORMAT_ASTC_10x8_SRGB:
+   case PIPE_FORMAT_ASTC_10x10_SRGB:
+   case PIPE_FORMAT_ASTC_12x10_SRGB:
+   case PIPE_FORMAT_ASTC_12x12_SRGB:
+      return true;
+   default:
+      break;
+   }
+
+   /* R9G9B9E5 shared-exponent float is texturable but not renderable */
+   if (fmt == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return true;
+
+   /* Vertex-compatible formats are also texturable via buffer textures */
+   if (nv_pipe_to_vtx_format(fmt) != 0)
+      return true;
+
+   return false;
+}
+
+/**
+ * Check if a hardware RT format is an integer (sint/uint) format.
+ *
+ * Integer RT formats have "S" (signed) or "U" (unsigned) type designators
+ * in the HW enum.  These are identified by their format codes.
+ */
+static inline bool
+nv_rt_format_is_integer(uint32_t rt)
+{
+   switch (rt) {
+   case NV_RT_FORMAT_RS32_GS32_BS32_AS32:
+   case NV_RT_FORMAT_RU32_GU32_BU32_AU32:
+   case NV_RT_FORMAT_RS32_GS32_BS32_X32:
+   case NV_RT_FORMAT_RU32_GU32_BU32_X32:
+   case NV_RT_FORMAT_RS16_GS16_BS16_AS16:
+   case NV_RT_FORMAT_RU16_GU16_BU16_AU16:
+   case NV_RT_FORMAT_RS32_GS32:
+   case NV_RT_FORMAT_RU32_GU32:
+   case NV_RT_FORMAT_AU2BU10GU10RU10:
+   case NV_RT_FORMAT_AS8BS8GS8RS8:
+   case NV_RT_FORMAT_AU8BU8GU8RU8:
+   case NV_RT_FORMAT_RS16_GS16:
+   case NV_RT_FORMAT_RU16_GU16:
+   case NV_RT_FORMAT_RS32:
+   case NV_RT_FORMAT_RU32:
+   case NV_RT_FORMAT_GS8RS8:
+   case NV_RT_FORMAT_GU8RU8:
+   case NV_RT_FORMAT_RS16:
+   case NV_RT_FORMAT_RU16:
+   case NV_RT_FORMAT_RS8:
+   case NV_RT_FORMAT_RU8:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/**
+ * Check if a pipe format supports alpha blending on NVC597.
+ *
+ * Integer formats and depth/stencil formats do NOT support blending.
+ * Only float/unorm/snorm color RT formats can blend.
+ */
+static inline bool
+nv_format_is_blendable(enum pipe_format fmt)
+{
+   uint32_t rt = nv_pipe_to_rt_format(fmt);
+   if (rt == NV_RT_FORMAT_DISABLED)
+      return false;
+   /* Integer (sint/uint) RT formats cannot blend */
+   if (nv_rt_format_is_integer(rt))
+      return false;
+   return true;
+}
+
 #ifdef __cplusplus
 }
 #endif
