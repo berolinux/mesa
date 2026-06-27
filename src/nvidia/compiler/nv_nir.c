@@ -723,10 +723,26 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
    }
 
    case nir_intrinsic_load_ssbo: {
-      /* SSBO load via global (descriptor supplies base; offset in src[1]) */
+      /* SSBO load via global (descriptor supplies base; offset in src[1]).
+       * Multi-component: emit consecutive LDG.U32 with addr += 4 between. */
+      unsigned ncomp = intr->def.num_components ? intr->def.num_components : 1;
       rd = ssa_reg_dst(&intr->def);
-      ra = src_reg_reload(sb, &intr->src[1]); /* byte offset / address proxy */
-      ok = nv_sass_emit_ldg_u32(sb, rd, ra);
+      ra = src_reg_reload(sb, &intr->src[1]);
+      {
+         uint8_t addr_reg = ra;
+         unsigned c;
+         for (c = 0; c < ncomp; c++) {
+            uint8_t rdc = (uint8_t)(rd + c);
+            if (c > 0) {
+               if (!nv_sass_emit_iadd_rri(sb, NV_RA_SPILL_TMP_REG, addr_reg, 4))
+                  return false;
+               addr_reg = NV_RA_SPILL_TMP_REG;
+               nv_sass_note_reg(sb, rdc);
+            }
+            if (!nv_sass_emit_ldg_u32(sb, rdc, addr_reg))
+               return false;
+         }
+      }
       break;
    }
 
