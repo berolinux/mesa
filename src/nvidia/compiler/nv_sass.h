@@ -162,6 +162,14 @@ extern "C" {
 /* MEMBAR — memory barrier */
 #define NV_SASS_MEMBAR_HI_BASE  0xef980000u
 
+/* OUT — geometry shader output (emit_vertex / end_primitive).
+ * Maxwell/Pascal: lo has mode/stream, hi carries OUT opcode class.
+ * Mode: 0=EMIT, 1=CUT, 2=EMIT_THEN_CUT */
+#define NV_SASS_OUT_HI_BASE     0xfbe00000u
+#define NV_SASS_OUT_MODE_EMIT           0
+#define NV_SASS_OUT_MODE_CUT            1
+#define NV_SASS_OUT_MODE_EMIT_CUT       2
+
 /* IMNMX max bit */
 #define NV_SASS_MINMAX_MAX_BIT  (1u << 23)
 
@@ -389,6 +397,7 @@ bool nv_sass_emit_bar_sync(struct nv_sass_buf *b, uint8_t barrier_id);
 bool nv_sass_emit_membar(struct nv_sass_buf *b);
 bool nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
                        uint8_t rb_data, uint8_t atom_op);
+bool nv_sass_emit_out(struct nv_sass_buf *b, uint8_t mode, uint8_t stream);
 bool nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset);
 bool nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
                            uint8_t pred, bool invert);

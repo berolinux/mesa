@@ -988,6 +988,22 @@ isel_intrinsic(struct nv_sass_buf *sb, nir_intrinsic_instr *intr)
       ok = nv_sass_emit_frag_coord(sb, rd);
       break;
 
+   case nir_intrinsic_emit_vertex:
+   case nir_intrinsic_emit_vertex_with_counter: {
+      uint8_t stream = 0;
+      if (nir_intrinsic_has_stream_id(intr))
+         stream = (uint8_t)(nir_intrinsic_stream_id(intr) & 0x3);
+      return nv_sass_emit_out(sb, NV_SASS_OUT_MODE_EMIT, stream);
+   }
+
+   case nir_intrinsic_end_primitive:
+   case nir_intrinsic_end_primitive_with_counter: {
+      uint8_t stream = 0;
+      if (nir_intrinsic_has_stream_id(intr))
+         stream = (uint8_t)(nir_intrinsic_stream_id(intr) & 0x3);
+      return nv_sass_emit_out(sb, NV_SASS_OUT_MODE_CUT, stream);
+   }
+
    case nir_intrinsic_load_per_vertex_input:
    case nir_intrinsic_store_deref:
    case nir_intrinsic_load_deref:

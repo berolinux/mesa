@@ -641,6 +641,18 @@ nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
 }
 
 bool
+nv_sass_emit_out(struct nv_sass_buf *b, uint8_t mode, uint8_t stream)
+{
+   /* OUT: geometry shader emit_vertex / end_primitive.
+    * lo: mode in [1:0], stream in [9:8] (Maxwell/Pascal encoding).
+    * hi: OUT opcode class. */
+   return nv_sass_emit_raw(b,
+                           ((uint32_t)(mode & 0x3)) |
+                           ((uint32_t)(stream & 0x3) << 8),
+                           NV_SASS_OUT_HI_BASE);
+}
+
+bool
 nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset)
 {
    /* BRA offset — offset in instructions (approx; byte scale refined later) */
