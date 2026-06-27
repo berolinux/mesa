@@ -1024,14 +1024,38 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
    uint8_t rd = ssa_reg_dst(&tex->def);
    uint8_t ra = 0;
    uint8_t tex_idx = 0;
+   uint8_t dst_comps, coord_comps, c;
    unsigned i;
    bool ok;
+
+   /* Destination component count from the def (RGBA → 4, RG → 2, etc.) */
+   dst_comps = (uint8_t)(tex->def.num_components ? tex->def.num_components : 1);
+
+   /* Find coordinate source and its component count */
+   coord_comps = (uint8_t)tex->coord_components;
+   if (coord_comps == 0)
+      coord_comps = 1;
 
    sb->has_tex = true;
    for (i = 0; i < tex->num_srcs; i++) {
       if (tex->src[i].src_type == nir_tex_src_coord ||
-          tex->src[i].src_type == nir_tex_src_backend1)
+          tex->src[i].src_type == nir_tex_src_backend1) {
          ra = src_reg_reload(sb, &tex->src[i].src);
+         /* Load extra coordinate components into consecutive registers.
+          * The first component is already in ra from src_reg_reload.
+          * For multi-component coords (2D/3D), place subsequent components
+          * in ra+1, ra+2, ... by emitting MOV from the source SSA. */
+         if (coord_comps > 1 && tex->src[i].src.ssa) {
+            unsigned ccomp;
+            for (ccomp = 1; ccomp < coord_comps && ccomp < 4; ccomp++) {
+               uint8_t cr = (uint8_t)(ra + ccomp);
+               /* For SSA defs with multiple components, the register allocator
+                * assigns consecutive regs starting from the base.  The coord
+                * components should already be in ra, ra+1, ... so just note them. */
+               nv_sass_note_reg(sb, cr);
+            }
+         }
+      }
       if (tex->src[i].src_type == nir_tex_src_texture_handle ||
           tex->src[i].src_type == nir_tex_src_sampler_handle)
          tex_idx = (uint8_t)(tex->texture_index & 0xff);
@@ -1039,10 +1063,14 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
    if (!tex_idx)
       tex_idx = (uint8_t)(tex->texture_index & 0xff);
 
+   /* Note all destination registers for multi-component results */
+   for (c = 1; c < dst_comps && c < 4; c++)
+      nv_sass_note_reg(sb, (uint8_t)(rd + c));
+
    switch (tex->op) {
    case nir_texop_txf:
    case nir_texop_txf_ms:
-      ok = nv_sass_emit_tld(sb, rd, ra, tex_idx);
+      ok = nv_sass_emit_tld(sb, rd, ra, tex_idx, dst_comps, coord_comps);
       break;
    case nir_texop_txs:
       ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_DIMS);
@@ -1057,15 +1085,16 @@ isel_tex(struct nv_sass_buf *sb, nir_tex_instr *tex)
       ok = nv_sass_emit_txq(sb, rd, tex_idx, NV_SASS_TXQ_SAMPLER_LOD);
       break;
    case nir_texop_tg4:
-      /* Gather4: TEX with gather semantics (component select refined later) */
-      ok = nv_sass_emit_tex(sb, rd, ra, tex_idx);
+      /* Gather4: TEX with gather semantics; always returns 4 components */
+      ok = nv_sass_emit_tex(sb, rd, ra, tex_idx,
+                            dst_comps < 4 ? 4 : dst_comps, coord_comps);
       break;
    case nir_texop_tex:
    case nir_texop_txb:
    case nir_texop_txl:
    case nir_texop_txd:
    default:
-      ok = nv_sass_emit_tex(sb, rd, ra, tex_idx);
+      ok = nv_sass_emit_tex(sb, rd, ra, tex_idx, dst_comps, coord_comps);
       break;
    }
    if (!ok)

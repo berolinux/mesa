@@ -369,8 +369,10 @@ bool nv_sass_emit_f2i(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_sig
 bool nv_sass_emit_i2f(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, bool is_signed);
 bool nv_sass_emit_mufu(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t mufu_op);
 bool nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank, uint16_t offset_dwords);
-bool nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
-bool nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord, uint8_t tex_idx);
+bool nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
+                      uint8_t tex_idx, uint8_t dst_comps, uint8_t coord_comps);
+bool nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
+                      uint8_t tex_idx, uint8_t dst_comps, uint8_t coord_comps);
 bool nv_sass_emit_txq(struct nv_sass_buf *b, uint8_t rd, uint8_t tex_idx, uint8_t query_type);
 bool nv_sass_emit_iadd_neg_rb(struct nv_sass_buf *b, uint8_t rd, uint8_t ra, uint8_t rb);
 

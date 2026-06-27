@@ -820,26 +820,48 @@ nv_sass_emit_ldc(struct nv_sass_buf *b, uint8_t rd, uint8_t bank,
 
 bool
 nv_sass_emit_tex(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
-                 uint8_t tex_idx)
+                 uint8_t tex_idx, uint8_t dst_comps, uint8_t coord_comps)
 {
-   nv_sass_note_reg(b, rd);
-   nv_sass_note_reg(b, ra_coord);
+   uint8_t i;
+   /* TEX writes dst_comps consecutive registers starting at Rd.
+    * Maxwell/Pascal encoding: dest component mask in hi[11:8] (RGBA bits).
+    * Coordinate count in hi[14:12] minus one.
+    * Register pair: Rd..Rd+N-1 for results, Ra..Ra+M-1 for coords. */
+   uint32_t hi = NV_SASS_TEX_HI_BASE;
+   uint8_t mask = (uint8_t)((1u << dst_comps) - 1u);
+   hi |= ((uint32_t)(mask & 0xf) << 8);
+   if (coord_comps > 1)
+      hi |= ((uint32_t)((coord_comps - 1u) & 0x7) << 12);
+   for (i = 0; i < dst_comps; i++)
+      nv_sass_note_reg(b, (uint8_t)(rd + i));
+   for (i = 0; i < coord_comps; i++)
+      nv_sass_note_reg(b, (uint8_t)(ra_coord + i));
    b->has_tex = true;
    return nv_sass_emit_raw(b,
                            pack_lo_rrr(rd, ra_coord, 0) | ((uint32_t)tex_idx << 24),
-                           NV_SASS_TEX_HI_BASE);
+                           hi);
 }
 
 bool
 nv_sass_emit_tld(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_coord,
-                 uint8_t tex_idx)
+                 uint8_t tex_idx, uint8_t dst_comps, uint8_t coord_comps)
 {
-   nv_sass_note_reg(b, rd);
-   nv_sass_note_reg(b, ra_coord);
+   uint8_t i;
+   /* TLD (texel fetch) writes dst_comps consecutive registers from Rd.
+    * Same encoding as TEX for component mask. */
+   uint32_t hi = NV_SASS_TLD_HI_BASE;
+   uint8_t mask = (uint8_t)((1u << dst_comps) - 1u);
+   hi |= ((uint32_t)(mask & 0xf) << 8);
+   if (coord_comps > 1)
+      hi |= ((uint32_t)((coord_comps - 1u) & 0x7) << 12);
+   for (i = 0; i < dst_comps; i++)
+      nv_sass_note_reg(b, (uint8_t)(rd + i));
+   for (i = 0; i < coord_comps; i++)
+      nv_sass_note_reg(b, (uint8_t)(ra_coord + i));
    b->has_tex = true;
    return nv_sass_emit_raw(b,
                            pack_lo_rrr(rd, ra_coord, 0) | ((uint32_t)tex_idx << 24),
-                           NV_SASS_TLD_HI_BASE);
+                           hi);
 }
 
 bool
