@@ -13,8 +13,10 @@
 #include "util/u_memory.h"
 #include "util/u_resource.h"
 #include "util/format/u_format.h"
+#include "frontend/drm_driver.h"
 
 #include <xf86drm.h>
+#include <drm_fourcc.h>
 
 static bool
 resource_use_vram(const struct pipe_resource *templ)
@@ -224,15 +226,85 @@ nvgpu_resource_from_handle(struct pipe_screen *pscreen,
                            struct winsys_handle *whandle,
                            unsigned usage)
 {
-   /* DMA-BUF import path: real implementation maps fd via RM import.
-    * For now allocate a placeholder resource with the given size; full
-    * import via NV_ESC_RM_IMPORT_OBJECT_FROM_FD comes next tick. */
-   struct pipe_resource tmpl = *templ;
-   (void)whandle;
+   struct nvgpu_screen *screen = nvgpu_screen(pscreen);
+   struct nvgpu_resource *res;
+   struct nv_rm_bo *bo = NULL;
+
+   if (!whandle)
+      return NULL;
+
+   /* DMA-BUF import via RM */
+   if (whandle->type == WINSYS_HANDLE_TYPE_FD && screen->rm) {
+      bo = nv_rm_bo_import_dmabuf(screen->rm, whandle->handle);
+   }
+
+   if (!bo) {
+      /* Fallback: allocate fresh (no real import) */
+      struct pipe_resource tmpl = *templ;
+      if (!tmpl.width0)
+         tmpl.width0 = 1;
+      return nvgpu_resource_create(pscreen, &tmpl);
+   }
+
+   res = CALLOC_STRUCT(nvgpu_resource);
+   if (!res) {
+      nv_rm_bo_free(bo);
+      return NULL;
+   }
+   res->b.b = *templ;
+   res->b.b.screen = pscreen;
+   pipe_reference_init(&res->b.b.reference, 1);
+   res->bo = bo;
+   res->gpu_offset = nv_rm_bo_gpu_offset(bo);
+   res->cpu_ptr = nv_rm_bo_map(bo);
+   res->rm_handle = nv_rm_bo_handle(bo);
+   res->internal_format = templ->format;
+   res->row_pitch = whandle->stride;
+   res->bpp = util_format_get_blocksize(templ->format);
+   if (!res->bpp)
+      res->bpp = 4;
+   res->linear = true;
+   res->blocklinear = false;
+   res->level0_size = whandle->stride * templ->height0;
+   return &res->b.b;
+}
+
+bool
+nvgpu_resource_get_handle(struct pipe_screen *pscreen,
+                          struct pipe_context *pctx,
+                          struct pipe_resource *pres,
+                          struct winsys_handle *whandle,
+                          unsigned usage)
+{
+   struct nvgpu_resource *res = nvgpu_resource(pres);
+   (void)pscreen;
+   (void)pctx;
    (void)usage;
-   if (!tmpl.width0)
-      tmpl.width0 = 1;
-   return nvgpu_resource_create(pscreen, &tmpl);
+
+   if (!res || !res->bo || !whandle)
+      return false;
+
+   switch (whandle->type) {
+   case WINSYS_HANDLE_TYPE_KMS:
+      whandle->handle = nv_rm_bo_handle(res->bo);
+      break;
+   case WINSYS_HANDLE_TYPE_FD: {
+      int fd = -1;
+      if (nv_rm_bo_export_dmabuf(res->bo, &fd) != 0 || fd < 0)
+         return false;
+      whandle->handle = (unsigned)fd;
+      break;
+   }
+   default:
+      return false;
+   }
+
+   whandle->stride = res->row_pitch;
+   whandle->offset = 0;
+   whandle->modifier = res->blocklinear ? DRM_FORMAT_MOD_INVALID
+                                        : DRM_FORMAT_MOD_LINEAR;
+   whandle->size = nv_rm_bo_size(res->bo);
+   return true;
 }
 
 void

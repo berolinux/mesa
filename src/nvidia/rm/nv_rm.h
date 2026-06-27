@@ -288,6 +288,9 @@ nv_rm_bo_gpu_offset(struct nv_rm_bo *bo);
 int
 nv_rm_bo_export_dmabuf(struct nv_rm_bo *bo, int *fd_out);
 
+struct nv_rm_bo *
+nv_rm_bo_import_dmabuf(struct nv_rm_device *rm, int fd);
+
 /* Probe helpers */
 bool nv_rm_probe_available(void);
 int nv_rm_probe_gpu_count(void);

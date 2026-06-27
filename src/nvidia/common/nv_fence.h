@@ -33,6 +33,7 @@ struct nv_fence {
    volatile uint32_t *sema_cpu;
    uint64_t sema_gpu_addr;
    uint32_t seq;
+   int32_t refcount;    /* Gallium pipe_fence_handle lifecycle; init to 1 */
    bool signaled;
 };
 
@@ -41,6 +42,22 @@ nv_fence_create(struct nv_rm_device *rm);
 
 void
 nv_fence_destroy(struct nv_fence *f);
+
+/** Increment refcount. Safe to call on NULL. */
+static inline void
+nv_fence_ref(struct nv_fence *f)
+{
+   if (f)
+      __atomic_add_fetch(&f->refcount, 1, __ATOMIC_RELAXED);
+}
+
+/** Decrement refcount; destroy when it hits 0. Safe to call on NULL. */
+static inline void
+nv_fence_unref(struct nv_fence *f)
+{
+   if (f && __atomic_sub_fetch(&f->refcount, 1, __ATOMIC_ACQ_REL) == 0)
+      nv_fence_destroy(f);
+}
 
 uint32_t
 nv_fence_emit_3d_signal(struct nv_fence *f, struct nv_push *p);

@@ -68,6 +68,7 @@ nv_fence_create(struct nv_rm_device *rm)
    f->sema_gpu_addr = nv_rm_bo_gpu_offset(f->sema_bo);
    f->sema_cpu[0] = 0;
    f->seq = 0;
+   f->refcount = 1;
    f->signaled = true;
    return f;
 }

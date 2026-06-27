@@ -333,9 +333,18 @@ nvgpu_fence_reference(struct pipe_screen *pscreen,
                       struct pipe_fence_handle **dst,
                       struct pipe_fence_handle *src)
 {
+   struct nv_fence *old = dst ? (struct nv_fence *)*dst : NULL;
+   struct nv_fence *ref = (struct nv_fence *)src;
    (void)pscreen;
+
+   if (old == ref)
+      return;
+   if (ref)
+      nv_fence_ref(ref);
    if (dst)
       *dst = src;
+   if (old)
+      nv_fence_unref(old);
 }
 
 static bool
@@ -427,6 +436,7 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.context_create = nvgpu_context_create;
    screen->base.resource_create = nvgpu_resource_create;
    screen->base.resource_from_handle = nvgpu_resource_from_handle;
+   screen->base.resource_get_handle = nvgpu_resource_get_handle;
    screen->base.resource_destroy = nvgpu_resource_destroy;
    screen->base.query_memory_info = nvgpu_query_memory_info;
    screen->base.fence_reference = nvgpu_fence_reference;

@@ -1417,3 +1417,29 @@ nv_rm_bo_export_dmabuf(struct nv_rm_bo *bo, int *fd_out)
    return -ENOSYS;
 #endif
 }
+
+struct nv_rm_bo *
+nv_rm_bo_import_dmabuf(struct nv_rm_device *rm, int fd)
+{
+#if defined(HAVE_LIBDRM_NVIDIA)
+   struct nv_rm_bo *bo;
+   if (!rm || fd < 0)
+      return NULL;
+   bo = calloc(1, sizeof(*bo));
+   if (!bo)
+      return NULL;
+   bo->rm = rm;
+   bo->nvbo = nvidia_bo_import_dmabuf(rm->dev, fd);
+   if (!bo->nvbo) {
+      free(bo);
+      return NULL;
+   }
+   bo->rm_handle = nvidia_bo_handle(bo->nvbo);
+   bo->size = nvidia_bo_size(bo->nvbo);
+   bo->gpu_va = nvidia_bo_gpu_offset(bo->nvbo);
+   return bo;
+#else
+   (void)rm; (void)fd;
+   return NULL;
+#endif
+}

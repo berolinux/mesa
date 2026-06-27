@@ -117,7 +117,12 @@ static void nvgpu_set_##name(struct pipe_context *pctx, const type *state) \
    else memset(&ctx->field, 0, sizeof(ctx->field)); \
 }
 
-NVGPU_SIMPLE_SET(framebuffer_state, fb, struct pipe_framebuffer_state)
+static void nvgpu_set_framebuffer_state(struct pipe_context *pctx,
+                                        const struct pipe_framebuffer_state *state)
+{
+   struct nvgpu_context *ctx = nvgpu_context(pctx);
+   util_copy_framebuffer_state(&ctx->fb, state);
+}
 
 static void
 nvgpu_set_viewport_states(struct pipe_context *pctx, unsigned start_slot,
@@ -1521,8 +1526,11 @@ nvgpu_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
       nv_channel_wait_idle(ctx->channel, 100000000ull);
    }
 
-   if (fence)
-      *fence = (struct pipe_fence_handle *)(ctx->fence ? ctx->fence : NULL);
+   if (fence) {
+      if (ctx->fence)
+         nv_fence_ref(ctx->fence);
+      *fence = (struct pipe_fence_handle *)ctx->fence;
+   }
 }
 
 static void
@@ -1569,7 +1577,7 @@ nvgpu_destroy_context(struct pipe_context *pctx)
       nv_rm_bo_free(ctx->indirect_shadow_bo);
    }
    if (ctx->fence)
-      nv_fence_destroy(ctx->fence);
+      nv_fence_unref(ctx->fence);
    if (ctx->channel)
       nv_channel_destroy(ctx->channel);
    if (ctx->push_bo) {

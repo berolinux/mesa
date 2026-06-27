@@ -43,5 +43,10 @@ struct pipe_resource *nvgpu_resource_from_handle(struct pipe_screen *pscreen,
                                                  unsigned usage);
 void nvgpu_resource_destroy(struct pipe_screen *pscreen,
                             struct pipe_resource *pres);
+bool nvgpu_resource_get_handle(struct pipe_screen *pscreen,
+                               struct pipe_context *pctx,
+                               struct pipe_resource *pres,
+                               struct winsys_handle *whandle,
+                               unsigned usage);
 
 #endif
