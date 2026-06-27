@@ -353,6 +353,95 @@ nv_tex_encode_2d(const struct nv_tex_desc *d, struct nv_tex_entry *e)
       nv_tex_encode_pitch_2d(d, e);
 }
 
+/*
+ * Encode 1D_BUFFER texture header for SSBOs / buffer textures.
+ * HEADER_VERSION = ONE_D_BUFFER (0), TEXTURE_TYPE = ONE_D_BUFFER (6).
+ * Address is byte-granular (no shift); width is in elements.
+ *
+ * Field layout from clc597tex.h TEXHEAD_1D:
+ *   COMPONENTS               MW(6:0)
+ *   R/G/B/A_DATA_TYPE        MW(9:7)(12:10)(15:13)(18:16)
+ *   X/Y/Z/W_SOURCE           MW(21:19)(24:22)(27:25)(30:28)
+ *   ADDRESS_BITS31TO0        MW(63:32)
+ *   ADDRESS_BITS48TO32       MW(80:64)
+ *   HEADER_VERSION           MW(87:85) = 0 (ONE_D_BUFFER)
+ *   WIDTH_MINUS_ONE_15TO0    MW(143:128)
+ *   WIDTH_MINUS_ONE_31TO16   MW(111:96)
+ *   TEXTURE_TYPE             MW(154:151) = 6 (ONE_D_BUFFER)
+ */
+static inline void
+nv_tex_encode_1d_buffer(uint64_t gpu_addr, uint32_t size_bytes,
+                        uint8_t comp, uint8_t data_type,
+                        struct nv_tex_entry *e)
+{
+   uint32_t addr_lo = (uint32_t)(gpu_addr);
+   uint32_t addr_hi = (uint32_t)((gpu_addr >> 32) & 0x1ffffu);
+   /* Width in elements; for R32 buffers, each element is 4 bytes */
+   uint32_t width = size_bytes;
+   uint32_t w1;
+
+   if (!comp)
+      comp = NV_TEX_COMP_R32;
+   if (!data_type)
+      data_type = NV_TEX_DT_UINT;
+   /* Convert byte size to element count based on component size */
+   switch (comp) {
+   case NV_TEX_COMP_R32G32B32A32: width /= 16; break;
+   case NV_TEX_COMP_R16G16B16A16: width /= 8; break;
+   case NV_TEX_COMP_R32G32:       width /= 8; break;
+   case NV_TEX_COMP_A8B8G8R8:
+   case NV_TEX_COMP_X8B8G8R8:
+   case NV_TEX_COMP_R32:          width /= 4; break;
+   case NV_TEX_COMP_R16G16:
+   case NV_TEX_COMP_G8R8:         width /= 2; break;
+   case NV_TEX_COMP_R16:          width /= 2; break;
+   case NV_TEX_COMP_R8:           break; /* already bytes */
+   default:                       width /= 4; break;
+   }
+   if (width == 0)
+      width = 1;
+   w1 = width - 1;
+
+   memset(e, 0, sizeof(*e));
+   /* Default sampler: clamp-to-edge, nearest filter (irrelevant for buffers) */
+   e->samp[0] = (NV_TEX_SAMP_ADDR_CLAMP_EDGE) |
+                (NV_TEX_SAMP_ADDR_CLAMP_EDGE << 3) |
+                (NV_TEX_SAMP_ADDR_CLAMP_EDGE << 6);
+   e->samp[1] = (NV_TEX_SAMP_FILT_NEAREST) |
+                (NV_TEX_SAMP_FILT_NEAREST << 3);
+
+   /* COMPONENTS MW(6:0) */
+   nv_tex_mw_set_u32(e->head, 6, 0, comp);
+   /* R/G/B/A_DATA_TYPE */
+   nv_tex_mw_set_u32(e->head, 9, 7, data_type);
+   nv_tex_mw_set_u32(e->head, 12, 10, data_type);
+   nv_tex_mw_set_u32(e->head, 15, 13, data_type);
+   nv_tex_mw_set_u32(e->head, 18, 16, data_type);
+   /* X/Y/Z/W_SOURCE = R,G,B,A pass-through */
+   nv_tex_mw_set_u32(e->head, 21, 19, NV_TEX_SRC_R);
+   nv_tex_mw_set_u32(e->head, 24, 22, NV_TEX_SRC_G);
+   nv_tex_mw_set_u32(e->head, 27, 25, NV_TEX_SRC_B);
+   nv_tex_mw_set_u32(e->head, 30, 28, NV_TEX_SRC_A);
+   /* ADDRESS_BITS31TO0 MW(63:32) — full byte address, no shift */
+   nv_tex_mw_set(e->head, NV_TEX_HEADER_DWORDS, 63, 32, addr_lo);
+   /* ADDRESS_BITS48TO32 MW(80:64) */
+   nv_tex_mw_set_u32(e->head, 80, 64, addr_hi);
+   /* HEADER_VERSION MW(87:85) = 0 (ONE_D_BUFFER) */
+   nv_tex_mw_set_u32(e->head, 87, 85, 0);
+   /* WIDTH_MINUS_ONE_BITS31TO16 MW(111:96) — high 16 bits */
+   nv_tex_mw_set_u32(e->head, 111, 96, (w1 >> 16) & 0xffffu);
+   /* WIDTH_MINUS_ONE_BITS15TO0 MW(143:128) — low 16 bits */
+   nv_tex_mw_set_u32(e->head, 143, 128, w1 & 0xffffu);
+   /* TEXTURE_TYPE MW(154:151) = ONE_D_BUFFER (6) */
+   nv_tex_mw_set_u32(e->head, 154, 151, NV_TEX_TEXTURE_TYPE_1D_BUF);
+}
+
+/* Slot layout within the tex pool:
+ *   0 .. NV_TEX_SSBO_SLOT_BASE-1   : sampler/texture entries (per-stage)
+ *   NV_TEX_SSBO_SLOT_BASE ..       : SSBO 1D_BUFFER entries
+ */
+#define NV_TEX_SSBO_SLOT_BASE  32
+
 /** Map common pipe_format numeric id to tex component size + data type. */
 static inline void
 nv_tex_format_from_pipe(unsigned pipe_fmt, uint8_t *comp_out, uint8_t *dt_out)

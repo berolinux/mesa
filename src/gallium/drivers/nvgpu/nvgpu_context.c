@@ -812,81 +812,212 @@ nvgpu_emit_fixed_func(struct nvgpu_context *ctx, struct nv_push *push)
       nv_3d_emit_sample_mask(push, ctx->sample_mask);
 }
 
-/* Upload FS sampler views into tex pool as pitch 2D headers (slot = view index). */
+/* Upload a single sampler view into the tex pool at the given slot. */
+static void
+nvgpu_emit_one_texture(struct nvgpu_context *ctx, unsigned slot,
+                       struct pipe_sampler_view *sv)
+{
+   struct nvgpu_resource *res;
+   struct nv_tex_desc desc;
+   struct nv_tex_entry ent;
+   struct pipe_sampler_state *ss = NULL;
+   unsigned pitch, w, h;
+
+   if (!sv || !sv->texture || !ctx->tex_pool)
+      return;
+   res = nvgpu_resource(sv->texture);
+   if (!res)
+      return;
+
+   memset(&desc, 0, sizeof(desc));
+   w = sv->texture->width0;
+   h = sv->texture->height0;
+   pitch = align(util_format_get_stride(sv->format, w), 128);
+   desc.gpu_addr = res->gpu_offset;
+   desc.width = w;
+   desc.height = h;
+   desc.pitch = pitch;
+   nv_tex_format_from_pipe((unsigned)sv->format, &desc.components, &desc.data_type);
+   desc.src_x = NV_TEX_SRC_R;
+   desc.src_y = NV_TEX_SRC_G;
+   desc.src_z = NV_TEX_SRC_B;
+   desc.src_w = NV_TEX_SRC_A;
+   desc.normalized_coords = true;
+   desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
+   desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
+   desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
+
+   if (slot < ctx->num_sampler_cso && ctx->sampler_cso[slot])
+      ss = ctx->sampler_cso[slot];
+   if (ss) {
+      if (ss->wrap_s == PIPE_TEX_WRAP_REPEAT)
+         desc.addr_u = NV_TEX_SAMP_ADDR_WRAP;
+      else if (ss->wrap_s == PIPE_TEX_WRAP_MIRROR_REPEAT)
+         desc.addr_u = NV_TEX_SAMP_ADDR_MIRROR;
+      if (ss->wrap_t == PIPE_TEX_WRAP_REPEAT)
+         desc.addr_v = NV_TEX_SAMP_ADDR_WRAP;
+      if (ss->min_img_filter == PIPE_TEX_FILTER_NEAREST)
+         desc.min_filt = NV_TEX_SAMP_FILT_NEAREST;
+      if (ss->mag_img_filter == PIPE_TEX_FILTER_NEAREST)
+         desc.mag_filt = NV_TEX_SAMP_FILT_NEAREST;
+   }
+
+   /* Blocklinear textures use TEXHEAD_BL; linear/pitch use TEXHEAD_PITCH */
+   if (res->blocklinear && !res->linear) {
+      desc.blocklinear = true;
+      desc.gobs_width = res->gobs_width;
+      desc.gobs_height = res->gobs_height ? res->gobs_height : NV_TEX_GOBS_SIXTEEN;
+      desc.gobs_depth = res->gobs_depth;
+      desc.gpu_addr &= ~0x1ffull;
+      if (res->row_pitch)
+         desc.pitch = res->row_pitch;
+   }
+   nv_tex_encode_2d(&desc, &ent);
+   nv_tex_pool_set_entry(ctx->tex_pool, (int)slot, &ent);
+}
+
+/* Upload sampler views for all active shader stages into the tex pool. */
 static void
 nvgpu_emit_textures(struct nvgpu_context *ctx, struct nv_push *push)
 {
-   unsigned i, n;
-   (void)push;
+   static const mesa_shader_stage stages[] = {
+      MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT, MESA_SHADER_GEOMETRY,
+      MESA_SHADER_TESS_CTRL, MESA_SHADER_TESS_EVAL, MESA_SHADER_COMPUTE,
+   };
+   unsigned si, i;
+   bool any = false;
 
    if (!ctx->tex_pool)
       return;
 
-   n = ctx->num_samplers[MESA_SHADER_FRAGMENT];
-   for (i = 0; i < n && i < PIPE_MAX_SAMPLERS; i++) {
-      struct pipe_sampler_view *sv = ctx->samplers[MESA_SHADER_FRAGMENT][i];
-      struct nvgpu_resource *res;
-      struct nv_tex_desc desc;
-      struct nv_tex_entry ent;
-      struct pipe_sampler_state *ss = NULL;
-      unsigned pitch, w, h;
-
-      if (!sv || !sv->texture)
+   for (si = 0; si < ARRAY_SIZE(stages); si++) {
+      mesa_shader_stage st = stages[si];
+      unsigned n;
+      if (st >= NVGPU_SHADER_STAGES)
          continue;
-      res = nvgpu_resource(sv->texture);
-      if (!res)
-         continue;
-
-      memset(&desc, 0, sizeof(desc));
-      w = sv->texture->width0;
-      h = sv->texture->height0;
-      pitch = align(util_format_get_stride(sv->format, w), 128);
-      desc.gpu_addr = res->gpu_offset;
-      desc.width = w;
-      desc.height = h;
-      desc.pitch = pitch;
-      nv_tex_format_from_pipe((unsigned)sv->format, &desc.components, &desc.data_type);
-      desc.src_x = NV_TEX_SRC_R;
-      desc.src_y = NV_TEX_SRC_G;
-      desc.src_z = NV_TEX_SRC_B;
-      desc.src_w = NV_TEX_SRC_A;
-      desc.normalized_coords = true;
-      desc.addr_u = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-      desc.addr_v = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-      desc.addr_p = NV_TEX_SAMP_ADDR_CLAMP_EDGE;
-      desc.mag_filt = NV_TEX_SAMP_FILT_LINEAR;
-      desc.min_filt = NV_TEX_SAMP_FILT_LINEAR;
-
-      if (i < ctx->num_sampler_cso && ctx->sampler_cso[i])
-         ss = ctx->sampler_cso[i];
-      if (ss) {
-         if (ss->wrap_s == PIPE_TEX_WRAP_REPEAT)
-            desc.addr_u = NV_TEX_SAMP_ADDR_WRAP;
-         else if (ss->wrap_s == PIPE_TEX_WRAP_MIRROR_REPEAT)
-            desc.addr_u = NV_TEX_SAMP_ADDR_MIRROR;
-         if (ss->wrap_t == PIPE_TEX_WRAP_REPEAT)
-            desc.addr_v = NV_TEX_SAMP_ADDR_WRAP;
-         if (ss->min_img_filter == PIPE_TEX_FILTER_NEAREST)
-            desc.min_filt = NV_TEX_SAMP_FILT_NEAREST;
-         if (ss->mag_img_filter == PIPE_TEX_FILTER_NEAREST)
-            desc.mag_filt = NV_TEX_SAMP_FILT_NEAREST;
+      n = ctx->num_samplers[st];
+      for (i = 0; i < n && i < PIPE_MAX_SAMPLERS; i++) {
+         struct pipe_sampler_view *sv = ctx->samplers[st][i];
+         if (!sv || !sv->texture)
+            continue;
+         nvgpu_emit_one_texture(ctx, i, sv);
+         any = true;
       }
-
-      /* Blocklinear textures use TEXHEAD_BL; linear/pitch use TEXHEAD_PITCH */
-      if (res && res->blocklinear && !res->linear) {
-         desc.blocklinear = true;
-         desc.gobs_width = res->gobs_width;
-         desc.gobs_height = res->gobs_height ? res->gobs_height : NV_TEX_GOBS_SIXTEEN;
-         desc.gobs_depth = res->gobs_depth;
-         desc.gpu_addr &= ~0x1ffull;
-         if (res->row_pitch)
-            desc.pitch = res->row_pitch;
-      }
-      nv_tex_encode_2d(&desc, &ent);
-      nv_tex_pool_set_entry(ctx->tex_pool, (int)i, &ent);
    }
 
-   if (n)
+   if (any)
+      nv_tex_invalidate_caches(push);
+}
+
+/* Emit SSBO bindings as 1D_BUFFER TIC entries in the tex pool (slots 32+),
+ * and image views as TIC entries in slots after SSBOs. */
+static void
+nvgpu_emit_ssbos(struct nvgpu_context *ctx, struct nv_push *push)
+{
+   unsigned i;
+   bool any = false;
+   /* Max SSBOs we can fit between SSBO_SLOT_BASE and the pool end */
+   unsigned max_ssbo = NV_TEX_POOL_DEFAULT_N - NV_TEX_SSBO_SLOT_BASE;
+   if (max_ssbo > PIPE_MAX_SHADER_BUFFERS)
+      max_ssbo = PIPE_MAX_SHADER_BUFFERS;
+
+   if (!ctx->tex_pool)
+      return;
+
+   /* SSBOs → 1D_BUFFER TIC at slot NV_TEX_SSBO_SLOT_BASE + i */
+   for (i = 0; i < ctx->num_ssbo && i < max_ssbo; i++) {
+      struct pipe_shader_buffer *sb = &ctx->ssbo[i];
+      struct nvgpu_resource *res;
+      struct nv_tex_entry ent;
+      uint64_t addr;
+      uint32_t size;
+
+      if (!sb->buffer)
+         continue;
+      res = nvgpu_resource(sb->buffer);
+      if (!res)
+         continue;
+      addr = res->gpu_offset + sb->buffer_offset;
+      size = sb->buffer_size;
+      if (!size)
+         size = (uint32_t)res->b.b.width0;
+      if (!addr || !size)
+         continue;
+
+      nv_tex_encode_1d_buffer(addr, size, NV_TEX_COMP_R32, NV_TEX_DT_UINT,
+                              &ent);
+      nv_tex_pool_set_entry(ctx->tex_pool,
+                            (int)(NV_TEX_SSBO_SLOT_BASE + i), &ent);
+      any = true;
+   }
+
+   /* Images → 1D_BUFFER or 2D TIC depending on dimensionality.
+    * Buffer images use 1D_BUFFER; 2D images reuse the 2D encoder.
+    * Placed at SSBO_SLOT_BASE + max_ssbo + i (overflow check below). */
+   for (i = 0; i < ctx->num_images && i < PIPE_MAX_SHADER_IMAGES; i++) {
+      struct pipe_image_view *iv = &ctx->images[i];
+      struct nvgpu_resource *res;
+      unsigned slot;
+
+      if (!iv->resource)
+         continue;
+      res = nvgpu_resource(iv->resource);
+      if (!res)
+         continue;
+      slot = NV_TEX_SSBO_SLOT_BASE + max_ssbo + i;
+      if (slot >= NV_TEX_POOL_DEFAULT_N)
+         break; /* pool overflow */
+
+      if (iv->resource->target == PIPE_BUFFER) {
+         struct nv_tex_entry ent;
+         uint64_t addr = res->gpu_offset + iv->u.buf.offset;
+         uint32_t size = iv->u.buf.size;
+         if (!size)
+            size = (uint32_t)res->b.b.width0;
+         uint8_t comp = NV_TEX_COMP_R32;
+         uint8_t dt = NV_TEX_DT_UINT;
+         nv_tex_format_from_pipe((unsigned)iv->format, &comp, &dt);
+         nv_tex_encode_1d_buffer(addr, size, comp, dt, &ent);
+         nv_tex_pool_set_entry(ctx->tex_pool, (int)slot, &ent);
+         any = true;
+      } else {
+         /* 2D/3D image: encode as 2D texture */
+         struct nv_tex_desc desc;
+         struct nv_tex_entry ent;
+         unsigned pitch, w, h;
+         memset(&desc, 0, sizeof(desc));
+         w = iv->resource->width0;
+         h = iv->resource->height0;
+         pitch = align(util_format_get_stride(iv->format, w), 128);
+         desc.gpu_addr = res->gpu_offset;
+         desc.width = w;
+         desc.height = h;
+         desc.pitch = pitch;
+         nv_tex_format_from_pipe((unsigned)iv->format, &desc.components,
+                                 &desc.data_type);
+         desc.src_x = NV_TEX_SRC_R;
+         desc.src_y = NV_TEX_SRC_G;
+         desc.src_z = NV_TEX_SRC_B;
+         desc.src_w = NV_TEX_SRC_A;
+         if (res->blocklinear && !res->linear) {
+            desc.blocklinear = true;
+            desc.gobs_width = res->gobs_width;
+            desc.gobs_height = res->gobs_height ? res->gobs_height
+                                                : NV_TEX_GOBS_SIXTEEN;
+            desc.gobs_depth = res->gobs_depth;
+            desc.gpu_addr &= ~0x1ffull;
+            if (res->row_pitch)
+               desc.pitch = res->row_pitch;
+         }
+         nv_tex_encode_2d(&desc, &ent);
+         nv_tex_pool_set_entry(ctx->tex_pool, (int)slot, &ent);
+         any = true;
+      }
+   }
+
+   if (any)
       nv_tex_invalidate_caches(push);
 }
 
@@ -1224,6 +1355,7 @@ nvgpu_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       nvgpu_emit_framebuffer(ctx, &push);
       nvgpu_emit_fixed_func(ctx, &push);
       nvgpu_emit_textures(ctx, &push);
+      nvgpu_emit_ssbos(ctx, &push);
       nvgpu_emit_shaders(ctx, &push);
       nvgpu_emit_vertex_state(ctx, &push);
 
@@ -1956,6 +2088,10 @@ nvgpu_launch_grid(struct pipe_context *pctx,
    } else if (!ctx->lmem_programmed) {
       nv_compute_emit_init_state(&push, class_compute, sass_ver, 0);
    }
+
+   /* tick205: emit compute-stage textures + SSBOs into the shared tex pool */
+   nvgpu_emit_textures(ctx, &push);
+   nvgpu_emit_ssbos(ctx, &push);
 
    if (indirect_gpu_only && indirect_gpu) {
       /* Path B: materialize placeholder QMD (keep sema), CE-patch grid, PCAS */
