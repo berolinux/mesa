@@ -18,6 +18,7 @@
 #include "nv_fence.h"
 
 #include "nv_formats.h"
+#include "nir.h"
 
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
@@ -398,6 +399,52 @@ nvgpu_query_memory_info(struct pipe_screen *pscreen,
    info->nr_device_memory_evictions = 0;
 }
 
+static int
+type_size_vec4(const struct glsl_type *type, bool bindless)
+{
+   (void)bindless;
+   return glsl_count_attribute_slots(type, false);
+}
+
+static void
+nvgpu_finalize_nir(struct pipe_screen *pscreen, struct nir_shader *nir,
+                   bool optimize)
+{
+   (void)pscreen;
+   if (!nir)
+      return;
+
+   if (optimize) {
+      bool progress;
+      do {
+         progress = false;
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_dce);
+         NIR_PASS(progress, nir, nir_opt_dead_cf);
+         NIR_PASS(progress, nir, nir_opt_cse);
+         NIR_PASS(progress, nir, nir_opt_constant_folding);
+         NIR_PASS(progress, nir, nir_opt_algebraic);
+         NIR_PASS(progress, nir, nir_opt_loop);
+      } while (progress);
+   }
+
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+            type_size_vec4, nir_lower_io_lower_64bit_to_32);
+
+   /* Lower remaining ALU ops we don't handle in SASS backend */
+   NIR_PASS(_, nir, nir_lower_alu_to_scalar, NULL, NULL);
+   NIR_PASS(_, nir, nir_lower_all_phis_to_scalar);
+
+   if (optimize) {
+      NIR_PASS(_, nir, nir_opt_dce);
+      NIR_PASS(_, nir, nir_opt_dead_cf);
+   }
+
+   NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
+}
+
 struct pipe_screen *
 nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
                     struct sw_winsys *winsys)
@@ -441,12 +488,54 @@ nvgpu_screen_create(int fd, const struct pipe_screen_config *config,
    screen->base.query_memory_info = nvgpu_query_memory_info;
    screen->base.fence_reference = nvgpu_fence_reference;
    screen->base.fence_finish = nvgpu_fence_finish;
+   screen->base.finalize_nir = nvgpu_finalize_nir;
    screen->base.get_video_param = nvgpu_screen_get_video_param;
    screen->base.is_video_format_supported = nvgpu_screen_is_video_format_supported;
 
    nvgpu_init_shader_caps(screen);
    nvgpu_init_compute_caps(screen);
    nvgpu_init_screen_caps(screen);
+
+   /* NIR compiler options: tell frontend what to lower before our backend.
+    * NVIDIA Turing+ hardware has native 32-bit int/float; 16-bit is partial.
+    * We handle FMA, most ALU, shifts, min/max natively via SASS. */
+   {
+      static const nir_shader_compiler_options nvgpu_nir_options = {
+         .lower_fdiv = true,
+         .lower_flrp32 = true,
+         .lower_flrp64 = true,
+         .lower_fpow = true,
+         .lower_fmod = true,
+         .lower_bitfield_extract = true,
+         .lower_bitfield_insert = true,
+         .lower_uadd_carry = true,
+         .lower_usub_borrow = true,
+         .lower_mul_high = true,
+         .lower_extract_byte = true,
+         .lower_extract_word = true,
+         .lower_insert_byte = true,
+         .lower_insert_word = true,
+         .lower_pack_half_2x16 = true,
+         .lower_unpack_half_2x16 = true,
+         .lower_int64_options = nir_lower_imul64 | nir_lower_iadd64 |
+                                nir_lower_shift64 | nir_lower_minmax64 |
+                                nir_lower_conv64,
+         .lower_doubles_options = nir_lower_drcp | nir_lower_dsqrt |
+                                  nir_lower_drsq | nir_lower_dtrunc |
+                                  nir_lower_dfloor | nir_lower_dceil |
+                                  nir_lower_dfract | nir_lower_dround_even |
+                                  nir_lower_dmod,
+         .max_unroll_iterations = 32,
+         .force_indirect_unrolling = nir_var_all,
+         .force_indirect_unrolling_sampler = true,
+         .has_fsub = true,
+         .has_isub = true,
+         .compact_arrays = true,
+         .support_16bit_alu = false,
+      };
+      for (unsigned i = 0; i < MESA_SHADER_MESH_STAGES; i++)
+         screen->base.nir_options[i] = &nvgpu_nir_options;
+   }
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct pipe_transfer), 16);
 
