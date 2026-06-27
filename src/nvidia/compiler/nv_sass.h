@@ -244,6 +244,15 @@ extern "C" {
 #define NV_SASS_IPA_MODE_SC         3
 /* Attribute slot in lo bits [15:8], component in [17:16], mode in hi [1:0] */
 
+/* Branch fixup: a forward BRA whose offset is unknown at emit time.
+ * Stored as the dword index of the BRA instruction's lo word in the buffer.
+ * Patched when the target label is defined via nv_sass_patch_bra. */
+#define NV_SASS_MAX_FIXUPS 64
+
+struct nv_sass_fixup {
+   uint32_t bra_dword_idx; /* index into dwords[] of the BRA lo word */
+};
+
 struct nv_sass_buf {
    uint32_t *dwords;     /* owned array; 2 dwords per instruction */
    uint32_t  capacity;   /* in dwords */
@@ -251,6 +260,8 @@ struct nv_sass_buf {
    uint16_t  max_reg;    /* highest Rd/Ra/Rb index seen + 1 */
    bool      has_global_store;
    bool      has_tex;
+   struct nv_sass_fixup fixups[NV_SASS_MAX_FIXUPS];
+   uint32_t  num_fixups;
 };
 
 static inline void
@@ -379,6 +390,53 @@ bool nv_sass_emit_atom(struct nv_sass_buf *b, uint8_t rd, uint8_t ra_addr,
 bool nv_sass_emit_bra(struct nv_sass_buf *b, int32_t rel_insn_offset);
 bool nv_sass_emit_bra_pred(struct nv_sass_buf *b, int32_t rel_insn_offset,
                            uint8_t pred, bool invert);
+
+/**
+ * Emit a forward BRA with predicate; offset is unknown — records a fixup
+ * entry.  Returns fixup index (>= 0) or -1 on failure.
+ * Call nv_sass_patch_bra() when the target position is known.
+ */
+static inline int
+nv_sass_emit_bra_fwd(struct nv_sass_buf *b, uint8_t pred, bool invert)
+{
+   uint32_t bra_dword_idx;
+   int fixup_idx;
+   if (!b || b->num_fixups >= NV_SASS_MAX_FIXUPS)
+      return -1;
+   bra_dword_idx = b->count; /* lo dword of this instruction */
+   if (!nv_sass_emit_bra_pred(b, 0, pred, invert))
+      return -1;
+   fixup_idx = (int)b->num_fixups;
+   b->fixups[b->num_fixups].bra_dword_idx = bra_dword_idx;
+   b->num_fixups++;
+   return fixup_idx;
+}
+
+/**
+ * Patch a forward BRA fixup to jump to the current instruction position.
+ * fixup_idx must be from nv_sass_emit_bra_fwd.
+ */
+static inline bool
+nv_sass_patch_bra(struct nv_sass_buf *b, int fixup_idx)
+{
+   uint32_t bra_dw, target_insn, bra_insn;
+   int32_t rel;
+   if (!b || fixup_idx < 0 || (uint32_t)fixup_idx >= b->num_fixups)
+      return false;
+   bra_dw = b->fixups[fixup_idx].bra_dword_idx;
+   bra_insn = bra_dw / 2;       /* instruction index of BRA */
+   target_insn = b->count / 2;  /* current instruction index (target) */
+   rel = (int32_t)(target_insn - bra_insn - 1);
+   b->dwords[bra_dw] = (uint32_t)rel & 0xffffffu;
+   return true;
+}
+
+/** Current instruction index (for computing relative offsets). */
+static inline uint32_t
+nv_sass_current_insn(const struct nv_sass_buf *b)
+{
+   return b ? b->count / 2 : 0;
+}
 /* Vote / ballot / elect (warp collective; Maxwell VOTE class approx) */
 bool nv_sass_emit_vote_any(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg);
 bool nv_sass_emit_vote_all(struct nv_sass_buf *b, uint8_t rd, uint8_t cond_reg);

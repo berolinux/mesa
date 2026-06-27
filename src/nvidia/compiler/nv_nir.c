@@ -64,6 +64,20 @@ stage_to_sph_type(enum nv_compiler_stage stage)
 /* Active RA context for the shader being compiled (set in isel_shader). */
 static struct nv_ra_context *nv_isel_ra;
 
+/* Loop break context: break instructions emit forward BRAs that need
+ * patching at the end of the loop body.  Max nesting depth 8. */
+#define NV_ISEL_MAX_LOOP_DEPTH  8
+#define NV_ISEL_MAX_BREAKS      16
+
+struct nv_isel_loop_ctx {
+   uint32_t loop_top_insn;   /* instruction index of loop start */
+   int      break_fixups[NV_ISEL_MAX_BREAKS];
+   unsigned num_breaks;
+};
+
+static struct nv_isel_loop_ctx nv_isel_loops[NV_ISEL_MAX_LOOP_DEPTH];
+static int nv_isel_loop_depth;
+
 /*
  * Spill model: spilled SSA values live in per-thread local memory (LMEM) at
  * byte offset (spill_slot * 4).  Address is built as MOV R254, imm_offset then
@@ -1091,13 +1105,151 @@ isel_instr(struct nv_sass_buf *sb, nir_instr *instr)
       return isel_load_const(sb, nir_instr_as_load_const(instr));
    case nir_instr_type_undef:
    case nir_instr_type_phi:
-   case nir_instr_type_jump:
    case nir_instr_type_call:
    case nir_instr_type_deref:
       return true;
+   case nir_instr_type_jump: {
+      nir_jump_instr *jump = nir_instr_as_jump(instr);
+      if (jump->type == nir_jump_break && nv_isel_loop_depth > 0) {
+         struct nv_isel_loop_ctx *lc = &nv_isel_loops[nv_isel_loop_depth - 1];
+         if (lc->num_breaks < NV_ISEL_MAX_BREAKS) {
+            int fx = nv_sass_emit_bra_fwd(sb, 7 /* PT */, false);
+            if (fx >= 0)
+               lc->break_fixups[lc->num_breaks++] = fx;
+         }
+      } else if (jump->type == nir_jump_continue && nv_isel_loop_depth > 0) {
+         struct nv_isel_loop_ctx *lc = &nv_isel_loops[nv_isel_loop_depth - 1];
+         int32_t back = (int32_t)lc->loop_top_insn -
+                        (int32_t)nv_sass_current_insn(sb) - 1;
+         nv_sass_emit_bra_pred(sb, back, 7, false);
+      }
+      return true;
+   }
    default:
       return true;
    }
+}
+
+/* Forward-declare cf_list walker for recursive nesting. */
+static bool isel_cf_list(struct nv_sass_buf *sb, struct exec_list *cf_list);
+
+static bool
+isel_block(struct nv_sass_buf *sb, nir_block *block)
+{
+   nir_foreach_instr (instr, block) {
+      if (!isel_instr(sb, instr))
+         return false;
+   }
+   return true;
+}
+
+static bool
+isel_if(struct nv_sass_buf *sb, nir_if *nif)
+{
+   /* Emit ISETP/FSETP for condition, then predicated BRA around then/else.
+    * P0 = condition SSA (already lowered to a 0/!0 int by NIR).
+    * Layout: ISETP P0,cond  / BRA.!P0 else_label / <then> / BRA end_label /
+    *         else_label: <else> / end_label: ... */
+   uint8_t cond_reg = src_reg_reload(sb, &nif->condition);
+   int else_fixup, end_fixup;
+   bool has_else;
+
+   /* Set predicate P0 from cond_reg (nonzero = true) */
+   if (!nv_sass_emit_isetp(sb, 0, cond_reg, 0xff /* RZ */,
+                           false /* eq test */, false /* unsigned */))
+      return false;
+
+   /* BRA.!P0 -> else_label (or end_label if no else block) */
+   else_fixup = nv_sass_emit_bra_fwd(sb, 0, true /* invert P0 */);
+   if (else_fixup < 0)
+      return false;
+
+   /* Emit then-block instructions */
+   if (!isel_cf_list(sb, &nif->then_list))
+      return false;
+
+   /* Check if else list has any real instructions */
+   has_else = !exec_list_is_empty(&nif->else_list);
+   if (has_else) {
+      /* BRA -> end_label (skip else) */
+      end_fixup = nv_sass_emit_bra_fwd(sb, 7 /* PT = always true */, false);
+      if (end_fixup < 0)
+         return false;
+
+      /* Patch else_fixup to here */
+      nv_sass_patch_bra(sb, else_fixup);
+
+      /* Emit else-block instructions */
+      if (!isel_cf_list(sb, &nif->else_list))
+         return false;
+
+      /* Patch end_fixup to here */
+      nv_sass_patch_bra(sb, end_fixup);
+   } else {
+      /* No else: patch else_fixup to here */
+      nv_sass_patch_bra(sb, else_fixup);
+   }
+
+   return true;
+}
+
+static bool
+isel_loop(struct nv_sass_buf *sb, nir_loop *loop)
+{
+   struct nv_isel_loop_ctx *lc;
+   int32_t back_edge;
+   unsigned i;
+
+   if (nv_isel_loop_depth >= NV_ISEL_MAX_LOOP_DEPTH)
+      return false;
+   lc = &nv_isel_loops[nv_isel_loop_depth];
+   lc->loop_top_insn = nv_sass_current_insn(sb);
+   lc->num_breaks = 0;
+   nv_isel_loop_depth++;
+
+   if (!isel_cf_list(sb, &loop->body)) {
+      nv_isel_loop_depth--;
+      return false;
+   }
+
+   /* Back-edge: BRA to loop_top (always taken, P7=PT) */
+   back_edge = (int32_t)lc->loop_top_insn -
+               (int32_t)nv_sass_current_insn(sb) - 1;
+   if (!nv_sass_emit_bra_pred(sb, back_edge, 7, false)) {
+      nv_isel_loop_depth--;
+      return false;
+   }
+
+   /* Patch all break fixups to here (instruction after back-edge BRA) */
+   for (i = 0; i < lc->num_breaks; i++)
+      nv_sass_patch_bra(sb, lc->break_fixups[i]);
+
+   nv_isel_loop_depth--;
+   return true;
+}
+
+static bool
+isel_cf_list(struct nv_sass_buf *sb, struct exec_list *cf_list)
+{
+   foreach_list_typed(nir_cf_node, node, node, cf_list) {
+      switch (node->type) {
+      case nir_cf_node_block:
+         if (!isel_block(sb, nir_cf_node_as_block(node)))
+            return false;
+         break;
+      case nir_cf_node_if:
+         if (!isel_if(sb, nir_cf_node_as_if(node)))
+            return false;
+         break;
+      case nir_cf_node_loop:
+         if (!isel_loop(sb, nir_cf_node_as_loop(node)))
+            return false;
+         break;
+      default:
+         break;
+      }
+   }
+   return true;
 }
 
 static bool
@@ -1118,18 +1270,15 @@ isel_shader(struct nv_sass_buf *sb, const nir_shader *nir,
       nv_isel_ra = NULL;
    }
    nv_isel_last_bary_mode = NV_SASS_IPA_MODE_SMOOTH;
+   nv_isel_loop_depth = 0;
 
    nir_foreach_function (func, nir) {
       if (!func->impl)
          continue;
       nir_index_ssa_defs(func->impl);
-      nir_foreach_block (block, func->impl) {
-         nir_foreach_instr (instr, block) {
-            if (!isel_instr(sb, instr)) {
-               nv_isel_ra = prev_ra;
-               return false;
-            }
-         }
+      if (!isel_cf_list(sb, &func->impl->body))  {
+         nv_isel_ra = prev_ra;
+         return false;
       }
    }
 
